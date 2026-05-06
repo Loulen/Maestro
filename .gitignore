@@ -29,6 +29,11 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/playwright/.cache/
 
+# Personal agent context — not shared with the team
+CLAUDE.md
+CLAUDE.local.md
+docs/agents/
+
 # Env files at any path
 .env
 .env.local
