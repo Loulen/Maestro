@@ -610,12 +610,12 @@ async fn get_run_events(
     Json(events).into_response()
 }
 
-fn find_node_type(run_state: &event_log::RunState, node_id: &str) -> Option<String> {
+fn find_node_type<'a>(run_state: &'a event_log::RunState, node_id: &str) -> Option<&'a str> {
     run_state
         .node_defs
         .iter()
         .find(|nd| nd.id == node_id)
-        .map(|nd| nd.node_type.clone())
+        .map(|nd| nd.node_type.as_str())
 }
 
 async fn node_done(
@@ -642,7 +642,6 @@ async fn node_done(
         }
     };
 
-    let node_type = find_node_type(&pre_run_state, &node_id);
     let worktree_dir = state
         .repo_root
         .join(".maestro")
@@ -650,8 +649,8 @@ async fn node_done(
         .join(&run_id)
         .join("worktree");
 
-    if let Some(ref nt) = node_type {
-        if nt == "code-mutating" {
+    match find_node_type(&pre_run_state, &node_id) {
+        Some("code-mutating") => {
             let sub_wt_dir = sub_worktree_path(&state.repo_root, &run_id, &node_id, iter);
             let sub_branch = sub_worktree_branch(&run_id, &node_id, iter);
 
@@ -704,48 +703,48 @@ async fn node_done(
                     error!("failed to commit/merge sub-worktree for {node_id}: {e}");
                 }
             }
-        } else if nt == "doc-only" {
-            match worktree_has_tracked_changes(&worktree_dir) {
-                Ok(true) => {
-                    let fail_event = event_log::Event {
-                        id: None,
-                        run_id: run_id.clone(),
-                        ts: event_log::now_iso(),
-                        kind: event_log::EventKind::NodeFailed,
-                        node_id: Some(node_id.clone()),
-                        iter: Some(iter),
-                        payload: Some(serde_json::json!({
-                            "reason": "doc_violated_code_immutability"
-                        })),
-                    };
-                    let _ = append_event(&state, &fail_event).await;
-
-                    let run_failed = event_log::Event {
-                        id: None,
-                        run_id: run_id.clone(),
-                        ts: event_log::now_iso(),
-                        kind: event_log::EventKind::RunFailed,
-                        node_id: None,
-                        iter: None,
-                        payload: Some(serde_json::json!({
-                            "reason": format!("doc-only node {node_id} violated code immutability")
-                        })),
-                    };
-                    let _ = append_event(&state, &run_failed).await;
-
-                    warn!("Doc-only node {node_id} modified tracked files in run {run_id}");
-                    return (
-                        StatusCode::OK,
-                        Json(serde_json::json!({ "status": "doc_violated_code_immutability" })),
-                    )
-                        .into_response();
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!("Could not check worktree cleanliness for {node_id}: {e}");
-                }
-            }
         }
+        Some("doc-only") => match worktree_has_tracked_changes(&worktree_dir) {
+            Ok(true) => {
+                let fail_event = event_log::Event {
+                    id: None,
+                    run_id: run_id.clone(),
+                    ts: event_log::now_iso(),
+                    kind: event_log::EventKind::NodeFailed,
+                    node_id: Some(node_id.clone()),
+                    iter: Some(iter),
+                    payload: Some(serde_json::json!({
+                        "reason": "doc_violated_code_immutability"
+                    })),
+                };
+                let _ = append_event(&state, &fail_event).await;
+
+                let run_failed = event_log::Event {
+                    id: None,
+                    run_id: run_id.clone(),
+                    ts: event_log::now_iso(),
+                    kind: event_log::EventKind::RunFailed,
+                    node_id: None,
+                    iter: None,
+                    payload: Some(serde_json::json!({
+                        "reason": format!("doc-only node {node_id} violated code immutability")
+                    })),
+                };
+                let _ = append_event(&state, &run_failed).await;
+
+                warn!("Doc-only node {node_id} modified tracked files in run {run_id}");
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "status": "doc_violated_code_immutability" })),
+                )
+                    .into_response();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!("Could not check worktree cleanliness for {node_id}: {e}");
+            }
+        },
+        _ => {}
     }
 
     let event = event_log::Event {
@@ -2393,12 +2392,8 @@ mod tests {
         };
         append_event(&state, &node_started).await.unwrap();
 
-        // Verify that find_node_type works
         let events = load_events(&state.db, run_id).await.unwrap();
         let run_state = event_log::project(&events).unwrap();
-        assert_eq!(
-            find_node_type(&run_state, "impl-1"),
-            Some("code-mutating".into())
-        );
+        assert_eq!(find_node_type(&run_state, "impl-1"), Some("code-mutating"));
     }
 }
