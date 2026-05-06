@@ -1,0 +1,131 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@font-face {
+  font-family: "Geist";
+  src: url("https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-mono/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@theme {
+  /* Maestro surfaces */
+  --color-bg-0: #0a0c10;
+  --color-bg-1: #0f1115;
+  --color-bg-2: #14171d;
+  --color-bg-3: #1a1e25;
+  --color-bg-4: #232831;
+  --color-bg-5: #2c323d;
+
+  /* Maestro lines */
+  --color-line: #1f242c;
+  --color-line-strong: #2a313b;
+  --color-line-soft: #181c22;
+
+  /* Maestro text */
+  --color-fg: #e6e8eb;
+  --color-fg-2: #aab1bd;
+  --color-fg-3: #767e8c;
+  --color-fg-4: #525a68;
+  --color-fg-5: #383e48;
+
+  /* Maestro accent */
+  --color-acc: #10b981;
+  --color-acc-dim: #0e8f66;
+  --color-acc-bg: rgba(16, 185, 129, 0.12);
+  --color-acc-border: rgba(16, 185, 129, 0.32);
+
+  /* Maestro status */
+  --color-st-running: #3b82f6;
+  --color-st-running-bg: rgba(59, 130, 246, 0.14);
+  --color-st-await: #f59e0b;
+  --color-st-await-bg: rgba(245, 158, 11, 0.14);
+  --color-st-done: #10b981;
+  --color-st-done-bg: rgba(16, 185, 129, 0.14);
+  --color-st-blocked: #f97316;
+  --color-st-blocked-bg: rgba(249, 115, 22, 0.14);
+  --color-st-failed: #ef4444;
+  --color-st-failed-bg: rgba(239, 68, 68, 0.14);
+  --color-st-archived: #6b7280;
+  --color-st-pending: #4b5563;
+
+  /* Edit-mode chrome */
+  --color-edit-tint: #a78bfa;
+
+  /* Typography */
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --color-background: var(--color-bg-1);
+  --color-foreground: var(--color-fg);
+  --color-card: var(--color-bg-2);
+  --color-card-foreground: var(--color-fg);
+  --color-popover: var(--color-bg-2);
+  --color-popover-foreground: var(--color-fg);
+  --color-primary: var(--color-acc);
+  --color-primary-foreground: #04140d;
+  --color-secondary: var(--color-bg-3);
+  --color-secondary-foreground: var(--color-fg);
+  --color-muted: var(--color-bg-3);
+  --color-muted-foreground: var(--color-fg-3);
+  --color-accent: var(--color-bg-3);
+  --color-accent-foreground: var(--color-fg);
+  --color-destructive: var(--color-st-failed);
+  --color-border: var(--color-line);
+  --color-input: var(--color-line-strong);
+  --color-ring: var(--color-acc);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-fg);
+  background: var(--color-bg-1);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv11";
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+}

@@ -1,0 +1,88 @@
+import { useDaemonSocket } from "./hooks/useDaemonSocket";
+import type { ConnectionStatus } from "./hooks/useDaemonSocket";
+import { Pencil } from "lucide-react";
+
+export default function App() {
+  const { status } = useDaemonSocket();
+
+  return (
+    <div className="flex h-full flex-col bg-bg-1 text-fg">
+      <TopBar />
+      <main className="flex min-h-0 flex-1">
+        <div className="flex flex-1 items-center justify-center text-fg-3">
+          {/* Panels will be added in subsequent slices */}
+        </div>
+      </main>
+      <StatusBar status={status} />
+    </div>
+  );
+}
+
+function TopBar() {
+  return (
+    <header
+      className="flex h-[44px] shrink-0 items-center gap-3 border-b border-line bg-bg-2 px-3"
+      style={{ fontSize: "12.5px" }}
+    >
+      <div className="flex items-center gap-2 border-r border-line pr-3 font-semibold tracking-tight text-fg">
+        <span className="grid h-[18px] w-[18px] place-items-center text-acc">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path
+              d="M7 1L12.5 4.5V9.5L7 13L1.5 9.5V4.5L7 1Z"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+            />
+            <circle cx="7" cy="7" r="2" fill="currentColor" />
+          </svg>
+        </span>
+        Maestro
+      </div>
+
+      <nav className="flex min-w-0 flex-1 items-center gap-1.5 text-fg-3" style={{ fontSize: "12.5px" }}>
+        <span className="rounded border border-line-strong bg-bg-3 px-1.5 py-0.5 text-fg-2" style={{ fontSize: "11px", fontWeight: 500 }}>
+          Run
+        </span>
+      </nav>
+
+      <div className="ml-auto flex items-center gap-1">
+        <button
+          className="grid h-7 w-7 place-items-center rounded-md border border-transparent bg-transparent text-fg-3 transition-colors hover:bg-bg-3 hover:text-fg"
+          title="Toggle edit mode"
+        >
+          <Pencil size={14} />
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function StatusBar({ status }: { status: ConnectionStatus }) {
+  const dotClass =
+    status === "connected"
+      ? "bg-st-done"
+      : status === "reconnecting"
+        ? "bg-st-await"
+        : "bg-st-failed";
+
+  const label =
+    status === "connected"
+      ? "Daemon: connected"
+      : status === "reconnecting"
+        ? "Daemon: reconnecting…"
+        : "Daemon: disconnected";
+
+  return (
+    <footer
+      className="flex h-[22px] shrink-0 items-center gap-3.5 border-t border-line bg-bg-2 px-3 font-mono text-fg-3"
+      style={{ fontSize: "11px" }}
+    >
+      <span className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
+        {label}
+      </span>
+      <span className="flex-1" />
+      <span>v0.1.0</span>
+    </footer>
+  );
+}
