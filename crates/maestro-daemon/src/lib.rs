@@ -1426,6 +1426,7 @@ struct PaneResponse {
     content: String,
     session_name: String,
     resumed: bool,
+    stale: bool,
 }
 
 async fn node_pane(
@@ -1458,12 +1459,14 @@ async fn node_pane(
 
     let session_name = tmux_session_manager::node_session_name(&run_id, &node_id, iter);
     let is_latest_iter = node_state.iter == iter;
+    let stale = !is_latest_iter;
 
     if let Some(content) = tmux_session_manager::capture(&session_name) {
         return Json(PaneResponse {
             content,
             session_name,
             resumed: false,
+            stale,
         })
         .into_response();
     }
@@ -1492,6 +1495,7 @@ async fn node_pane(
                     content: "Session no longer available".to_string(),
                     session_name,
                     resumed: false,
+                    stale: false,
                 })
                 .into_response();
             }
@@ -1506,6 +1510,7 @@ async fn node_pane(
                 content,
                 session_name,
                 resumed: true,
+                stale: false,
             })
             .into_response();
         }
@@ -1516,6 +1521,7 @@ async fn node_pane(
         content: "Session no longer available".to_string(),
         session_name,
         resumed: false,
+        stale,
     })
     .into_response()
 }
@@ -4110,6 +4116,34 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["content"], "Session no longer available");
         assert_eq!(json["resumed"], false);
+        assert_eq!(
+            json["stale"], true,
+            "non-latest iter should be marked stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_latest_iter_is_not_stale() {
+        let state = test_state().await;
+        seed_running_run(&state, "pane-latest-stale", "worker").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/pane-latest-stale/nodes/worker/pane?iter=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["stale"], false, "latest iter should not be stale");
     }
 
     // -----------------------------------------------------------------------

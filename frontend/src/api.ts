@@ -48,6 +48,7 @@ export interface PaneResponse {
   content: string;
   session_name: string;
   resumed: boolean;
+  stale: boolean;
 }
 
 export async function fetchPrompt(

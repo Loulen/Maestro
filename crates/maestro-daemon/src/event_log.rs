@@ -73,6 +73,14 @@ pub enum NodeStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IterationInfo {
+    pub iter: i64,
+    pub status: NodeStatus,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeState {
     pub node_id: String,
     pub status: NodeStatus,
@@ -80,6 +88,8 @@ pub struct NodeState {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub iterations: Vec<IterationInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +120,20 @@ impl RunState {
             edges: Vec::new(),
             node_defs: Vec::new(),
         }
+    }
+}
+
+fn upsert_iteration(iterations: &mut Vec<IterationInfo>, new: IterationInfo) {
+    if let Some(existing) = iterations.iter_mut().find(|i| i.iter == new.iter) {
+        existing.status = new.status;
+        if new.started_at.is_some() {
+            existing.started_at = new.started_at;
+        }
+        if new.completed_at.is_some() {
+            existing.completed_at = new.completed_at;
+        }
+    } else {
+        iterations.push(new);
     }
 }
 
@@ -149,17 +173,31 @@ pub fn project(events: &[Event]) -> Option<RunState> {
             }
             EventKind::NodeStarted => {
                 if let Some(ref node_id) = event.node_id {
-                    state.nodes.insert(
-                        node_id.clone(),
-                        NodeState {
+                    let iter = event.iter.unwrap_or(1);
+                    let iteration = IterationInfo {
+                        iter,
+                        status: NodeStatus::Running,
+                        started_at: Some(event.ts.clone()),
+                        completed_at: None,
+                    };
+                    let node = state
+                        .nodes
+                        .entry(node_id.clone())
+                        .or_insert_with(|| NodeState {
                             node_id: node_id.clone(),
                             status: NodeStatus::Running,
-                            iter: event.iter.unwrap_or(1),
+                            iter,
                             started_at: Some(event.ts.clone()),
                             completed_at: None,
                             failure_reason: None,
-                        },
-                    );
+                            iterations: Vec::new(),
+                        });
+                    node.status = NodeStatus::Running;
+                    node.iter = iter;
+                    node.started_at = Some(event.ts.clone());
+                    node.completed_at = None;
+                    node.failure_reason = None;
+                    upsert_iteration(&mut node.iterations, iteration);
                 }
             }
             EventKind::NodeCompleted => {
@@ -167,6 +205,11 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                     if let Some(node) = state.nodes.get_mut(node_id) {
                         node.status = NodeStatus::Completed;
                         node.completed_at = Some(event.ts.clone());
+                        let iter = event.iter.unwrap_or(node.iter);
+                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
+                            it.status = NodeStatus::Completed;
+                            it.completed_at = Some(event.ts.clone());
+                        }
                     }
                 }
             }
@@ -174,6 +217,10 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                 if let Some(ref node_id) = event.node_id {
                     if let Some(node) = state.nodes.get_mut(node_id) {
                         node.status = NodeStatus::AwaitingUser;
+                        let iter = event.iter.unwrap_or(node.iter);
+                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
+                            it.status = NodeStatus::AwaitingUser;
+                        }
                     }
                 }
             }
@@ -187,6 +234,11 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                                 .get("reason")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
+                        }
+                        let iter = event.iter.unwrap_or(node.iter);
+                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
+                            it.status = NodeStatus::Failed;
+                            it.completed_at = Some(event.ts.clone());
                         }
                     }
                 }
@@ -214,6 +266,15 @@ pub fn project(events: &[Event]) -> Option<RunState> {
             EventKind::RunArchived => {
                 state.status = RunStatus::Archived;
             }
+        }
+    }
+
+    // Sort iterations by iter number and reconcile top-level iter
+    // (handles out-of-order events)
+    for node in state.nodes.values_mut() {
+        node.iterations.sort_by_key(|i| i.iter);
+        if let Some(max_iter) = node.iterations.last() {
+            node.iter = max_iter.iter;
         }
     }
 
@@ -453,5 +514,225 @@ mod tests {
         // Format: YYYYMMDD-HHMMSS-<7char>
         assert!(id.len() >= 22, "run-id too short: {id}");
         assert!(id.contains('-'));
+    }
+
+    // --- Multi-iteration projection tests (issue #29) ---
+
+    fn make_event_ts(kind: EventKind, node_id: Option<&str>, iter: Option<i64>, ts: &str) -> Event {
+        Event {
+            id: None,
+            run_id: "run-1".into(),
+            ts: ts.into(),
+            kind,
+            node_id: node_id.map(String::from),
+            iter,
+            payload: None,
+        }
+    }
+
+    #[test]
+    fn single_iter_node_has_one_iteration_entry() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "test" }),
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("planner"),
+                Some(1),
+                "2026-01-01T00:01:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeCompleted,
+                Some("planner"),
+                Some(1),
+                "2026-01-01T00:02:00.000Z",
+            ),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["planner"];
+        assert_eq!(node.iterations.len(), 1);
+        assert_eq!(node.iterations[0].iter, 1);
+        assert_eq!(node.iterations[0].status, NodeStatus::Completed);
+        assert_eq!(
+            node.iterations[0].started_at.as_deref(),
+            Some("2026-01-01T00:01:00.000Z")
+        );
+        assert_eq!(
+            node.iterations[0].completed_at.as_deref(),
+            Some("2026-01-01T00:02:00.000Z")
+        );
+    }
+
+    #[test]
+    fn multi_iter_cycle_produces_ordered_iterations() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "cycle-test" }),
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("reviewer"),
+                Some(1),
+                "2026-01-01T00:01:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeCompleted,
+                Some("reviewer"),
+                Some(1),
+                "2026-01-01T00:02:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("reviewer"),
+                Some(2),
+                "2026-01-01T00:03:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeCompleted,
+                Some("reviewer"),
+                Some(2),
+                "2026-01-01T00:04:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("reviewer"),
+                Some(3),
+                "2026-01-01T00:05:00.000Z",
+            ),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["reviewer"];
+
+        assert_eq!(node.iter, 3, "top-level iter should be the latest");
+        assert_eq!(
+            node.status,
+            NodeStatus::Running,
+            "current status is running"
+        );
+        assert_eq!(node.iterations.len(), 3);
+
+        assert_eq!(node.iterations[0].iter, 1);
+        assert_eq!(node.iterations[0].status, NodeStatus::Completed);
+
+        assert_eq!(node.iterations[1].iter, 2);
+        assert_eq!(node.iterations[1].status, NodeStatus::Completed);
+
+        assert_eq!(node.iterations[2].iter, 3);
+        assert_eq!(node.iterations[2].status, NodeStatus::Running);
+        assert!(node.iterations[2].completed_at.is_none());
+    }
+
+    #[test]
+    fn multi_iter_with_failed_iteration() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "fail-iter" }),
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("impl"),
+                Some(1),
+                "2026-01-01T00:01:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeCompleted,
+                Some("impl"),
+                Some(1),
+                "2026-01-01T00:02:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("impl"),
+                Some(2),
+                "2026-01-01T00:03:00.000Z",
+            ),
+            {
+                let mut e = make_event_ts(
+                    EventKind::NodeFailed,
+                    Some("impl"),
+                    Some(2),
+                    "2026-01-01T00:04:00.000Z",
+                );
+                e.payload = Some(serde_json::json!({ "reason": "test failure" }));
+                e
+            },
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["impl"];
+
+        assert_eq!(node.iterations.len(), 2);
+        assert_eq!(node.iterations[0].status, NodeStatus::Completed);
+        assert_eq!(node.iterations[1].status, NodeStatus::Failed);
+    }
+
+    #[test]
+    fn out_of_order_node_started_events_still_project_correctly() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "ooo" }),
+            ),
+            // iter 2 event arrives before iter 1 completes (out-of-order)
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("worker"),
+                Some(2),
+                "2026-01-01T00:03:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeStarted,
+                Some("worker"),
+                Some(1),
+                "2026-01-01T00:01:00.000Z",
+            ),
+            make_event_ts(
+                EventKind::NodeCompleted,
+                Some("worker"),
+                Some(1),
+                "2026-01-01T00:02:00.000Z",
+            ),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["worker"];
+
+        // iterations should be sorted by iter number
+        assert_eq!(node.iterations.len(), 2);
+        assert_eq!(node.iterations[0].iter, 1);
+        assert_eq!(node.iterations[0].status, NodeStatus::Completed);
+        assert_eq!(node.iterations[1].iter, 2);
+        assert_eq!(node.iterations[1].status, NodeStatus::Running);
+
+        // top-level iter reflects the highest
+        assert_eq!(node.iter, 2);
+    }
+
+    #[test]
+    fn existing_tests_still_get_empty_iterations_for_single_iter() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "compat" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("worker"), Some(1)),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["worker"];
+        // Even single-iter nodes have exactly 1 iteration entry
+        assert_eq!(node.iterations.len(), 1);
     }
 }

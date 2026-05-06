@@ -264,6 +264,7 @@ mod tests {
             started_at: Some("t0".into()),
             completed_at: Some("t1".into()),
             failure_reason: None,
+            iterations: Vec::new(),
         }
     }
 
@@ -275,6 +276,7 @@ mod tests {
             started_at: Some("t0".into()),
             completed_at: Some("t1".into()),
             failure_reason: None,
+            iterations: Vec::new(),
         }
     }
 
@@ -286,6 +288,7 @@ mod tests {
             started_at: Some("t0".into()),
             completed_at: None,
             failure_reason: None,
+            iterations: Vec::new(),
         }
     }
 
