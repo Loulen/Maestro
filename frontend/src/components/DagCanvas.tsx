@@ -259,7 +259,6 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
         selected: ns.node_id === selectedNodeId,
       }));
 
-  // Start pseudo-node
   const startNodes: Node[] = [];
   if (run.start_node) {
     const targetNodes = nodes.filter((n) =>

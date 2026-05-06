@@ -40,7 +40,6 @@ export default function StartInspector({ startNode, runId }: Props) {
 
   return (
     <aside className="start-inspector flex h-full flex-col bg-bg-2">
-      {/* Header */}
       <div className="border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
           <span className="font-medium text-fg" style={{ fontSize: "12.5px" }}>
@@ -61,7 +60,6 @@ export default function StartInspector({ startNode, runId }: Props) {
         </div>
       </div>
 
-      {/* Body — input text inline */}
       <div className="flex-1 overflow-auto p-3">
         <div
           className="mb-2 text-fg-3"
@@ -79,7 +77,6 @@ export default function StartInspector({ startNode, runId }: Props) {
         </pre>
       </div>
 
-      {/* Footer — View as markdown link */}
       <div className="border-t border-line px-3 py-2">
         <button
           onClick={() => setModalOpen(true)}
