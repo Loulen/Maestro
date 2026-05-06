@@ -75,7 +75,7 @@ struct RunListEntry {
 
 #[derive(Serialize)]
 struct PipelineVariableInfo {
-    var_type: String,
+    var_type: pipeline::VariableType,
     default: serde_json::Value,
 }
 
@@ -712,10 +712,9 @@ fn collect_pipelines_from_dir(
         };
 
         let name = parsed.pipeline.name.clone();
-        if seen.contains(&name) {
+        if !seen.insert(name.clone()) {
             continue;
         }
-        seen.insert(name.clone());
 
         let variables: HashMap<String, PipelineVariableInfo> = parsed
             .pipeline
@@ -723,8 +722,13 @@ fn collect_pipelines_from_dir(
             .iter()
             .map(|(k, v)| {
                 let default = yaml_value_to_json(&v.default);
-                let var_type = format!("{:?}", v.var_type).to_lowercase();
-                (k.clone(), PipelineVariableInfo { var_type, default })
+                (
+                    k.clone(),
+                    PipelineVariableInfo {
+                        var_type: v.var_type.clone(),
+                        default,
+                    },
+                )
             })
             .collect();
 
@@ -2711,12 +2715,18 @@ mod tests {
         assert_eq!(entries[0].name, "my-pipe");
         assert_eq!(entries[0].kind, "repo");
         assert_eq!(entries[0].variables.len(), 2);
-        assert_eq!(entries[0].variables["max_iter"].var_type, "int");
+        assert_eq!(
+            entries[0].variables["max_iter"].var_type,
+            pipeline::VariableType::Int
+        );
         assert_eq!(
             entries[0].variables["max_iter"].default,
             serde_json::json!(5)
         );
-        assert_eq!(entries[0].variables["mode"].var_type, "string");
+        assert_eq!(
+            entries[0].variables["mode"].var_type,
+            pipeline::VariableType::String
+        );
         assert_eq!(
             entries[0].variables["mode"].default,
             serde_json::json!("strict")

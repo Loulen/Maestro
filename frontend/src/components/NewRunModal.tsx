@@ -25,13 +25,13 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
       .then((list) => {
         if (cancelled) return;
         setPipelines(list);
-        if (list.length > 0 && !selectedPipeline) {
-          setSelectedPipeline(list[0].name);
+        if (list.length > 0) {
+          setSelectedPipeline((prev) => prev || list[0].name);
         }
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [open, selectedPipeline]);
+  }, [open]);
 
   const currentPipeline = useMemo(
     () => pipelines.find((p) => p.name === selectedPipeline),

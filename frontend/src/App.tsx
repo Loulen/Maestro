@@ -86,11 +86,9 @@ export default function App() {
   const handleRunCreated = useCallback(
     (runId: string) => {
       refreshRuns();
-      setSelectedRunId(runId);
-      selectRun(runId);
-      setSelectedNodeId(null);
+      handleSelectRun(runId);
     },
-    [refreshRuns, selectRun],
+    [refreshRuns, handleSelectRun],
   );
 
   // Subscribe to events — refresh runs list and selected run
