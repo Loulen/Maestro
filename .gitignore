@@ -18,6 +18,12 @@ Cargo.lock.*
 .sandcastle/worktrees/
 .sandcastle/.env
 
+# Maestro runtime state (event log SQLite — never committed)
+.maestro/maestro.db
+.maestro/maestro.db-journal
+.maestro/maestro.db-wal
+.maestro/maestro.db-shm
+
 # Env files at any path
 .env
 .env.local
