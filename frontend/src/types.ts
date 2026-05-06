@@ -9,6 +9,13 @@ export interface RunListEntry {
   started_at: string | null;
 }
 
+export interface IterationInfo {
+  iter: number;
+  status: NodeStatus;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export interface NodeState {
   node_id: string;
   status: NodeStatus;
@@ -16,6 +23,7 @@ export interface NodeState {
   started_at: string | null;
   completed_at: string | null;
   failure_reason: string | null;
+  iterations: IterationInfo[];
 }
 
 export interface EdgeInfo {

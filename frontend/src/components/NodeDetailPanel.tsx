@@ -4,9 +4,10 @@ import {
   ExternalLink,
   CheckCircle,
   AlertCircle,
+  ChevronDown,
 } from "lucide-react";
 import Convert from "ansi-to-html";
-import type { NodeState, NodeStatus } from "../types";
+import type { IterationInfo, NodeState, NodeStatus } from "../types";
 import {
   markNodeDone,
   attachSession,
@@ -20,6 +21,12 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "./ui/resizable";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "./ui/dropdown-menu";
 import MarkdownArtifactModal from "./MarkdownArtifactModal";
 
 const STATUS_LABELS: Record<NodeStatus, string> = {
@@ -70,18 +77,50 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
   const [inputs, setInputs] = useState<PortIO[]>([]);
   const [outputs, setOutputs] = useState<PortIO[]>([]);
   const [modal, setModal] = useState<ModalState | null>(null);
+  const [userSelectedIter, setUserSelectedIter] = useState<{
+    nodeId: string;
+    iter: number;
+  } | null>(null);
   const terminalRef = useRef<HTMLPreElement>(null);
-  const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
+
+  // Use the user's explicit selection if it matches the current node,
+  // otherwise default to the latest iter.
+  const selectedIter =
+    userSelectedIter?.nodeId === node.node_id
+      ? userSelectedIter.iter
+      : node.iter;
+
+  const setSelectedIter = useCallback(
+    (iter: number) => {
+      setUserSelectedIter({ nodeId: node.node_id, iter });
+    },
+    [node.node_id],
+  );
+
+  const sessionName = `maestro-${runId}-${node.node_id}-iter-${selectedIter}`;
   const interval = pollInterval(node.status);
+  const isStaleIter = selectedIter !== node.iter;
+  const hasMultipleIters = (node.iterations?.length ?? 0) > 1;
 
   useEffect(() => {
+    if (isStaleIter) {
+      // For stale iters, fetch once — no live polling
+      let cancelled = false;
+      fetchPane(runId, node.node_id, selectedIter)
+        .then((resp) => {
+          if (!cancelled) setTerminalHtml(ansiConverter.toHtml(resp.content));
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }
+
     if (interval === null) return;
 
     let cancelled = false;
 
     async function poll() {
       try {
-        const resp = await fetchPane(runId, node.node_id, node.iter);
+        const resp = await fetchPane(runId, node.node_id, selectedIter);
         if (!cancelled) {
           setTerminalHtml(ansiConverter.toHtml(resp.content));
         }
@@ -96,16 +135,16 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [interval, node.node_id, node.iter, runId]);
+  }, [interval, node.node_id, selectedIter, runId, isStaleIter]);
 
-  const shouldFetchPrompt = node.status !== "pending";
+  const shouldFetchPrompt = node.status !== "pending" || isStaleIter;
 
   useEffect(() => {
     if (!shouldFetchPrompt) return;
 
     let cancelled = false;
 
-    fetchPrompt(runId, node.node_id, node.iter)
+    fetchPrompt(runId, node.node_id, selectedIter)
       .then((text) => {
         if (!cancelled) setPromptText(text);
       })
@@ -116,17 +155,30 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [runId, node.node_id, node.iter, shouldFetchPrompt]);
+  }, [runId, node.node_id, selectedIter, shouldFetchPrompt]);
 
   // Fetch IO at the same cadence as terminal polling
   useEffect(() => {
+    if (isStaleIter) {
+      let cancelled = false;
+      fetchNodeIO(runId, node.node_id, selectedIter)
+        .then((io) => {
+          if (!cancelled) {
+            setInputs(io.inputs);
+            setOutputs(io.outputs);
+          }
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }
+
     if (interval === null) return;
 
     let cancelled = false;
 
     async function pollIO() {
       try {
-        const io = await fetchNodeIO(runId, node.node_id, node.iter);
+        const io = await fetchNodeIO(runId, node.node_id, selectedIter);
         if (!cancelled) {
           setInputs(io.inputs);
           setOutputs(io.outputs);
@@ -142,7 +194,7 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [interval, node.node_id, node.iter, runId]);
+  }, [interval, node.node_id, selectedIter, runId, isStaleIter]);
 
   // Auto-scroll terminal to bottom on content change
   useEffect(() => {
@@ -161,11 +213,11 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
 
   const handleMarkComplete = useCallback(async () => {
     try {
-      await markNodeDone(runId, node.node_id, node.iter);
+      await markNodeDone(runId, node.node_id, selectedIter);
     } catch (e) {
       console.error("Failed to mark node done:", e);
     }
-  }, [runId, node.node_id, node.iter]);
+  }, [runId, node.node_id, selectedIter]);
 
   const showOpenTerminal = node.status !== "pending";
 
@@ -185,12 +237,20 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
           </span>
         </div>
         <div
-          className="mt-0.5 font-mono text-fg-4"
+          className="mt-0.5 flex items-center gap-1 font-mono text-fg-4"
           style={{ fontSize: "10px" }}
         >
-          iter {node.iter}
-          {node.started_at && ` · started ${formatTime(node.started_at)}`}
-          {node.completed_at && ` · ended ${formatTime(node.completed_at)}`}
+          {hasMultipleIters ? (
+            <IterSelector
+              iterations={node.iterations}
+              selectedIter={selectedIter}
+              onSelect={setSelectedIter}
+            />
+          ) : (
+            <span>iter {node.iter}</span>
+          )}
+          {node.started_at && <span> · started {formatTime(node.started_at)}</span>}
+          {node.completed_at && <span> · ended {formatTime(node.completed_at)}</span>}
         </div>
       </div>
 
@@ -325,6 +385,63 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
         />
       )}
     </aside>
+  );
+}
+
+// --- Iter Selector ---
+
+const STATUS_DOTS: Record<NodeStatus, string> = {
+  pending: "bg-st-pending",
+  running: "bg-st-running",
+  awaiting_user: "bg-st-await",
+  completed: "bg-st-done",
+  failed: "bg-st-failed",
+};
+
+function IterSelector({
+  iterations,
+  selectedIter,
+  onSelect,
+}: {
+  iterations: IterationInfo[];
+  selectedIter: number;
+  onSelect: (iter: number) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        className="flex cursor-pointer items-center gap-0.5 rounded px-1 py-0.5 font-mono text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg-2"
+        style={{ fontSize: "10px" }}
+      >
+        iter {selectedIter}
+        <ChevronDown size={10} className="text-fg-4" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        className="min-w-[180px] rounded-md border border-line-strong bg-bg-3 p-1 shadow-lg"
+        side="bottom"
+        align="start"
+      >
+        {iterations.map((it) => (
+          <DropdownMenuItem
+            key={it.iter}
+            className={`flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-fg-2 transition-colors hover:bg-bg-4 ${
+              it.iter === selectedIter ? "bg-bg-4" : ""
+            }`}
+            style={{ fontSize: "11px" }}
+            onSelect={() => onSelect(it.iter)}
+          >
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOTS[it.status]}`}
+            />
+            <span className="font-mono">iter {it.iter}</span>
+            <span className="ml-auto font-mono text-fg-4" style={{ fontSize: "10px" }}>
+              {it.started_at ? formatTime(it.started_at) : ""}
+              {it.completed_at ? ` – ${formatTime(it.completed_at)}` : ""}
+            </span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
