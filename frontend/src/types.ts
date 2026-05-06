@@ -36,6 +36,12 @@ export interface NodeDefInfo {
   outputs: string[];
 }
 
+export interface StartNodeInfo {
+  input_path: string;
+  started_at: string;
+  target_node_ids: string[];
+}
+
 export interface RunState {
   run_id: string;
   status: RunStatus;
@@ -46,6 +52,7 @@ export interface RunState {
   nodes: Record<string, NodeState>;
   edges: EdgeInfo[];
   node_defs: NodeDefInfo[];
+  start_node: StartNodeInfo | null;
 }
 
 export interface DaemonEvent {

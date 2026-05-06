@@ -15,6 +15,7 @@ import TabBar from "./components/TabBar";
 import NodeInspector from "./components/NodeInspector";
 import EdgeInspector from "./components/EdgeInspector";
 import PipelineInspector from "./components/PipelineInspector";
+import StartInspector from "./components/StartInspector";
 import { useEditStore } from "./stores/editStore";
 import {
   ResizablePanelGroup,
@@ -225,14 +226,20 @@ export default function App() {
               </>
             ) : (
               <>
-                {selectedNode && selectedRun && (
+                {selectedNodeId === "__start" && selectedRun?.start_node && (
+                  <StartInspector
+                    startNode={selectedRun.start_node}
+                    runId={selectedRun.run_id}
+                  />
+                )}
+                {selectedNode && selectedRun && selectedNodeId !== "__start" && (
                   <NodeDetailPanel
                     node={selectedNode}
                     runId={selectedRun.run_id}
                     isArchived={isArchived}
                   />
                 )}
-                {!selectedNode && isArchived && selectedRun && (
+                {!selectedNode && selectedNodeId !== "__start" && isArchived && selectedRun && (
                   <aside className="flex h-full flex-col items-center justify-center bg-bg-2 text-fg-4" style={{ fontSize: "12px" }}>
                     <div className="text-center px-6">
                       <div className="font-medium text-fg-3">Run archived</div>

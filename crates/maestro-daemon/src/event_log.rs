@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +83,13 @@ pub struct NodeState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartNodeInfo {
+    pub input_path: String,
+    pub started_at: String,
+    pub target_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
     pub status: RunStatus,
@@ -95,6 +102,8 @@ pub struct RunState {
     pub edges: Vec<EdgeInfo>,
     #[serde(default)]
     pub node_defs: Vec<NodeDefInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_node: Option<StartNodeInfo>,
 }
 
 impl RunState {
@@ -109,8 +118,23 @@ impl RunState {
             nodes: HashMap::new(),
             edges: Vec::new(),
             node_defs: Vec::new(),
+            start_node: None,
         }
     }
+}
+
+fn entry_node_ids(edges: &[EdgeInfo], node_defs: &[NodeDefInfo]) -> Vec<String> {
+    let nodes_with_unconditional_incoming: HashSet<&str> = edges
+        .iter()
+        .filter(|e| e.target_node != "__halt__" && e.when_clause.is_none())
+        .map(|e| e.target_node.as_str())
+        .collect();
+
+    node_defs
+        .iter()
+        .filter(|n| !nodes_with_unconditional_incoming.contains(n.id.as_str()))
+        .map(|n| n.id.clone())
+        .collect()
 }
 
 pub fn project(events: &[Event]) -> Option<RunState> {
@@ -145,6 +169,12 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                             state.node_defs = parsed;
                         }
                     }
+
+                    state.start_node = Some(StartNodeInfo {
+                        input_path: "_input.md".to_string(),
+                        started_at: event.ts.clone(),
+                        target_node_ids: entry_node_ids(&state.edges, &state.node_defs),
+                    });
                 }
             }
             EventKind::NodeStarted => {
@@ -213,6 +243,7 @@ pub fn project(events: &[Event]) -> Option<RunState> {
             }
             EventKind::RunArchived => {
                 state.status = RunStatus::Archived;
+                state.start_node = None;
             }
         }
     }
@@ -453,5 +484,155 @@ mod tests {
         // Format: YYYYMMDD-HHMMSS-<7char>
         assert!(id.len() >= 22, "run-id too short: {id}");
         assert!(id.contains('-'));
+    }
+
+    // --- start_node projection (issue #30) ---
+
+    fn node_def(id: &str) -> serde_json::Value {
+        serde_json::json!({ "id": id, "node_type": "doc-only", "inputs": ["task"], "outputs": ["out"] })
+    }
+
+    fn edge_info(src: &str, tgt: &str) -> serde_json::Value {
+        serde_json::json!({
+            "source_node": src, "source_port": "out",
+            "target_node": tgt, "target_port": "task"
+        })
+    }
+
+    fn edge_info_conditional(src: &str, tgt: &str, when: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "source_node": src, "source_port": "out",
+            "target_node": tgt, "target_port": "task",
+            "when_clause": when
+        })
+    }
+
+    #[test]
+    fn start_node_single_entry() {
+        let events = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "linear",
+                "input": "hello world",
+                "node_defs": [node_def("planner"), node_def("implementer")],
+                "edges": [edge_info("planner", "implementer")],
+            }),
+        )];
+
+        let state = project(&events).unwrap();
+        let start = state.start_node.as_ref().unwrap();
+        assert_eq!(start.input_path, "_input.md");
+        assert_eq!(start.started_at, "2026-01-01T00:00:00.000Z");
+        assert_eq!(start.target_node_ids, vec!["planner"]);
+    }
+
+    #[test]
+    fn start_node_multiple_entry_nodes_fan_out() {
+        let events = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "fan-out",
+                "input": "build two things",
+                "node_defs": [node_def("impl-a"), node_def("impl-b"), node_def("merger")],
+                "edges": [
+                    edge_info("impl-a", "merger"),
+                    edge_info("impl-b", "merger"),
+                ],
+            }),
+        )];
+
+        let state = project(&events).unwrap();
+        let start = state.start_node.as_ref().unwrap();
+        let mut targets = start.target_node_ids.clone();
+        targets.sort();
+        assert_eq!(targets, vec!["impl-a", "impl-b"]);
+    }
+
+    #[test]
+    fn start_node_conditional_back_edge_not_counted() {
+        let events = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "cycle",
+                "input": "iterate",
+                "node_defs": [node_def("implementer"), node_def("reviewer")],
+                "edges": [
+                    edge_info("implementer", "reviewer"),
+                    edge_info_conditional("reviewer", "implementer", serde_json::json!({"iter": {"lt": 3}})),
+                ],
+            }),
+        )];
+
+        let state = project(&events).unwrap();
+        let start = state.start_node.as_ref().unwrap();
+        assert_eq!(start.target_node_ids, vec!["implementer"]);
+    }
+
+    #[test]
+    fn start_node_null_on_archived_run() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({
+                    "pipeline_name": "archived-test",
+                    "input": "test input",
+                    "node_defs": [node_def("only")],
+                    "edges": [],
+                }),
+            ),
+            make_event(EventKind::NodeStarted, Some("only"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("only"), Some(1)),
+            make_event(EventKind::RunCompleted, None, None),
+            make_event(EventKind::RunArchived, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Archived);
+        assert!(state.start_node.is_none());
+    }
+
+    #[test]
+    fn start_node_all_nodes_are_entry_when_no_edges() {
+        let events = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "isolated",
+                "input": "go",
+                "node_defs": [node_def("a"), node_def("b")],
+                "edges": [],
+            }),
+        )];
+
+        let state = project(&events).unwrap();
+        let start = state.start_node.as_ref().unwrap();
+        assert_eq!(start.target_node_ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn start_node_halt_edges_dont_block_entry() {
+        let events = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "with-halt",
+                "input": "test",
+                "node_defs": [node_def("reviewer")],
+                "edges": [{
+                    "source_node": "reviewer", "source_port": "review",
+                    "target_node": "__halt__", "target_port": "",
+                    "halt_message": "Blocked",
+                    "when_clause": {"iter": {"gte": 3}}
+                }],
+            }),
+        )];
+
+        let state = project(&events).unwrap();
+        let start = state.start_node.as_ref().unwrap();
+        assert_eq!(start.target_node_ids, vec!["reviewer"]);
     }
 }

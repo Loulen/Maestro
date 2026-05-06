@@ -40,6 +40,22 @@
 
 ## Steps the agent executes
 
+### Step 0b — Run start pseudo-node visible (refs #30)
+
+After selecting a Run in step 2, assert:
+
+- A **Start pseudo-node** (green play-button circle, `▶`) is visible to the
+  left of the `only` node in the DAG canvas.
+- Synthetic edges connect the Start node to each entry node (in this case,
+  just `only`).
+- Click the Start node → the right panel swaps to the **StartInspector**:
+  - Header reads **"Run start"** with subtitle **"runtime · pseudo-node"**
+    and a `runtime` badge.
+  - Body shows the user's submitted input (e.g. `hi`) inline as monospace
+    `<pre>` text.
+  - A **"View as markdown ↗"** link at the bottom opens the
+    `MarkdownArtifactModal` on `_input.md`.
+
 1. Open the UI; confirm the **`Daemon: connected`** label is visible.
 2. Open the **New Run** modal. Pick `run-minimal-scenario`. Provide any input
    string (e.g. `hello`). Click **Launch**. Capture the resulting `run_id`

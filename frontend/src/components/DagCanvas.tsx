@@ -14,7 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Pencil, Trash2 } from "lucide-react";
-import type { NodeStatus, NodeType, RunState, RunStatus } from "../types";
+import type { NodeStatus, NodeType, RunState, RunStatus, StartNodeInfo } from "../types";
 import { cleanupRun } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
 
@@ -154,7 +154,35 @@ function HaltNode(_props: NodeProps<Node<HaltNodeData>>) {
   );
 }
 
-const nodeTypes = { pipeline: PipelineNode, halt: HaltNode };
+interface StartNodeData {
+  [key: string]: unknown;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function StartNode(_props: NodeProps<Node<StartNodeData>>) {
+  return (
+    <div
+      className="start-node grid place-items-center rounded-full border-2 font-mono font-semibold"
+      style={{
+        width: 32,
+        height: 32,
+        borderColor: "var(--color-acc, #10b981)",
+        color: "var(--color-acc, #10b981)",
+        background: "var(--color-bg-3, #1e1f23)",
+        fontSize: "14px",
+      }}
+    >
+      &#x25B6;
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!bg-fg-4 !border-line !w-2 !h-2"
+      />
+    </div>
+  );
+}
+
+const nodeTypes = { pipeline: PipelineNode, halt: HaltNode, start: StartNode };
 
 const OP_SYMBOLS: Record<string, string> = {
   eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=",
@@ -185,9 +213,13 @@ interface Props {
   onToggleEdit?: (runId: string) => void;
 }
 
+const START_NODE_OFFSET_X = 180;
+
 function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
   const nodeDefs = run.node_defs ?? [];
   const nodeEntries = Object.values(run.nodes);
+  const hasStart = run.start_node != null;
+  const shiftX = hasStart ? START_NODE_OFFSET_X : 0;
 
   const nodes: Node[] = nodeDefs.length > 0
     ? nodeDefs.map((def, i) => {
@@ -198,7 +230,7 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
           id: def.id,
           type: "pipeline",
           position: {
-            x: def.view_x ?? 200,
+            x: (def.view_x ?? 200) + shiftX,
             y: def.view_y ?? 80 + i * 140,
           },
           data: {
@@ -215,7 +247,7 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
     : nodeEntries.map((ns, i) => ({
         id: ns.node_id,
         type: "pipeline",
-        position: { x: 200, y: 80 + i * 140 },
+        position: { x: 200 + shiftX, y: 80 + i * 140 },
         data: {
           label: ns.node_id,
           status: ns.status,
@@ -226,6 +258,30 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
         },
         selected: ns.node_id === selectedNodeId,
       }));
+
+  // Start pseudo-node
+  const startNodes: Node[] = [];
+  if (run.start_node) {
+    const targetNodes = nodes.filter((n) =>
+      run.start_node!.target_node_ids.includes(n.id),
+    );
+    const avgY =
+      targetNodes.length > 0
+        ? targetNodes.reduce((sum, n) => sum + n.position.y, 0) /
+          targetNodes.length
+        : 80;
+    const minX = targetNodes.length > 0
+      ? Math.min(...targetNodes.map((n) => n.position.x))
+      : 200 + shiftX;
+
+    startNodes.push({
+      id: "__start",
+      type: "start",
+      position: { x: minX - START_NODE_OFFSET_X, y: avgY },
+      data: {},
+      selected: "__start" === selectedNodeId,
+    });
+  }
 
   const edgeInfos = run.edges ?? [];
   const haltEdges = edgeInfos.filter((ei) => ei.target_node === "__halt__");
@@ -242,14 +298,38 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
     };
   });
 
-  return [...nodes, ...haltNodes];
+  return [...startNodes, ...nodes, ...haltNodes];
+}
+
+function deriveStartEdges(startNode: StartNodeInfo): Edge[] {
+  return startNode.target_node_ids.map((targetId, i) => ({
+    id: `start-e-${i}`,
+    source: "__start",
+    target: targetId,
+    sourceHandle: null,
+    targetHandle: null,
+    type: "default",
+    animated: false,
+    style: {
+      stroke: "var(--color-fg-4)",
+      strokeWidth: 1.5,
+    },
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      color: "var(--color-fg-4)",
+      width: 16,
+      height: 16,
+    },
+  }));
 }
 
 function deriveEdges(run: RunState): Edge[] {
   const edgeInfos = run.edges ?? [];
   const haltEdges = edgeInfos.filter((ei) => ei.target_node === "__halt__");
 
-  return edgeInfos.map((ei, i) => {
+  const startEdges = run.start_node ? deriveStartEdges(run.start_node) : [];
+
+  const pipelineEdges = edgeInfos.map((ei, i) => {
     const isHalt = ei.target_node === "__halt__";
     const isConditional = ei.when_clause != null;
     const isDashed = isHalt || isConditional;
@@ -303,6 +383,8 @@ function deriveEdges(run: RunState): Edge[] {
       labelBgPadding: [4, 2] as [number, number],
     };
   });
+
+  return [...startEdges, ...pipelineEdges];
 }
 
 function DagCanvasInner({
