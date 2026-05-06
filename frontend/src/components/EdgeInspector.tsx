@@ -1,11 +1,8 @@
 import { useEditStore } from "../stores/editStore";
 import type { EdgeDef, EdgeEndpoint } from "../types";
+import { SectionHead } from "./InspectorPrimitives";
+import { PREDICATES, PREDICATE_LABELS } from "../predicates";
 
-const PREDICATES = ["eq", "neq", "lt", "lte", "gt", "gte", "in", "not_in"] as const;
-const PRED_LABELS: Record<string, string> = {
-  eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=",
-  in: "in", not_in: "not in",
-};
 
 interface WhenClause {
   field: string;
@@ -263,7 +260,7 @@ export default function EdgeInspector() {
               style={{ fontSize: "11px" }}
             >
               {PREDICATES.map((p) => (
-                <option key={p} value={p}>{PRED_LABELS[p]}</option>
+                <option key={p} value={p}>{PREDICATE_LABELS[p]}</option>
               ))}
             </select>
             <input
@@ -302,12 +299,3 @@ export default function EdgeInspector() {
   );
 }
 
-function SectionHead({ title }: { title: string }) {
-  return (
-    <div className="border-b border-line-soft pb-1 pt-1">
-      <span className="font-medium text-fg-3" style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-        {title}
-      </span>
-    </div>
-  );
-}

@@ -197,6 +197,21 @@ function scheduleSave(id: string, get: () => EditState) {
   }, 1500);
 }
 
+function mutateAndSave(
+  state: EditState,
+  get: () => EditState,
+  fn: (tab: OpenPipeline) => void,
+): Partial<EditState> {
+  const result = mutateActiveTab(state, fn);
+  if (result.openTabs && state.activeTabId) scheduleSave(state.activeTabId, get);
+  return result;
+}
+
+function edgeReferencesNode(edge: EdgeDef, nodeId: string): boolean {
+  if (edge.source.node === nodeId) return true;
+  return "node" in edge.target && (edge.target as { node: string }).node === nodeId;
+}
+
 export const useEditStore = create<EditState>((set, get) => ({
   pipelines: [],
   openTabs: [],
@@ -241,12 +256,10 @@ export const useEditStore = create<EditState>((set, get) => ({
   closeTab: (id: string) => {
     set((s) => {
       const tabs = s.openTabs.filter((t) => t.id !== id);
-      const activeTabId =
-        s.activeTabId === id
-          ? tabs.length > 0
-            ? tabs[tabs.length - 1].id
-            : null
-          : s.activeTabId;
+      let activeTabId = s.activeTabId;
+      if (s.activeTabId === id) {
+        activeTabId = tabs.length > 0 ? tabs[tabs.length - 1].id : null;
+      }
       return { openTabs: tabs, activeTabId, selection: { kind: "none", id: null } };
     });
   },
@@ -260,118 +273,84 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   addNode: (node: NodeDef) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        tab.pipeline.nodes = [...tab.pipeline.nodes, node];
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      tab.pipeline.nodes = [...tab.pipeline.nodes, node];
+    }));
   },
 
   updateNode: (nodeId: string, updates: Partial<NodeDef>) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        tab.pipeline.nodes = tab.pipeline.nodes.map((n) =>
-          n.id === nodeId ? { ...n, ...updates } : n,
-        );
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      tab.pipeline.nodes = tab.pipeline.nodes.map((n) =>
+        n.id === nodeId ? { ...n, ...updates } : n,
+      );
+    }));
   },
 
   deleteNode: (nodeId: string) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
+    set((s) => ({
+      ...mutateAndSave(s, get, (tab) => {
         tab.pipeline.nodes = tab.pipeline.nodes.filter((n) => n.id !== nodeId);
-        tab.pipeline.edges = tab.pipeline.edges.filter(
-          (e) =>
-            e.source.node !== nodeId &&
-            !("node" in e.target && (e.target as { node: string }).node === nodeId),
-        );
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return { ...result, selection: { kind: "none" as const, id: null } };
-    });
+        tab.pipeline.edges = tab.pipeline.edges.filter((e) => !edgeReferencesNode(e, nodeId));
+      }),
+      selection: { kind: "none" as const, id: null },
+    }));
   },
 
   duplicateNode: (nodeId: string) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        const src = tab.pipeline.nodes.find((n) => n.id === nodeId);
-        if (!src) return;
-        let newId = `${nodeId}-copy`;
-        let counter = 1;
-        while (tab.pipeline.nodes.some((n) => n.id === newId)) {
-          newId = `${nodeId}-copy-${++counter}`;
-        }
-        const copy: NodeDef = {
-          ...src,
-          id: newId,
-          inputs: src.inputs.map((p) => ({ ...p })),
-          outputs: src.outputs.map((p) => ({ ...p })),
-          view: src.view ? { x: src.view.x + 40, y: src.view.y + 40 } : { x: 200, y: 200 },
-        };
-        tab.pipeline.nodes = [...tab.pipeline.nodes, copy];
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      const src = tab.pipeline.nodes.find((n) => n.id === nodeId);
+      if (!src) return;
+      let newId = `${nodeId}-copy`;
+      let counter = 1;
+      while (tab.pipeline.nodes.some((n) => n.id === newId)) {
+        newId = `${nodeId}-copy-${++counter}`;
+      }
+      const copy: NodeDef = {
+        ...src,
+        id: newId,
+        inputs: src.inputs.map((p) => ({ ...p })),
+        outputs: src.outputs.map((p) => ({ ...p })),
+        view: src.view ? { x: src.view.x + 40, y: src.view.y + 40 } : { x: 200, y: 200 },
+      };
+      tab.pipeline.nodes = [...tab.pipeline.nodes, copy];
+    }));
   },
 
   addEdge: (edge: EdgeDef) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        tab.pipeline.edges = [...tab.pipeline.edges, edge];
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      tab.pipeline.edges = [...tab.pipeline.edges, edge];
+    }));
   },
 
   updateEdge: (index: number, updates: Partial<EdgeDef>) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        tab.pipeline.edges = tab.pipeline.edges.map((e, i) =>
-          i === index ? { ...e, ...updates } : e,
-        );
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      tab.pipeline.edges = tab.pipeline.edges.map((e, i) =>
+        i === index ? { ...e, ...updates } : e,
+      );
+    }));
   },
 
   deleteEdge: (index: number) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
+    set((s) => ({
+      ...mutateAndSave(s, get, (tab) => {
         tab.pipeline.edges = tab.pipeline.edges.filter((_, i) => i !== index);
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return { ...result, selection: { kind: "none" as const, id: null } };
-    });
+      }),
+      selection: { kind: "none" as const, id: null },
+    }));
   },
 
   updatePipelineMeta: (updates) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        if (updates.name !== undefined) tab.pipeline.name = updates.name;
-        if (updates.version !== undefined) tab.pipeline.version = updates.version;
-        if (updates.variables !== undefined) tab.pipeline.variables = updates.variables;
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      if (updates.name !== undefined) tab.pipeline.name = updates.name;
+      if (updates.version !== undefined) tab.pipeline.version = updates.version;
+      if (updates.variables !== undefined) tab.pipeline.variables = updates.variables;
+    }));
   },
 
   updatePrompt: (nodeId: string, content: string) => {
-    set((s) => {
-      const result = mutateActiveTab(s, (tab) => {
-        tab.prompts = { ...tab.prompts, [nodeId]: content };
-      });
-      if (result.openTabs && s.activeTabId) scheduleSave(s.activeTabId, get);
-      return result;
-    });
+    set((s) => mutateAndSave(s, get, (tab) => {
+      tab.prompts = { ...tab.prompts, [nodeId]: content };
+    }));
   },
 
   save: async (id: string) => {

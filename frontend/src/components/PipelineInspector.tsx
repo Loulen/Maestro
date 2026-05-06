@@ -1,5 +1,6 @@
 import { useEditStore } from "../stores/editStore";
 import type { VariableDef } from "../types";
+import { SectionHead, Field } from "./InspectorPrimitives";
 
 const VAR_TYPES = ["int", "float", "string", "bool", "list"] as const;
 
@@ -73,19 +74,7 @@ export default function PipelineInspector() {
         </Field>
 
         {/* Variables */}
-        <div className="flex items-center justify-between border-b border-line-soft pb-1 pt-1">
-          <span className="font-medium text-fg-3" style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Variables
-            <span className="ml-1.5 rounded bg-bg-4 px-1 text-fg-4">{variables.length}</span>
-          </span>
-          <button
-            onClick={handleAddVariable}
-            className="text-fg-4 hover:text-acc"
-            style={{ fontSize: "10px" }}
-          >
-            + Add
-          </button>
-        </div>
+        <SectionHead title="Variables" count={variables.length} onAdd={handleAddVariable} />
 
         {variables.map(([name, def]) => (
           <VariableRow
@@ -105,27 +94,6 @@ export default function PipelineInspector() {
         </div>
       </div>
     </aside>
-  );
-}
-
-function SectionHead({ title }: { title: string }) {
-  return (
-    <div className="border-b border-line-soft pb-1 pt-1">
-      <span className="font-medium text-fg-3" style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-        {title}
-      </span>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="mb-0.5 block text-fg-3" style={{ fontSize: "10px" }}>
-        {label}
-      </label>
-      {children}
-    </div>
   );
 }
 

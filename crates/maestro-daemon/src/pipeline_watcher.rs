@@ -16,8 +16,6 @@ pub fn spawn_watcher(
         .map(|h| h.join(".maestro").join("pipelines"));
 
     let tx = Arc::new(event_tx);
-    let repo_dir = repo_pipelines_dir.clone();
-    let user_dir = user_pipelines_dir.clone();
 
     let mut debouncer = match new_debouncer(
         Duration::from_secs(1),
@@ -78,16 +76,16 @@ pub fn spawn_watcher(
             info!("Watching repo pipelines: {}", repo_pipelines_dir.display());
         }
     } else {
-        let _ = std::fs::create_dir_all(&repo_dir);
+        let _ = std::fs::create_dir_all(&repo_pipelines_dir);
         if let Err(e) = debouncer
             .watcher()
-            .watch(&repo_dir, notify::RecursiveMode::Recursive)
+            .watch(&repo_pipelines_dir, notify::RecursiveMode::Recursive)
         {
             warn!("Failed to watch repo pipelines dir: {e}");
         }
     }
 
-    if let Some(ref user_dir) = user_dir {
+    if let Some(ref user_dir) = user_pipelines_dir {
         if user_dir.exists() {
             if let Err(e) = debouncer
                 .watcher()

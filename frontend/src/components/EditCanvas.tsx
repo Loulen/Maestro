@@ -15,6 +15,7 @@ import "@xyflow/react/dist/style.css";
 import { Plus } from "lucide-react";
 import type { NodeDef, NodeType } from "../types";
 import { useEditStore } from "../stores/editStore";
+import { PREDICATE_LABELS } from "../predicates";
 
 interface EditNodeData {
   label: string;
@@ -86,18 +87,13 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
 
 const nodeTypes = { edit: EditNode };
 
-const OP_SYMBOLS: Record<string, string> = {
-  eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=",
-  in: "in", not_in: "not in",
-};
-
 function formatWhenClause(when: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [field, predicate] of Object.entries(when)) {
     if (field === "any") continue;
     if (typeof predicate === "object" && predicate !== null) {
       for (const [op, val] of Object.entries(predicate as Record<string, unknown>)) {
-        const symbol = OP_SYMBOLS[op] ?? op;
+        const symbol = PREDICATE_LABELS[op] ?? op;
         const valStr = Array.isArray(val) ? `[${val.join(", ")}]` : String(val);
         parts.push(`${field} ${symbol} ${valStr}`);
       }
@@ -357,7 +353,6 @@ function ContextMenu({
   x: number;
   y: number;
   type: "node" | "edge";
-  id: string;
   onDeleteNode: () => void;
   onDuplicateNode: () => void;
   onDeleteEdge: () => void;
