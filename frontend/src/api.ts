@@ -50,6 +50,18 @@ export interface PaneResponse {
   resumed: boolean;
 }
 
+export async function fetchPrompt(
+  runId: string,
+  nodeId: string,
+  iter: number,
+): Promise<string> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/prompt?iter=${iter}`,
+  );
+  if (!resp.ok) throw new Error(`GET prompt failed: ${resp.status}`);
+  return resp.text();
+}
+
 export async function fetchPane(
   runId: string,
   nodeId: string,

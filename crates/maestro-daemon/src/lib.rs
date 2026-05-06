@@ -333,6 +333,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/nodes/{node_id}/done", post(node_done))
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
         .route("/runs/{run_id}/nodes/{node_id}/pane", get(node_pane))
+        .route("/runs/{run_id}/nodes/{node_id}/prompt", get(node_prompt))
         .route("/runs/{run_id}/commands", post(run_command))
         .route("/sessions/{session_id}/attach", post(session_attach))
         .fallback(static_handler)
@@ -1339,6 +1340,56 @@ fn find_node_type<'a>(run_state: &'a event_log::RunState, node_id: &str) -> Opti
         .iter()
         .find(|nd| nd.id == node_id)
         .map(|nd| nd.node_type.as_str())
+}
+
+async fn node_prompt(
+    State(state): State<Arc<AppState>>,
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    Query(query): Query<PaneQuery>,
+) -> Response {
+    let iter = query.iter;
+
+    let events = match load_events(&state.db, &run_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+        }
+    };
+
+    let run_state = match event_log::project(&events) {
+        Some(s) => s,
+        None => {
+            return (StatusCode::NOT_FOUND, "run not found").into_response();
+        }
+    };
+
+    if !run_state.nodes.contains_key(&node_id) {
+        return (StatusCode::NOT_FOUND, "node not found in run").into_response();
+    }
+
+    let node_type = find_node_type(&run_state, &node_id).unwrap_or("doc-only");
+    let working_dir = tmux_session_manager::working_dir_for_node(
+        &state.repo_root,
+        &run_id,
+        &node_id,
+        iter,
+        node_type,
+    );
+
+    let prompt_path = working_dir
+        .join(".maestro")
+        .join("prompts")
+        .join(format!("{node_id}-iter-{iter}.md"));
+
+    match std::fs::read_to_string(&prompt_path) {
+        Ok(content) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/markdown")],
+            content,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "prompt file not found").into_response(),
+    }
 }
 
 async fn node_done(
@@ -3661,5 +3712,184 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["content"], "Session no longer available");
         assert_eq!(json["resumed"], false);
+    }
+
+    // -----------------------------------------------------------------------
+    // node_prompt endpoint — Layer 2 contract tests
+    // -----------------------------------------------------------------------
+
+    async fn seed_run_with_node(
+        state: &Arc<AppState>,
+        run_id: &str,
+        node_id: &str,
+        node_type: &str,
+    ) {
+        let run_started = event_log::Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "pipeline_name": "test-pipe",
+                "input": "test",
+                "node_defs": [
+                    { "id": node_id, "node_type": node_type, "inputs": [], "outputs": [] }
+                ],
+                "edges": []
+            })),
+        };
+        append_event(state, &run_started).await.unwrap();
+
+        let node_started = event_log::Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::NodeStarted,
+            node_id: Some(node_id.into()),
+            iter: Some(1),
+            payload: Some(serde_json::json!({ "node_type": node_type })),
+        };
+        append_event(state, &node_started).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn node_prompt_returns_404_for_nonexistent_run() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/no-such-run/nodes/worker/prompt?iter=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn node_prompt_returns_404_for_nonexistent_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state_with_dir(tmp.path()).await;
+        let run_id = "prompt-test-no-node";
+        seed_run_with_node(&state, run_id, "worker", "doc-only").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/nonexistent/prompt?iter=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn node_prompt_returns_404_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state_with_dir(tmp.path()).await;
+        let run_id = "prompt-test-no-file";
+        seed_run_with_node(&state, run_id, "worker", "doc-only").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/worker/prompt?iter=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn node_prompt_returns_markdown_when_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "prompt-test-ok";
+        let wt_dir = tmp
+            .path()
+            .join(".maestro/runs")
+            .join(run_id)
+            .join("worktree");
+        let prompt_dir = wt_dir.join(".maestro").join("prompts");
+        std::fs::create_dir_all(&prompt_dir).unwrap();
+        std::fs::write(
+            prompt_dir.join("worker-iter-1.md"),
+            "## Inputs\n\n- task: /path/to/task.md\n\n## Outputs\n\n- result\n",
+        )
+        .unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_run_with_node(&state, run_id, "worker", "doc-only").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/worker/prompt?iter=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/markdown"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("## Inputs"));
+        assert!(text.contains("## Outputs"));
+    }
+
+    #[tokio::test]
+    async fn node_prompt_defaults_iter_to_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "prompt-test-default-iter";
+        let wt_dir = tmp
+            .path()
+            .join(".maestro/runs")
+            .join(run_id)
+            .join("worktree");
+        let prompt_dir = wt_dir.join(".maestro").join("prompts");
+        std::fs::create_dir_all(&prompt_dir).unwrap();
+        std::fs::write(prompt_dir.join("worker-iter-1.md"), "prompt content").unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_run_with_node(&state, run_id, "worker", "doc-only").await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/worker/prompt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

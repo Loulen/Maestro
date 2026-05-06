@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, ExternalLink, CheckCircle, AlertCircle } from "lucide-react";
 import Convert from "ansi-to-html";
 import type { NodeState, NodeStatus } from "../types";
-import { markNodeDone, attachSession, fetchPane } from "../api";
+import { markNodeDone, attachSession, fetchPane, fetchPrompt } from "../api";
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -48,6 +48,7 @@ interface Props {
 
 export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
   const [terminalHtml, setTerminalHtml] = useState<string>("");
+  const [promptText, setPromptText] = useState<string | null>(null);
   const terminalRef = useRef<HTMLPreElement>(null);
   const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
   const interval = pollInterval(node.status);
@@ -75,6 +76,26 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
       clearInterval(timer);
     };
   }, [interval, node.node_id, node.iter, runId]);
+
+  const shouldFetchPrompt = node.status !== "pending";
+
+  useEffect(() => {
+    if (!shouldFetchPrompt) return;
+
+    let cancelled = false;
+
+    fetchPrompt(runId, node.node_id, node.iter)
+      .then((text) => {
+        if (!cancelled) setPromptText(text);
+      })
+      .catch(() => {
+        // prompt file not yet available
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, node.node_id, node.iter, shouldFetchPrompt]);
 
   // Auto-scroll terminal to bottom on content change
   useEffect(() => {
@@ -203,10 +224,16 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
                 Initial Prompt
               </div>
               <pre
-                className="overflow-auto bg-bg-0 p-2 font-mono text-fg-3"
+                className="prompt-block overflow-auto bg-bg-0 p-2 font-mono text-fg-3"
                 style={{ fontSize: "10px", lineHeight: "1.5" }}
               >
-                Prompt preview available in run events.
+                {promptText ?? (
+                  <span className="text-fg-4">
+                    {node.status === "pending"
+                      ? "Prompt available after node starts."
+                      : "Loading prompt..."}
+                  </span>
+                )}
               </pre>
             </div>
           </div>

@@ -58,6 +58,14 @@
    for running nodes and renders `tmux capture-pane -pe` output with ANSI
    colors via `ansi-to-html`.
 
+5b. Verify the **Initial Prompt** section in the right panel is populated and
+   contains `## Inputs` and `## Outputs` headings. These come from the
+   deterministic preamble the runtime injects into every NodeRun prompt.
+   The frontend fetches `GET /runs/<run_id>/nodes/only/prompt?iter=1` and
+   renders the response in a monospace `<pre>` block. If the section shows
+   "Loading prompt..." or is empty, the endpoint is not wired or the prompt
+   file was not written at spawn time.
+
    Also verify from the shell:
    `tmux capture-pane -p -t maestro-<run_id>-only-iter-1`. The pane content
    must show the **claude TUI**, not just an `echo`/`cat` shell. Acceptable
