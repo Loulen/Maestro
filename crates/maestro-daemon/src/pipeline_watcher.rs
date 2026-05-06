@@ -144,23 +144,16 @@ pub fn spawn_watcher(
     }
 
     // Watch runs directory for run-scoped pipeline edits
-    if runs_dir.exists() {
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&runs_dir, notify::RecursiveMode::Recursive)
-        {
-            warn!("Failed to watch runs dir: {e}");
-        } else {
-            info!("Watching runs dir: {}", runs_dir.display());
-        }
-    } else {
+    if !runs_dir.exists() {
         let _ = std::fs::create_dir_all(&runs_dir);
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&runs_dir, notify::RecursiveMode::Recursive)
-        {
-            warn!("Failed to watch runs dir: {e}");
-        }
+    }
+    if let Err(e) = debouncer
+        .watcher()
+        .watch(&runs_dir, notify::RecursiveMode::Recursive)
+    {
+        warn!("Failed to watch runs dir: {e}");
+    } else {
+        info!("Watching runs dir: {}", runs_dir.display());
     }
 
     Some(debouncer)

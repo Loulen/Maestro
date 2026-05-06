@@ -291,14 +291,7 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   closeRunPipeline: (runId: string) => {
-    const tabId = `__run__${runId}`;
-    set((s) => {
-      const tabs = s.openTabs.filter((t) => t.id !== tabId);
-      const activeTabId = s.activeTabId === tabId
-        ? (tabs.length > 0 ? tabs[tabs.length - 1].id : null)
-        : s.activeTabId;
-      return { openTabs: tabs, activeTabId, selection: { kind: "none", id: null } };
-    });
+    get().closeTab(`__run__${runId}`);
   },
 
   closeTab: (id: string) => {

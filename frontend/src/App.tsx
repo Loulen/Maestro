@@ -97,18 +97,22 @@ export default function App() {
     }
   }, [refreshRuns]);
 
+  const exitRunEdit = useCallback(() => {
+    if (editingRunId) {
+      closeRunPipeline(editingRunId);
+    }
+    setEditScope(null);
+    setEditingRunId(null);
+  }, [editingRunId, closeRunPipeline]);
+
   const handleSelectRun = useCallback(
     (runId: string) => {
-      if (editScope === "run" && editingRunId) {
-        closeRunPipeline(editingRunId);
-        setEditScope(null);
-        setEditingRunId(null);
-      }
+      if (editScope === "run") exitRunEdit();
       setSelectedRunId(runId);
       selectRun(runId);
       setSelectedNodeId(null);
     },
-    [selectRun, editScope, editingRunId, closeRunPipeline],
+    [selectRun, editScope, exitRunEdit],
   );
 
   const handleRunCreated = useCallback(
@@ -122,18 +126,15 @@ export default function App() {
   const handleToggleRunEdit = useCallback(
     async (runId: string) => {
       if (editScope === "run" && editingRunId === runId) {
-        closeRunPipeline(runId);
-        setEditScope(null);
-        setEditingRunId(null);
+        exitRunEdit();
       } else {
         await openRunPipeline(runId);
         setEditScope("run");
         setEditingRunId(runId);
       }
     },
-    [editScope, editingRunId, openRunPipeline, closeRunPipeline],
+    [editScope, editingRunId, openRunPipeline, exitRunEdit],
   );
-
 
   useEffect(() => {
     return subscribe((msg) => {
@@ -162,11 +163,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col bg-bg-1 text-fg">
       <TopBar editMode={editMode} onToggleEditMode={() => {
-        if (editScope === "run" && editingRunId) {
-          closeRunPipeline(editingRunId);
-          setEditScope(null);
-          setEditingRunId(null);
-        }
+        if (editScope === "run") exitRunEdit();
         setEditMode(!editMode);
       }} />
       <main className="min-h-0 flex-1">

@@ -990,45 +990,11 @@ async fn create_run(
     let pipeline = parse_result.pipeline;
     let run_id = event_log::generate_run_id();
 
-    let edge_infos: Vec<event_log::EdgeInfo> = pipeline
-        .edges
-        .iter()
-        .map(|e| {
-            let (target_node, target_port, halt_message) = match &e.target {
-                pipeline::EdgeTarget::Node(ep) => {
-                    (ep.node.clone(), ep.port.clone(), None::<String>)
-                }
-                pipeline::EdgeTarget::Halt(h) => {
-                    ("__halt__".into(), String::new(), h.message.clone())
-                }
-            };
-            let when_json = e.when.as_ref().and_then(|w| serde_json::to_value(w).ok());
-            event_log::EdgeInfo {
-                source_node: e.source.node.clone(),
-                source_port: e.source.port.clone(),
-                target_node,
-                target_port,
-                halt_message,
-                when_clause: when_json,
-            }
-        })
-        .collect();
+    let edge_infos: Vec<event_log::EdgeInfo> =
+        pipeline.edges.iter().map(edge_info_from_pipeline).collect();
 
-    let node_def_infos: Vec<event_log::NodeDefInfo> = pipeline
-        .nodes
-        .iter()
-        .map(|n| event_log::NodeDefInfo {
-            id: n.id.clone(),
-            node_type: match n.node_type {
-                pipeline::NodeType::DocOnly => "doc-only".into(),
-                pipeline::NodeType::CodeMutating => "code-mutating".into(),
-            },
-            view_x: n.view.as_ref().map(|v| v.x),
-            view_y: n.view.as_ref().map(|v| v.y),
-            inputs: n.inputs.iter().map(|p| p.name.clone()).collect(),
-            outputs: n.outputs.iter().map(|p| p.name.clone()).collect(),
-        })
-        .collect();
+    let node_def_infos: Vec<event_log::NodeDefInfo> =
+        pipeline.nodes.iter().map(node_def_from_pipeline).collect();
 
     let variables_json = if req.variables.is_empty() {
         None
@@ -2297,45 +2263,38 @@ fn augment_run_state_from_disk(run_state: &mut event_log::RunState, repo_root: &
     };
     let pipe = &parse_result.pipeline;
 
-    run_state.node_defs = pipe
-        .nodes
-        .iter()
-        .map(|n| event_log::NodeDefInfo {
-            id: n.id.clone(),
-            node_type: match n.node_type {
-                pipeline::NodeType::DocOnly => "doc-only".into(),
-                pipeline::NodeType::CodeMutating => "code-mutating".into(),
-            },
-            view_x: n.view.as_ref().map(|v| v.x),
-            view_y: n.view.as_ref().map(|v| v.y),
-            inputs: n.inputs.iter().map(|p| p.name.clone()).collect(),
-            outputs: n.outputs.iter().map(|p| p.name.clone()).collect(),
-        })
-        .collect();
+    run_state.node_defs = pipe.nodes.iter().map(node_def_from_pipeline).collect();
+    run_state.edges = pipe.edges.iter().map(edge_info_from_pipeline).collect();
+}
 
-    run_state.edges = pipe
-        .edges
-        .iter()
-        .map(|e| {
-            let (target_node, target_port, halt_message) = match &e.target {
-                pipeline::EdgeTarget::Node(ep) => {
-                    (ep.node.clone(), ep.port.clone(), None::<String>)
-                }
-                pipeline::EdgeTarget::Halt(h) => {
-                    ("__halt__".into(), String::new(), h.message.clone())
-                }
-            };
-            let when_json = e.when.as_ref().and_then(|w| serde_json::to_value(w).ok());
-            event_log::EdgeInfo {
-                source_node: e.source.node.clone(),
-                source_port: e.source.port.clone(),
-                target_node,
-                target_port,
-                halt_message,
-                when_clause: when_json,
-            }
-        })
-        .collect();
+fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
+    event_log::NodeDefInfo {
+        id: n.id.clone(),
+        node_type: match n.node_type {
+            pipeline::NodeType::DocOnly => "doc-only".into(),
+            pipeline::NodeType::CodeMutating => "code-mutating".into(),
+        },
+        view_x: n.view.as_ref().map(|v| v.x),
+        view_y: n.view.as_ref().map(|v| v.y),
+        inputs: n.inputs.iter().map(|p| p.name.clone()).collect(),
+        outputs: n.outputs.iter().map(|p| p.name.clone()).collect(),
+    }
+}
+
+fn edge_info_from_pipeline(e: &pipeline::EdgeDef) -> event_log::EdgeInfo {
+    let (target_node, target_port, halt_message) = match &e.target {
+        pipeline::EdgeTarget::Node(ep) => (ep.node.clone(), ep.port.clone(), None::<String>),
+        pipeline::EdgeTarget::Halt(h) => ("__halt__".into(), String::new(), h.message.clone()),
+    };
+    let when_json = e.when.as_ref().and_then(|w| serde_json::to_value(w).ok());
+    event_log::EdgeInfo {
+        source_node: e.source.node.clone(),
+        source_port: e.source.port.clone(),
+        target_node,
+        target_port,
+        halt_message,
+        when_clause: when_json,
+    }
 }
 
 fn resolve_pipeline_path(repo_root: &std::path::Path, pipeline_name: &str) -> PathBuf {
