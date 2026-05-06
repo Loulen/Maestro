@@ -98,11 +98,11 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
   }, [currentPipeline, input, overrides, onCreated, onClose]);
 
   const repoPipelines = useMemo(
-    () => pipelines.filter((p) => p.kind === "repo"),
+    () => pipelines.filter((p) => p.scope === "repo"),
     [pipelines],
   );
   const userPipelines = useMemo(
-    () => pipelines.filter((p) => p.kind === "user"),
+    () => pipelines.filter((p) => p.scope === "user"),
     [pipelines],
   );
 
