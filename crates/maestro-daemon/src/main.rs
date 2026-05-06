@@ -685,9 +685,7 @@ struct AttachResponse {
 async fn session_attach(AxumPath(session_id): AxumPath<String>) -> Response {
     let terminal = detect_terminal();
 
-    let result = spawn_terminal_attach(&terminal, &session_id);
-
-    match result {
+    match spawn_terminal_attach(&terminal, &session_id) {
         Ok(()) => {
             info!("Attached terminal {terminal} to session {session_id}");
             (
@@ -752,13 +750,18 @@ fn which_exists(cmd: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn spawn_terminal_attach(terminal: &str, session_name: &str) -> Result<()> {
     let parts: Vec<&str> = terminal.split_whitespace().collect();
     let (cmd, prefix_args) = parts
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("empty terminal command"))?;
 
-    let tmux_cmd = format!("tmux attach -t {session_name}");
+    let escaped_name = shell_escape(session_name);
+    let tmux_cmd = format!("tmux attach -t {escaped_name}");
 
     let mut command = std::process::Command::new(cmd);
     command.args(prefix_args);
@@ -782,7 +785,7 @@ fn spawn_terminal_attach(terminal: &str, session_name: &str) -> Result<()> {
         "open" => {
             // macOS: open -a Terminal <script>
             // We create a temp script that attaches
-            let script = format!("#!/bin/bash\ntmux attach -t {session_name}\n");
+            let script = format!("#!/bin/bash\ntmux attach -t {escaped_name}\n");
             let script_path =
                 std::env::temp_dir().join(format!("maestro-attach-{session_name}.sh"));
             std::fs::write(&script_path, &script)?;

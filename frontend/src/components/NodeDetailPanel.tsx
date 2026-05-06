@@ -19,12 +19,11 @@ interface Props {
 export default function NodeDetailPanel({ node, runId }: Props) {
   const [terminalContent, setTerminalContent] = useState<string>("");
   const terminalRef = useRef<HTMLPreElement>(null);
+  const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
 
   // Poll tmux capture-pane for terminal preview
   useEffect(() => {
     if (node.status !== "running" && node.status !== "awaiting_user") return;
-
-    const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
 
     async function poll() {
       try {
@@ -39,9 +38,7 @@ export default function NodeDetailPanel({ node, runId }: Props) {
     poll();
     const interval = setInterval(poll, 2000);
     return () => clearInterval(interval);
-  }, [node.status, node.node_id, node.iter, runId]);
-
-  const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
+  }, [node.status, sessionName]);
 
   const handleOpenTerminal = useCallback(async () => {
     try {
@@ -59,11 +56,7 @@ export default function NodeDetailPanel({ node, runId }: Props) {
     }
   }, [runId, node.node_id, node.iter]);
 
-  const showOpenTerminal =
-    node.status === "running" ||
-    node.status === "awaiting_user" ||
-    node.status === "completed" ||
-    node.status === "failed";
+  const showOpenTerminal = node.status !== "pending";
 
   return (
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-bg-2">
