@@ -489,13 +489,10 @@ mod tests {
     }
 
     #[test]
-    fn reaper_ttl_default() {
+    fn reaper_ttl_default_and_from_env() {
         std::env::remove_var(REAPER_TTL_SECS_ENV);
         assert_eq!(reaper_ttl(), Duration::from_secs(3600));
-    }
 
-    #[test]
-    fn reaper_ttl_from_env() {
         std::env::set_var(REAPER_TTL_SECS_ENV, "5");
         assert_eq!(reaper_ttl(), Duration::from_secs(5));
         std::env::remove_var(REAPER_TTL_SECS_ENV);
