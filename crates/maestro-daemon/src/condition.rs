@@ -189,10 +189,10 @@ pub fn render_halt_message(template: &str, ctx: &HaltContext) -> String {
     }
 
     for (name, value) in &ctx.fields {
-        let placeholder = format!("{{{name}}}");
-        if placeholder == "{iter}" || placeholder == "{node-id}" {
+        if name == "iter" || name == "node-id" {
             continue;
         }
+        let placeholder = format!("{{{name}}}");
         if result.contains(&placeholder) {
             let val_str = yaml_value_to_display_string(value);
             result = result.replace(&placeholder, &val_str);

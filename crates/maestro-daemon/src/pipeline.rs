@@ -186,17 +186,12 @@ where
     let mut result = HashMap::new();
 
     for (name, value) in raw {
-        let var_def = if let Some(mapping) = value.as_mapping() {
-            let has_type = mapping.contains_key(serde_yaml::Value::String("type".into()));
-            let has_default = mapping.contains_key(serde_yaml::Value::String("default".into()));
-            if has_type && has_default {
-                serde_yaml::from_value::<VariableDef>(value).map_err(serde::de::Error::custom)?
-            } else {
-                VariableDef {
-                    var_type: infer_variable_type(&value),
-                    default: value,
-                }
-            }
+        let is_explicit = value.as_mapping().is_some_and(|m| {
+            m.contains_key(serde_yaml::Value::String("type".into()))
+                && m.contains_key(serde_yaml::Value::String("default".into()))
+        });
+        let var_def = if is_explicit {
+            serde_yaml::from_value::<VariableDef>(value).map_err(serde::de::Error::custom)?
         } else {
             VariableDef {
                 var_type: infer_variable_type(&value),

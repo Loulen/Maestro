@@ -124,16 +124,20 @@ pub fn build_preamble(ctx: &AugmentContext<'_>) -> String {
         preamble.push_str("No outputs declared.\n\n");
     } else {
         for output in &outputs {
-            let port = ctx.node.outputs.iter().find(|p| p.name == output.port_name);
-            let has_schema = port.is_some_and(|p| p.frontmatter.is_some());
+            preamble.push_str(&format!(
+                "- `{}`: write to `{}`\n",
+                output.port_name,
+                output.path.display()
+            ));
 
-            if has_schema {
-                let schema = port.unwrap().frontmatter.as_ref().unwrap();
-                preamble.push_str(&format!(
-                    "- `{}`: write to `{}`\n",
-                    output.port_name,
-                    output.path.display()
-                ));
+            let schema = ctx
+                .node
+                .outputs
+                .iter()
+                .find(|p| p.name == output.port_name)
+                .and_then(|p| p.frontmatter.as_ref());
+
+            if let Some(schema) = schema {
                 preamble.push_str("  Required YAML frontmatter:\n");
                 for (field_name, field_decl) in schema {
                     if let Some(ref allowed) = field_decl.allowed {
@@ -150,12 +154,6 @@ pub fn build_preamble(ctx: &AugmentContext<'_>) -> String {
                         ));
                     }
                 }
-            } else {
-                preamble.push_str(&format!(
-                    "- `{}`: write to `{}`\n",
-                    output.port_name,
-                    output.path.display()
-                ));
             }
         }
         preamble.push('\n');
