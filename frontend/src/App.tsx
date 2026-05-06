@@ -7,6 +7,7 @@ import type { RunListEntry, RunState } from "./types";
 import RunsListPanel from "./components/RunsListPanel";
 import DagCanvas from "./components/DagCanvas";
 import NodeDetailPanel from "./components/NodeDetailPanel";
+import NewRunModal from "./components/NewRunModal";
 
 function useRuns() {
   const [runs, setRuns] = useState<RunListEntry[]>([]);
@@ -62,6 +63,7 @@ export default function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const { run: selectedRun, select: selectRun, refresh: refreshRun } = useSelectedRun();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [newRunModalOpen, setNewRunModalOpen] = useState(false);
   const mountedRef = useRef(false);
 
   // Load runs on mount
@@ -79,6 +81,16 @@ export default function App() {
       setSelectedNodeId(null);
     },
     [selectRun],
+  );
+
+  const handleRunCreated = useCallback(
+    (runId: string) => {
+      refreshRuns();
+      setSelectedRunId(runId);
+      selectRun(runId);
+      setSelectedNodeId(null);
+    },
+    [refreshRuns, selectRun],
   );
 
   // Subscribe to events — refresh runs list and selected run
@@ -104,6 +116,7 @@ export default function App() {
           runs={runs}
           selectedRunId={selectedRunId}
           onSelectRun={handleSelectRun}
+          onNewRun={() => setNewRunModalOpen(true)}
         />
         <DagCanvas
           run={selectedRun}
@@ -127,6 +140,11 @@ export default function App() {
         )}
       </main>
       <StatusBar status={status} />
+      <NewRunModal
+        open={newRunModalOpen}
+        onClose={() => setNewRunModalOpen(false)}
+        onCreated={handleRunCreated}
+      />
     </div>
   );
 }

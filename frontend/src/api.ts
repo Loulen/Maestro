@@ -1,4 +1,4 @@
-import type { RunListEntry, RunState } from "./types";
+import type { PipelineListEntry, RunListEntry, RunState } from "./types";
 
 const BASE = "";
 
@@ -42,6 +42,32 @@ export async function attachSession(sessionId: string): Promise<void> {
     { method: "POST" },
   );
   if (!resp.ok) throw new Error(`attach failed: ${resp.status}`);
+}
+
+export async function fetchPipelines(): Promise<PipelineListEntry[]> {
+  const resp = await fetch(`${BASE}/pipelines`);
+  if (!resp.ok) throw new Error(`GET /pipelines failed: ${resp.status}`);
+  return resp.json();
+}
+
+export interface CreateRunRequest {
+  pipeline: string;
+  input: string;
+  variables: Record<string, unknown>;
+}
+
+export interface CreateRunResponse {
+  run_id: string;
+}
+
+export async function createRun(req: CreateRunRequest): Promise<CreateRunResponse> {
+  const resp = await fetch(`${BASE}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) throw new Error(`POST /runs failed: ${resp.status}`);
+  return resp.json();
 }
 
 export async function cleanupRun(runId: string): Promise<void> {

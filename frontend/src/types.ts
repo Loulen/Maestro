@@ -63,3 +63,14 @@ export interface WsMessage {
   event?: DaemonEvent;
   ts?: string;
 }
+
+export interface PipelineVariableInfo {
+  var_type: string;
+  default: unknown;
+}
+
+export interface PipelineListEntry {
+  name: string;
+  kind: "repo" | "user";
+  variables: Record<string, PipelineVariableInfo>;
+}

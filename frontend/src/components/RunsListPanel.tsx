@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import type { RunListEntry, RunStatus } from "../types";
 import { cleanupRun } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
@@ -17,12 +17,14 @@ interface Props {
   runs: RunListEntry[];
   selectedRunId: string | null;
   onSelectRun: (runId: string) => void;
+  onNewRun: () => void;
 }
 
 export default function RunsListPanel({
   runs,
   selectedRunId,
   onSelectRun,
+  onNewRun,
 }: Props) {
   const [confirmCleanup, setConfirmCleanup] = useState<string | null>(null);
 
@@ -42,6 +44,14 @@ export default function RunsListPanel({
         style={{ fontSize: "11.5px" }}
       >
         Runs
+        <button
+          onClick={onNewRun}
+          className="ml-auto flex items-center gap-1 rounded bg-acc px-1.5 py-0.5 font-medium text-[#04140d] transition-colors hover:bg-acc-dim"
+          style={{ fontSize: "10.5px" }}
+        >
+          <Plus size={10} />
+          New Run
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto">
         {runs.length === 0 && (

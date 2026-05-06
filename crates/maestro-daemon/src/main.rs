@@ -73,6 +73,19 @@ struct RunListEntry {
     started_at: Option<String>,
 }
 
+#[derive(Serialize)]
+struct PipelineVariableInfo {
+    var_type: String,
+    default: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct PipelineListEntry {
+    name: String,
+    kind: String,
+    variables: HashMap<String, PipelineVariableInfo>,
+}
+
 #[derive(Deserialize)]
 struct NodeDoneRequest {
     #[serde(default)]
@@ -145,6 +158,7 @@ async fn main() -> Result<()> {
 fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/pipelines", get(list_pipelines))
         .route("/runs", post(create_run))
         .route("/runs", get(list_runs))
         .route("/runs/{run_id}", get(get_run))
@@ -648,6 +662,107 @@ async fn create_run(
     info!("Run {run_id} started for pipeline {}", pipeline.name);
 
     (StatusCode::CREATED, Json(CreateRunResponse { run_id })).into_response()
+}
+
+async fn list_pipelines(State(state): State<Arc<AppState>>) -> Response {
+    let entries = discover_pipelines(&state.repo_root);
+    Json(entries).into_response()
+}
+
+fn discover_pipelines(repo_root: &std::path::Path) -> Vec<PipelineListEntry> {
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let repo_dir = repo_root.join(".maestro").join("pipelines");
+    collect_pipelines_from_dir(&repo_dir, "repo", &mut entries, &mut seen);
+
+    if let Some(home) = dirs_next_home() {
+        let user_dir = home.join(".maestro").join("pipelines");
+        collect_pipelines_from_dir(&user_dir, "user", &mut entries, &mut seen);
+    }
+
+    entries
+}
+
+fn collect_pipelines_from_dir(
+    dir: &std::path::Path,
+    kind: &str,
+    entries: &mut Vec<PipelineListEntry>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+            continue;
+        }
+
+        let yaml = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let parsed = match pipeline::parse_pipeline(&yaml) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let name = parsed.pipeline.name.clone();
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.insert(name.clone());
+
+        let variables: HashMap<String, PipelineVariableInfo> = parsed
+            .pipeline
+            .variables
+            .iter()
+            .map(|(k, v)| {
+                let default = yaml_value_to_json(&v.default);
+                let var_type = format!("{:?}", v.var_type).to_lowercase();
+                (k.clone(), PipelineVariableInfo { var_type, default })
+            })
+            .collect();
+
+        entries.push(PipelineListEntry {
+            name,
+            kind: kind.to_string(),
+            variables,
+        });
+    }
+}
+
+fn yaml_value_to_json(val: &serde_yaml::Value) -> serde_json::Value {
+    match val {
+        serde_yaml::Value::Null => serde_json::Value::Null,
+        serde_yaml::Value::Bool(b) => serde_json::Value::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_json::Value::Number(i.into())
+            } else if let Some(f) = n.as_f64() {
+                serde_json::json!(f)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        serde_yaml::Value::String(s) => serde_json::Value::String(s.clone()),
+        serde_yaml::Value::Sequence(seq) => {
+            serde_json::Value::Array(seq.iter().map(yaml_value_to_json).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in map {
+                let key = k.as_str().unwrap_or("").to_string();
+                obj.insert(key, yaml_value_to_json(v));
+            }
+            serde_json::Value::Object(obj)
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_value_to_json(&tagged.value),
+    }
 }
 
 async fn list_runs(State(state): State<Arc<AppState>>) -> Response {
@@ -2577,5 +2692,118 @@ mod tests {
         let events = load_events(&state.db, run_id).await.unwrap();
         let run_state = event_log::project(&events).unwrap();
         assert_eq!(find_node_type(&run_state, "impl-1"), Some("code-mutating"));
+    }
+
+    #[test]
+    fn discover_pipelines_finds_repo_yamls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipelines_dir = tmp.path().join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+
+        std::fs::write(
+            pipelines_dir.join("my-pipe.yaml"),
+            "name: my-pipe\nvariables:\n  max_iter: 5\n  mode: strict\n",
+        )
+        .unwrap();
+
+        let entries = discover_pipelines(tmp.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "my-pipe");
+        assert_eq!(entries[0].kind, "repo");
+        assert_eq!(entries[0].variables.len(), 2);
+        assert_eq!(entries[0].variables["max_iter"].var_type, "int");
+        assert_eq!(
+            entries[0].variables["max_iter"].default,
+            serde_json::json!(5)
+        );
+        assert_eq!(entries[0].variables["mode"].var_type, "string");
+        assert_eq!(
+            entries[0].variables["mode"].default,
+            serde_json::json!("strict")
+        );
+    }
+
+    #[test]
+    fn discover_pipelines_empty_dir_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entries = discover_pipelines(tmp.path());
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn discover_pipelines_skips_invalid_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipelines_dir = tmp.path().join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+
+        std::fs::write(pipelines_dir.join("bad.yaml"), "not: valid: yaml: [[[").unwrap();
+        std::fs::write(pipelines_dir.join("good.yaml"), "name: good-pipe\n").unwrap();
+
+        let entries = discover_pipelines(tmp.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "good-pipe");
+    }
+
+    #[test]
+    fn discover_pipelines_skips_non_yaml_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipelines_dir = tmp.path().join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+
+        std::fs::write(pipelines_dir.join("readme.md"), "# not a pipeline").unwrap();
+        std::fs::write(pipelines_dir.join("pipe.yaml"), "name: pipe\n").unwrap();
+
+        let entries = discover_pipelines(tmp.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "pipe");
+    }
+
+    #[tokio::test]
+    async fn list_pipelines_endpoint_returns_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipelines_dir = tmp.path().join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        std::fs::write(
+            pipelines_dir.join("test-pipe.yaml"),
+            "name: test-pipe\nvariables:\n  count: 3\n",
+        )
+        .unwrap();
+
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_db(&db).await.unwrap();
+        let (event_tx, _) = broadcast::channel(64);
+        let state = Arc::new(AppState {
+            db,
+            event_tx,
+            repo_root: tmp.path().to_path_buf(),
+            port: 0,
+            merge_lock: tokio::sync::Mutex::new(()),
+        });
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pipelines: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(pipelines.len(), 1);
+        assert_eq!(pipelines[0]["name"], "test-pipe");
+        assert_eq!(pipelines[0]["kind"], "repo");
+        assert_eq!(pipelines[0]["variables"]["count"]["var_type"], "int");
+        assert_eq!(pipelines[0]["variables"]["count"]["default"], 3);
     }
 }
