@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { Terminal, ExternalLink } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Terminal, ExternalLink, CheckCircle, AlertCircle } from "lucide-react";
 import type { NodeState, NodeStatus } from "../types";
+import { markNodeDone, attachSession } from "../api";
 
 const STATUS_LABELS: Record<NodeStatus, string> = {
   pending: "Pending",
   running: "Running",
+  awaiting_user: "Awaiting User",
   completed: "Completed",
   failed: "Failed",
 };
@@ -20,14 +22,12 @@ export default function NodeDetailPanel({ node, runId }: Props) {
 
   // Poll tmux capture-pane for terminal preview
   useEffect(() => {
-    if (node.status !== "running") return;
+    if (node.status !== "running" && node.status !== "awaiting_user") return;
 
     const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
 
     async function poll() {
       try {
-        // In the real implementation, this would be an API endpoint
-        // For now we just show a placeholder
         setTerminalContent(
           `[tmux session: ${sessionName}]\n\nTerminal preview will appear here when the session is active.`,
         );
@@ -40,6 +40,30 @@ export default function NodeDetailPanel({ node, runId }: Props) {
     const interval = setInterval(poll, 2000);
     return () => clearInterval(interval);
   }, [node.status, node.node_id, node.iter, runId]);
+
+  const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
+
+  const handleOpenTerminal = useCallback(async () => {
+    try {
+      await attachSession(sessionName);
+    } catch (e) {
+      console.error("Failed to attach terminal:", e);
+    }
+  }, [sessionName]);
+
+  const handleMarkComplete = useCallback(async () => {
+    try {
+      await markNodeDone(runId, node.node_id, node.iter);
+    } catch (e) {
+      console.error("Failed to mark node done:", e);
+    }
+  }, [runId, node.node_id, node.iter]);
+
+  const showOpenTerminal =
+    node.status === "running" ||
+    node.status === "awaiting_user" ||
+    node.status === "completed" ||
+    node.status === "failed";
 
   return (
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-bg-2">
@@ -62,6 +86,16 @@ export default function NodeDetailPanel({ node, runId }: Props) {
           {node.completed_at && ` · ended ${formatTime(node.completed_at)}`}
         </div>
       </div>
+
+      {/* Awaiting user banner */}
+      {node.status === "awaiting_user" && (
+        <div className="flex items-center gap-2 border-b border-st-await/30 bg-st-await-bg px-3 py-2">
+          <AlertCircle size={14} className="shrink-0 text-st-await" />
+          <span className="text-st-await" style={{ fontSize: "11.5px", fontWeight: 500 }}>
+            Awaiting user — attach terminal and interact, then mark complete
+          </span>
+        </div>
+      )}
 
       {/* Terminal preview */}
       <div className="flex-1 overflow-hidden">
@@ -86,15 +120,28 @@ export default function NodeDetailPanel({ node, runId }: Props) {
       </div>
 
       {/* Actions */}
-      <div className="border-t border-line px-3 py-2">
-        <button
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line-strong bg-bg-3 px-3 py-1.5 text-fg-2 transition-colors hover:bg-bg-4 hover:text-fg"
-          style={{ fontSize: "11.5px" }}
-          title="Open terminal — full implementation in Slice 8"
-        >
-          <ExternalLink size={12} />
-          Open terminal
-        </button>
+      <div className="flex flex-col gap-1.5 border-t border-line px-3 py-2">
+        {showOpenTerminal && (
+          <button
+            onClick={handleOpenTerminal}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line-strong bg-bg-3 px-3 py-1.5 text-fg-2 transition-colors hover:bg-bg-4 hover:text-fg"
+            style={{ fontSize: "11.5px" }}
+          >
+            <ExternalLink size={12} />
+            Open terminal
+          </button>
+        )}
+
+        {node.status === "awaiting_user" && (
+          <button
+            onClick={handleMarkComplete}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-st-done/40 bg-st-done-bg px-3 py-1.5 text-st-done transition-colors hover:border-st-done/60 hover:bg-st-done/20"
+            style={{ fontSize: "11.5px", fontWeight: 500 }}
+          >
+            <CheckCircle size={12} />
+            Mark complete
+          </button>
+        )}
       </div>
 
       {/* Initial prompt section */}
@@ -126,6 +173,8 @@ function terminalPlaceholder(node: NodeState): string {
       return `Failed: ${node.failure_reason ?? "unknown reason"}`;
     case "running":
       return "Connecting...";
+    case "awaiting_user":
+      return "Waiting for user interaction...";
   }
 }
 

@@ -242,6 +242,38 @@ nodes: []
     }
 
     #[test]
+    fn parses_interactive_node() {
+        let yaml = r#"
+name: interactive-pipe
+nodes:
+  - id: griller
+    type: doc-only
+    prompt_file: prompts/griller.md
+    interactive: true
+    inputs:
+      - name: task
+    outputs:
+      - name: brief
+  - id: worker
+    type: code-mutating
+    prompt_file: prompts/worker.md
+    inputs:
+      - name: brief
+    outputs:
+      - name: summary
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        assert!(result.pipeline.nodes[0].interactive);
+        assert!(!result.pipeline.nodes[1].interactive);
+    }
+
+    #[test]
+    fn interactive_defaults_to_false() {
+        let result = parse_pipeline(VALID_MINIMAL).unwrap();
+        assert!(!result.pipeline.nodes[0].interactive);
+    }
+
+    #[test]
     fn parses_pipeline_with_edges_and_variables() {
         let yaml = r#"
 name: full-pipeline

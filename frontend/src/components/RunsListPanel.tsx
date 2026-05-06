@@ -2,6 +2,7 @@ import type { RunListEntry, RunStatus } from "../types";
 
 const STATUS_STYLES: Record<RunStatus, { dot: string; bg: string }> = {
   running: { dot: "bg-st-running", bg: "bg-st-running-bg" },
+  awaiting_user: { dot: "bg-st-await", bg: "bg-st-await-bg" },
   completed: { dot: "bg-st-done", bg: "bg-st-done-bg" },
   failed: { dot: "bg-st-failed", bg: "bg-st-failed-bg" },
 };

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum EventKind {
     RunStarted,
     NodeStarted,
+    NodeAwaitingUser,
     NodeCompleted,
     NodeFailed,
     RunCompleted,
@@ -28,6 +29,7 @@ pub struct Event {
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Running,
+    AwaitingUser,
     Completed,
     Failed,
 }
@@ -37,6 +39,7 @@ pub enum RunStatus {
 pub enum NodeStatus {
     Pending,
     Running,
+    AwaitingUser,
     Completed,
     Failed,
 }
@@ -121,6 +124,13 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                     }
                 }
             }
+            EventKind::NodeAwaitingUser => {
+                if let Some(ref node_id) = event.node_id {
+                    if let Some(node) = state.nodes.get_mut(node_id) {
+                        node.status = NodeStatus::AwaitingUser;
+                    }
+                }
+            }
             EventKind::NodeFailed => {
                 if let Some(ref node_id) = event.node_id {
                     if let Some(node) = state.nodes.get_mut(node_id) {
@@ -144,6 +154,16 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                 state.completed_at = Some(event.ts.clone());
             }
         }
+    }
+
+    // Derive run-level awaiting_user from node states
+    if state.status == RunStatus::Running
+        && state
+            .nodes
+            .values()
+            .any(|n| n.status == NodeStatus::AwaitingUser)
+    {
+        state.status = RunStatus::AwaitingUser;
     }
 
     Some(state)
@@ -257,6 +277,42 @@ mod tests {
         let state = project(&events).unwrap();
         assert_eq!(state.status, RunStatus::Running);
         assert_eq!(state.nodes["planner"].status, NodeStatus::Running);
+    }
+
+    #[test]
+    fn projects_interactive_node_awaiting_user() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "interactive-pipe" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("griller"), Some(1)),
+            make_event(EventKind::NodeAwaitingUser, Some("griller"), Some(1)),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::AwaitingUser);
+        assert_eq!(state.nodes["griller"].status, NodeStatus::AwaitingUser);
+    }
+
+    #[test]
+    fn mark_node_done_completes_awaiting_node() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "interactive-pipe" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("griller"), Some(1)),
+            make_event(EventKind::NodeAwaitingUser, Some("griller"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("griller"), Some(1)),
+            make_event(EventKind::RunCompleted, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Completed);
+        assert_eq!(state.nodes["griller"].status, NodeStatus::Completed);
     }
 
     #[test]

@@ -13,6 +13,7 @@ import type { NodeState, NodeStatus, RunState, RunStatus } from "../types";
 const STATUS_COLORS: Record<NodeStatus, string> = {
   pending: "border-st-pending",
   running: "border-st-running",
+  awaiting_user: "border-st-await",
   completed: "border-st-done",
   failed: "border-st-failed",
 };
@@ -20,6 +21,7 @@ const STATUS_COLORS: Record<NodeStatus, string> = {
 const STATUS_BG: Record<NodeStatus, string> = {
   pending: "bg-bg-3",
   running: "bg-st-running-bg",
+  awaiting_user: "bg-st-await-bg",
   completed: "bg-st-done-bg",
   failed: "bg-st-failed-bg",
 };
@@ -27,12 +29,14 @@ const STATUS_BG: Record<NodeStatus, string> = {
 const STATUS_DOTS: Record<NodeStatus, string> = {
   pending: "bg-st-pending",
   running: "bg-st-running",
+  awaiting_user: "bg-st-await",
   completed: "bg-st-done",
   failed: "bg-st-failed",
 };
 
 const RUN_STATUS_DOTS: Record<RunStatus, string> = {
   running: "bg-st-running",
+  awaiting_user: "bg-st-await",
   completed: "bg-st-done",
   failed: "bg-st-failed",
 };

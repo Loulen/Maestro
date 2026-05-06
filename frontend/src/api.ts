@@ -19,3 +19,27 @@ export async function fetchRunEvents(runId: string): Promise<unknown[]> {
   if (!resp.ok) throw new Error(`GET /runs/${runId}/events failed: ${resp.status}`);
   return resp.json();
 }
+
+export async function markNodeDone(
+  runId: string,
+  nodeId: string,
+  iter: number,
+): Promise<void> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/commands`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "mark_node_done", node_id: nodeId, iter }),
+    },
+  );
+  if (!resp.ok) throw new Error(`mark_node_done failed: ${resp.status}`);
+}
+
+export async function attachSession(sessionId: string): Promise<void> {
+  const resp = await fetch(
+    `${BASE}/sessions/${encodeURIComponent(sessionId)}/attach`,
+    { method: "POST" },
+  );
+  if (!resp.ok) throw new Error(`attach failed: ${resp.status}`);
+}
