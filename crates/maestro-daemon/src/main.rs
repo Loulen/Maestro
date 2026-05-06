@@ -1,9 +1,11 @@
 mod blackboard;
 mod condition;
 mod event_log;
+mod frontmatter_parser;
 mod pipeline;
 mod prompt_augmenter;
 mod scheduler;
+mod variable_resolver;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -376,7 +378,6 @@ async fn handle_node_completion(
     };
 
     let pipeline = parse_result.pipeline;
-    let actions = scheduler::evaluate_outgoing_edges(&pipeline, run_state, completed_node_id);
 
     let worktree_dir = state
         .repo_root
@@ -387,6 +388,22 @@ async fn handle_node_completion(
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
 
     let resolved_vars = resolve_run_variables(&pipeline, events);
+
+    let source_iter = run_state
+        .nodes
+        .get(completed_node_id)
+        .map(|n| n.iter)
+        .unwrap_or(1);
+    let frontmatter_fields =
+        resolve_source_frontmatter(&pipeline, completed_node_id, source_iter, &artifacts_dir);
+
+    let actions = scheduler::evaluate_outgoing_edges_with_context(
+        &pipeline,
+        run_state,
+        completed_node_id,
+        &resolved_vars,
+        &frontmatter_fields,
+    );
 
     let spawn_ctx = SpawnContext {
         pipeline: &pipeline,
@@ -427,7 +444,7 @@ fn resolve_run_variables(
     pipeline: &pipeline::PipelineDef,
     events: &[event_log::Event],
 ) -> HashMap<String, serde_yaml::Value> {
-    let mut resolved_vars = pipeline.variables.clone();
+    let mut resolved_vars = pipeline.variable_defaults();
     if let Some(payload) = events.first().and_then(|e| e.payload.as_ref()) {
         if let Some(vars) = payload.get("variables") {
             if let Ok(overrides) =
@@ -440,6 +457,32 @@ fn resolve_run_variables(
         }
     }
     resolved_vars
+}
+
+fn resolve_source_frontmatter(
+    pipeline: &pipeline::PipelineDef,
+    completed_node_id: &str,
+    iter: i64,
+    artifacts_dir: &std::path::Path,
+) -> HashMap<String, serde_yaml::Value> {
+    let node = match pipeline.nodes.iter().find(|n| n.id == completed_node_id) {
+        Some(n) => n,
+        None => return HashMap::new(),
+    };
+
+    let mut fields = HashMap::new();
+    for port in &node.outputs {
+        let artifact_path = artifacts_dir
+            .join(completed_node_id)
+            .join(format!("iter-{iter}"))
+            .join(format!("{}.md", port.name));
+        if let Ok(port_fields) = frontmatter_parser::parse_frontmatter_from_file(&artifact_path) {
+            for (k, v) in port_fields {
+                fields.insert(k, v);
+            }
+        }
+    }
+    fields
 }
 
 async fn create_run(
@@ -516,6 +559,22 @@ async fn create_run(
         })
         .collect();
 
+    let variables_json = if req.variables.is_empty() {
+        None
+    } else {
+        serde_json::to_value(&req.variables).ok()
+    };
+
+    let mut run_payload = serde_json::json!({
+        "pipeline_name": pipeline.name,
+        "input": req.input,
+        "edges": edge_infos,
+        "node_defs": node_def_infos,
+    });
+    if let Some(vars) = variables_json {
+        run_payload["variables"] = vars;
+    }
+
     let run_started = event_log::Event {
         id: None,
         run_id: run_id.clone(),
@@ -523,12 +582,7 @@ async fn create_run(
         kind: event_log::EventKind::RunStarted,
         node_id: None,
         iter: None,
-        payload: Some(serde_json::json!({
-            "pipeline_name": pipeline.name,
-            "input": req.input,
-            "edges": edge_infos,
-            "node_defs": node_def_infos,
-        })),
+        payload: Some(run_payload),
     };
 
     if let Err(e) = append_event(&state, &run_started).await {
@@ -565,7 +619,7 @@ async fn create_run(
     }
 
     // Resolve variables (pipeline defaults + overrides)
-    let mut resolved_vars = pipeline.variables.clone();
+    let mut resolved_vars = pipeline.variable_defaults();
     for (k, v) in &req.variables {
         resolved_vars.insert(k.clone(), v.clone());
     }

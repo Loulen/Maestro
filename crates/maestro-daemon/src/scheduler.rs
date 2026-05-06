@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::condition::{self, EvalContext};
 use crate::event_log::{NodeStatus, RunState};
@@ -47,10 +47,27 @@ pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> 
     ready
 }
 
+#[cfg(test)]
 pub fn evaluate_outgoing_edges(
     pipeline: &PipelineDef,
     run_state: &RunState,
     completed_node_id: &str,
+) -> Vec<SchedulerAction> {
+    evaluate_outgoing_edges_with_context(
+        pipeline,
+        run_state,
+        completed_node_id,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+}
+
+pub fn evaluate_outgoing_edges_with_context(
+    pipeline: &PipelineDef,
+    run_state: &RunState,
+    completed_node_id: &str,
+    resolved_vars: &HashMap<String, serde_yaml::Value>,
+    frontmatter_fields: &HashMap<String, serde_yaml::Value>,
 ) -> Vec<SchedulerAction> {
     let mut actions = Vec::new();
 
@@ -60,7 +77,9 @@ pub fn evaluate_outgoing_edges(
         .map(|n| n.iter)
         .unwrap_or(1);
 
-    let ctx = EvalContext::new(source_iter);
+    let ctx = EvalContext::new(source_iter)
+        .with_variables(resolved_vars.clone())
+        .with_fields(frontmatter_fields.clone());
 
     for edge in &pipeline.edges {
         if edge.source.node != completed_node_id {
@@ -108,6 +127,8 @@ pub fn evaluate_outgoing_edges(
                     &condition::HaltContext {
                         iter: source_iter,
                         node_id: completed_node_id.to_string(),
+                        variables: resolved_vars.clone(),
+                        fields: frontmatter_fields.clone(),
                     },
                 );
                 actions.push(SchedulerAction::Halt { message: rendered });
@@ -163,6 +184,7 @@ mod tests {
                 .map(|n| Port {
                     name: (*n).into(),
                     repeated: false,
+                    frontmatter: None,
                 })
                 .collect(),
             outputs: outputs
@@ -170,6 +192,7 @@ mod tests {
                 .map(|n| Port {
                     name: (*n).into(),
                     repeated: false,
+                    frontmatter: None,
                 })
                 .collect(),
             interactive: false,

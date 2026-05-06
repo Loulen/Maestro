@@ -124,11 +124,39 @@ pub fn build_preamble(ctx: &AugmentContext<'_>) -> String {
         preamble.push_str("No outputs declared.\n\n");
     } else {
         for output in &outputs {
-            preamble.push_str(&format!(
-                "- `{}`: write to `{}`\n",
-                output.port_name,
-                output.path.display()
-            ));
+            let port = ctx.node.outputs.iter().find(|p| p.name == output.port_name);
+            let has_schema = port.is_some_and(|p| p.frontmatter.is_some());
+
+            if has_schema {
+                let schema = port.unwrap().frontmatter.as_ref().unwrap();
+                preamble.push_str(&format!(
+                    "- `{}`: write to `{}`\n",
+                    output.port_name,
+                    output.path.display()
+                ));
+                preamble.push_str("  Required YAML frontmatter:\n");
+                for (field_name, field_decl) in schema {
+                    if let Some(ref allowed) = field_decl.allowed {
+                        preamble.push_str(&format!(
+                            "  - `{}`: {} (allowed: {})\n",
+                            field_name,
+                            field_decl.field_type,
+                            allowed.join(", ")
+                        ));
+                    } else {
+                        preamble.push_str(&format!(
+                            "  - `{}`: {}\n",
+                            field_name, field_decl.field_type
+                        ));
+                    }
+                }
+            } else {
+                preamble.push_str(&format!(
+                    "- `{}`: write to `{}`\n",
+                    output.port_name,
+                    output.path.display()
+                ));
+            }
         }
         preamble.push('\n');
     }
@@ -194,10 +222,12 @@ mod tests {
                 inputs: vec![Port {
                     name: "task".into(),
                     repeated: false,
+                    frontmatter: None,
                 }],
                 outputs: vec![Port {
                     name: "plan".into(),
                     repeated: false,
+                    frontmatter: None,
                 }],
                 interactive: false,
                 view: None,
@@ -305,10 +335,12 @@ mod tests {
             inputs: vec![Port {
                 name: "plan".into(),
                 repeated: false,
+                frontmatter: None,
             }],
             outputs: vec![Port {
                 name: "summary".into(),
                 repeated: false,
+                frontmatter: None,
             }],
             interactive: false,
             view: None,
@@ -396,6 +428,7 @@ mod tests {
                     outputs: vec![Port {
                         name: "plan".into(),
                         repeated: false,
+                        frontmatter: None,
                     }],
                     interactive: false,
                     view: None,
@@ -408,6 +441,7 @@ mod tests {
                     outputs: vec![Port {
                         name: "context".into(),
                         repeated: false,
+                        frontmatter: None,
                     }],
                     interactive: false,
                     view: None,
@@ -420,15 +454,18 @@ mod tests {
                         Port {
                             name: "plan".into(),
                             repeated: false,
+                            frontmatter: None,
                         },
                         Port {
                             name: "context".into(),
                             repeated: false,
+                            frontmatter: None,
                         },
                     ],
                     outputs: vec![Port {
                         name: "summary".into(),
                         repeated: false,
+                        frontmatter: None,
                     }],
                     interactive: false,
                     view: None,
@@ -484,5 +521,97 @@ mod tests {
         assert!(preamble.contains("`context`"));
         assert!(preamble.contains("planner/iter-1/plan.md"));
         assert!(preamble.contains("researcher/iter-1/context.md"));
+    }
+
+    #[test]
+    fn frontmatter_schema_injected_in_output_section() {
+        let pipeline = PipelineDef {
+            name: "review-pipe".into(),
+            version: None,
+            variables: HashMap::new(),
+            nodes: vec![NodeDef {
+                id: "reviewer".into(),
+                node_type: NodeType::DocOnly,
+                prompt_file: Some("prompts/reviewer.md".into()),
+                inputs: vec![Port {
+                    name: "code".into(),
+                    repeated: false,
+                    frontmatter: None,
+                }],
+                outputs: vec![Port {
+                    name: "review".into(),
+                    repeated: false,
+                    frontmatter: Some(
+                        [(
+                            "verdict".into(),
+                            crate::pipeline::FrontmatterFieldDecl {
+                                field_type: "enum".into(),
+                                allowed: Some(vec!["PASS".into(), "FAIL".into()]),
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                }],
+                interactive: false,
+                view: None,
+            }],
+            edges: vec![],
+        };
+
+        let node = &pipeline.nodes[0];
+        let vars = HashMap::new();
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let preamble = build_preamble(&ctx);
+        assert!(
+            preamble.contains("Required YAML frontmatter"),
+            "preamble should mention frontmatter schema"
+        );
+        assert!(
+            preamble.contains("`verdict`"),
+            "preamble should mention the verdict field"
+        );
+        assert!(
+            preamble.contains("PASS"),
+            "preamble should list allowed values"
+        );
+        assert!(
+            preamble.contains("FAIL"),
+            "preamble should list allowed values"
+        );
+    }
+
+    #[test]
+    fn output_without_frontmatter_schema_no_schema_section() {
+        let pipeline = sample_pipeline();
+        let node = &pipeline.nodes[0];
+        let vars = HashMap::new();
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let preamble = build_preamble(&ctx);
+        assert!(
+            !preamble.contains("Required YAML frontmatter"),
+            "port without schema should not mention frontmatter requirements"
+        );
+    }
+
+    #[test]
+    fn variables_substitution_in_preamble() {
+        let pipeline = sample_pipeline();
+        let node = &pipeline.nodes[0];
+        let mut vars = HashMap::new();
+        vars.insert(
+            "max_iter_review".into(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(10)),
+        );
+        vars.insert("mode".into(), serde_yaml::Value::String("strict".into()));
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let preamble = build_preamble(&ctx);
+        assert!(preamble.contains("$max_iter_review"));
+        assert!(preamble.contains("10"));
+        assert!(preamble.contains("$mode"));
+        assert!(preamble.contains("strict"));
     }
 }

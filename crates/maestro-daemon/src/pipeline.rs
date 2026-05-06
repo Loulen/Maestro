@@ -25,10 +25,20 @@ pub enum NodeType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontmatterFieldDecl {
+    #[serde(rename = "type")]
+    pub field_type: String,
+    #[serde(default)]
+    pub allowed: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Port {
     pub name: String,
     #[serde(default)]
     pub repeated: bool,
+    #[serde(default)]
+    pub frontmatter: Option<HashMap<String, FrontmatterFieldDecl>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,16 +133,89 @@ pub struct EdgeDef {
     pub when: Option<serde_yaml::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum VariableType {
+    Int,
+    Float,
+    String,
+    Bool,
+    List,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariableDef {
+    #[serde(rename = "type")]
+    pub var_type: VariableType,
+    pub default: serde_yaml::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineDef {
     pub name: String,
     pub version: Option<String>,
-    #[serde(default)]
-    pub variables: HashMap<String, serde_yaml::Value>,
+    #[serde(default, deserialize_with = "deserialize_variables")]
+    pub variables: HashMap<String, VariableDef>,
     #[serde(default)]
     pub nodes: Vec<NodeDef>,
     #[serde(default)]
     pub edges: Vec<EdgeDef>,
+}
+
+fn infer_variable_type(val: &serde_yaml::Value) -> VariableType {
+    match val {
+        serde_yaml::Value::Bool(_) => VariableType::Bool,
+        serde_yaml::Value::Number(n) => {
+            if n.is_f64() && !n.is_i64() && !n.is_u64() {
+                VariableType::Float
+            } else {
+                VariableType::Int
+            }
+        }
+        serde_yaml::Value::Sequence(_) => VariableType::List,
+        _ => VariableType::String,
+    }
+}
+
+fn deserialize_variables<'de, D>(deserializer: D) -> Result<HashMap<String, VariableDef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: HashMap<String, serde_yaml::Value> = HashMap::deserialize(deserializer)?;
+    let mut result = HashMap::new();
+
+    for (name, value) in raw {
+        let var_def = if let Some(mapping) = value.as_mapping() {
+            let has_type = mapping.contains_key(serde_yaml::Value::String("type".into()));
+            let has_default = mapping.contains_key(serde_yaml::Value::String("default".into()));
+            if has_type && has_default {
+                serde_yaml::from_value::<VariableDef>(value).map_err(serde::de::Error::custom)?
+            } else {
+                VariableDef {
+                    var_type: infer_variable_type(&value),
+                    default: value,
+                }
+            }
+        } else {
+            VariableDef {
+                var_type: infer_variable_type(&value),
+                default: value,
+            }
+        };
+        result.insert(name, var_def);
+    }
+
+    Ok(result)
+}
+
+impl PipelineDef {
+    pub fn variable_defaults(&self) -> HashMap<String, serde_yaml::Value> {
+        self.variables
+            .iter()
+            .map(|(k, v)| (k.clone(), v.default.clone()))
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -445,6 +528,77 @@ nodes:
     }
 
     #[test]
+    fn parses_typed_variables_explicit_form() {
+        let yaml = r#"
+name: typed-vars
+variables:
+  max_iter:
+    type: int
+    default: 5
+  mode:
+    type: string
+    default: strict
+  verbose:
+    type: bool
+    default: true
+nodes: []
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        let vars = &result.pipeline.variables;
+        assert_eq!(vars.len(), 3);
+        assert_eq!(vars["max_iter"].var_type, VariableType::Int);
+        assert_eq!(
+            vars["max_iter"].default,
+            serde_yaml::Value::Number(serde_yaml::Number::from(5))
+        );
+        assert_eq!(vars["mode"].var_type, VariableType::String);
+        assert_eq!(
+            vars["mode"].default,
+            serde_yaml::Value::String("strict".into())
+        );
+        assert_eq!(vars["verbose"].var_type, VariableType::Bool);
+        assert_eq!(vars["verbose"].default, serde_yaml::Value::Bool(true));
+    }
+
+    #[test]
+    fn parses_variables_inferred_type_from_value() {
+        let yaml = r#"
+name: inferred-vars
+variables:
+  max_iter: 5
+  threshold: 0.8
+  mode: strict
+  verbose: true
+  tags: [a, b, c]
+nodes: []
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        let vars = &result.pipeline.variables;
+        assert_eq!(vars["max_iter"].var_type, VariableType::Int);
+        assert_eq!(vars["threshold"].var_type, VariableType::Float);
+        assert_eq!(vars["mode"].var_type, VariableType::String);
+        assert_eq!(vars["verbose"].var_type, VariableType::Bool);
+        assert_eq!(vars["tags"].var_type, VariableType::List);
+    }
+
+    #[test]
+    fn variable_defaults_extracts_values() {
+        let yaml = r#"
+name: defaults-test
+variables:
+  max_iter: 5
+  threshold: 0.8
+nodes: []
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        let defaults = result.pipeline.variable_defaults();
+        assert_eq!(
+            defaults["max_iter"],
+            serde_yaml::Value::Number(serde_yaml::Number::from(5))
+        );
+    }
+
+    #[test]
     fn parses_pipeline_with_edges_and_variables() {
         let yaml = r#"
 name: full-pipeline
@@ -741,5 +895,45 @@ edges:
         assert_eq!(result.pipeline.nodes[0].outputs.len(), 2);
         assert_eq!(result.pipeline.nodes[1].inputs.len(), 2);
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_output_port_with_frontmatter_schema() {
+        let yaml = r#"
+name: with-schema
+nodes:
+  - id: reviewer
+    type: doc-only
+    prompt_file: p.md
+    inputs:
+      - name: code
+    outputs:
+      - name: review
+        frontmatter:
+          verdict:
+            type: enum
+            allowed: [PASS, FAIL]
+          score:
+            type: int
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        let port = &result.pipeline.nodes[0].outputs[0];
+        assert_eq!(port.name, "review");
+        let schema = port.frontmatter.as_ref().unwrap();
+        assert_eq!(schema.len(), 2);
+        assert_eq!(schema["verdict"].field_type, "enum");
+        assert_eq!(
+            schema["verdict"].allowed,
+            Some(vec!["PASS".into(), "FAIL".into()])
+        );
+        assert_eq!(schema["score"].field_type, "int");
+        assert!(schema["score"].allowed.is_none());
+    }
+
+    #[test]
+    fn output_port_without_frontmatter_has_none() {
+        let result = parse_pipeline(VALID_MINIMAL).unwrap();
+        let port = &result.pipeline.nodes[0].outputs[0];
+        assert!(port.frontmatter.is_none());
     }
 }

@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
+use crate::variable_resolver;
+
 #[derive(Debug, Clone)]
 pub struct EvalContext {
     pub iter: i64,
     pub fields: HashMap<String, serde_yaml::Value>,
+    pub variables: HashMap<String, serde_yaml::Value>,
 }
 
 impl EvalContext {
@@ -11,13 +14,25 @@ impl EvalContext {
         Self {
             iter,
             fields: HashMap::new(),
+            variables: HashMap::new(),
         }
+    }
+
+    pub fn with_variables(mut self, variables: HashMap<String, serde_yaml::Value>) -> Self {
+        self.variables = variables;
+        self
+    }
+
+    pub fn with_fields(mut self, fields: HashMap<String, serde_yaml::Value>) -> Self {
+        self.fields = fields;
+        self
     }
 }
 
 fn evaluate_predicate(
     predicate: &serde_yaml::Value,
     field_value: Option<&serde_yaml::Value>,
+    variables: &HashMap<String, serde_yaml::Value>,
 ) -> bool {
     let Some(pred_map) = predicate.as_mapping() else {
         return false;
@@ -28,7 +43,12 @@ fn evaluate_predicate(
             return false;
         };
 
-        if !apply_op(op, field_value, op_value) {
+        let resolved = match variable_resolver::resolve_value(op_value, variables) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+
+        if !apply_op(op, field_value, &resolved) {
             return false;
         }
     }
@@ -126,14 +146,14 @@ pub fn evaluate_with_iter(when: &serde_yaml::Value, ctx: &EvalContext) -> bool {
 
         if field_name == "iter" {
             let iter_val = serde_yaml::Value::Number(serde_yaml::Number::from(ctx.iter));
-            if !evaluate_predicate(predicate, Some(&iter_val)) {
+            if !evaluate_predicate(predicate, Some(&iter_val), &ctx.variables) {
                 return false;
             }
             continue;
         }
 
         let field_value = ctx.fields.get(field_name);
-        if !evaluate_predicate(predicate, field_value) {
+        if !evaluate_predicate(predicate, field_value, &ctx.variables) {
             return false;
         }
     }
@@ -151,12 +171,56 @@ fn evaluate_any_with_iter(clauses: &serde_yaml::Value, ctx: &EvalContext) -> boo
 pub struct HaltContext {
     pub iter: i64,
     pub node_id: String,
+    pub variables: HashMap<String, serde_yaml::Value>,
+    pub fields: HashMap<String, serde_yaml::Value>,
 }
 
 pub fn render_halt_message(template: &str, ctx: &HaltContext) -> String {
-    template
+    let mut result = template
         .replace("{iter}", &ctx.iter.to_string())
-        .replace("{node-id}", &ctx.node_id)
+        .replace("{node-id}", &ctx.node_id);
+
+    for (name, value) in &ctx.variables {
+        let placeholder = format!("{{${name}}}");
+        if result.contains(&placeholder) {
+            let val_str = yaml_value_to_display_string(value);
+            result = result.replace(&placeholder, &val_str);
+        }
+    }
+
+    for (name, value) in &ctx.fields {
+        let placeholder = format!("{{{name}}}");
+        if placeholder == "{iter}" || placeholder == "{node-id}" {
+            continue;
+        }
+        if result.contains(&placeholder) {
+            let val_str = yaml_value_to_display_string(value);
+            result = result.replace(&placeholder, &val_str);
+        }
+    }
+
+    result
+}
+
+fn yaml_value_to_display_string(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.to_string()
+            } else if let Some(u) = n.as_u64() {
+                u.to_string()
+            } else {
+                n.as_f64().unwrap_or(0.0).to_string()
+            }
+        }
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Null => "null".into(),
+        other => serde_yaml::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -429,6 +493,8 @@ mod tests {
             &HaltContext {
                 iter: 5,
                 node_id: "reviewer".into(),
+                variables: HashMap::new(),
+                fields: HashMap::new(),
             },
         );
         assert_eq!(msg, "Blocked after 5 iterations on reviewer");
@@ -441,9 +507,46 @@ mod tests {
             &HaltContext {
                 iter: 1,
                 node_id: "x".into(),
+                variables: HashMap::new(),
+                fields: HashMap::new(),
             },
         );
         assert_eq!(msg, "Pipeline halted");
+    }
+
+    #[test]
+    fn render_halt_message_with_variable_substitution() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "max_iter_review".into(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(5)),
+        );
+        let msg = render_halt_message(
+            "Blocked after {iter} of {$max_iter_review} iterations",
+            &HaltContext {
+                iter: 5,
+                node_id: "reviewer".into(),
+                variables,
+                fields: HashMap::new(),
+            },
+        );
+        assert_eq!(msg, "Blocked after 5 of 5 iterations");
+    }
+
+    #[test]
+    fn render_halt_message_with_frontmatter_field() {
+        let mut fields = HashMap::new();
+        fields.insert("verdict".into(), serde_yaml::Value::String("FAIL".into()));
+        let msg = render_halt_message(
+            "Halted: verdict was {verdict}",
+            &HaltContext {
+                iter: 3,
+                node_id: "reviewer".into(),
+                variables: HashMap::new(),
+                fields,
+            },
+        );
+        assert_eq!(msg, "Halted: verdict was FAIL");
     }
 
     // --- combined predicate on single field ---
@@ -456,5 +559,118 @@ mod tests {
         assert!(evaluate_with_iter(&when, &ctx_iter(3)));
         assert!(evaluate_with_iter(&when, &ctx_iter(4)));
         assert!(!evaluate_with_iter(&when, &ctx_iter(5)));
+    }
+
+    // --- $<var> resolution in conditions ---
+
+    #[test]
+    fn dollar_var_resolved_in_lt_operand() {
+        let when = yaml("iter: { lt: \"$max_iter\" }");
+        let ctx = EvalContext::new(3).with_variables(
+            [(
+                "max_iter".into(),
+                serde_yaml::Value::Number(serde_yaml::Number::from(5)),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn dollar_var_resolved_in_gte_operand() {
+        let when = yaml("iter: { gte: \"$max_iter\" }");
+        let ctx = EvalContext::new(5).with_variables(
+            [(
+                "max_iter".into(),
+                serde_yaml::Value::Number(serde_yaml::Number::from(5)),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn dollar_var_not_met_returns_false() {
+        let when = yaml("iter: { lt: \"$max_iter\" }");
+        let ctx = EvalContext::new(5).with_variables(
+            [(
+                "max_iter".into(),
+                serde_yaml::Value::Number(serde_yaml::Number::from(5)),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(!evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn undefined_dollar_var_returns_false() {
+        let when = yaml("iter: { lt: \"$nonexistent\" }");
+        let ctx = ctx_iter(3);
+        assert!(!evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn frontmatter_field_in_condition() {
+        let when = yaml("verdict: { in: [PASS, APPROVED] }");
+        let ctx = EvalContext::new(1).with_fields(
+            [("verdict".into(), serde_yaml::Value::String("PASS".into()))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn frontmatter_field_not_in_condition() {
+        let when = yaml("verdict: { not_in: [PASS, APPROVED] }");
+        let ctx = EvalContext::new(1).with_fields(
+            [("verdict".into(), serde_yaml::Value::String("FAIL".into()))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn combined_iter_and_frontmatter_and_variable() {
+        let when = yaml("iter: { lt: \"$max_iter\" }\nverdict: { not_in: [PASS, APPROVED] }");
+        let ctx = EvalContext::new(2)
+            .with_variables(
+                [(
+                    "max_iter".into(),
+                    serde_yaml::Value::Number(serde_yaml::Number::from(5)),
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .with_fields(
+                [("verdict".into(), serde_yaml::Value::String("FAIL".into()))]
+                    .into_iter()
+                    .collect(),
+            );
+        assert!(evaluate_with_iter(&when, &ctx));
+    }
+
+    #[test]
+    fn combined_iter_and_frontmatter_false_when_verdict_pass() {
+        let when = yaml("iter: { lt: \"$max_iter\" }\nverdict: { not_in: [PASS, APPROVED] }");
+        let ctx = EvalContext::new(2)
+            .with_variables(
+                [(
+                    "max_iter".into(),
+                    serde_yaml::Value::Number(serde_yaml::Number::from(5)),
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .with_fields(
+                [("verdict".into(), serde_yaml::Value::String("PASS".into()))]
+                    .into_iter()
+                    .collect(),
+            );
+        assert!(!evaluate_with_iter(&when, &ctx));
     }
 }
