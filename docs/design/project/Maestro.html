@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Maestro · Visual Editor & Run Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="styles.css"/>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<style>
+  html,body{margin:0;padding:0;background:#0a0c10;}
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script src="data.js"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="chrome.jsx"></script>
+<script type="text/babel" src="dag.jsx"></script>
+<script type="text/babel" src="runs-list.jsx"></script>
+<script type="text/babel" src="inspector.jsx"></script>
+<script type="text/babel" src="modal.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+
+<script type="text/babel" data-presets="env,react">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accent": "#f59e0b",
+  "background": "#0f1115",
+  "panelTone": "cool"
+}/*EDITMODE-END*/;
+
+function MaestroApp() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const [modal1, setModal1] = React.useState(false);
+
+  // apply tweaks via root css vars
+  React.useEffect(() => {
+    const r = document.documentElement;
+    r.style.setProperty('--acc', t.accent);
+    r.style.setProperty('--acc-dim', t.accent);
+    r.style.setProperty('--st-running', t.accent === '#10b981' ? '#3b82f6' : t.accent);
+    if (t.background === '#000000') {
+      r.style.setProperty('--bg-1', '#000000'); r.style.setProperty('--bg-0', '#000000');
+      r.style.setProperty('--bg-2', '#0a0a0c'); r.style.setProperty('--bg-3', '#141418');
+    } else if (t.background === '#13110f') {
+      r.style.setProperty('--bg-1', '#13110f'); r.style.setProperty('--bg-2', '#181612');
+      r.style.setProperty('--bg-3', '#1f1c17');
+    } else {
+      r.style.setProperty('--bg-1', '#0f1115'); r.style.setProperty('--bg-2', '#14171d');
+      r.style.setProperty('--bg-3', '#1a1e25');
+    }
+  }, [t.accent, t.background]);
+
+  return (
+    <>
+      <DesignCanvas minScale={0.05} maxScale={2}>
+        <DCSection id="run" title="Run mode" subtitle="Monitor active and recent pipeline runs">
+          <DCArtboard id="run-default" label="01 · Run mode default — pipeline running" width={ART_W} height={ART_H}>
+            <Screen1 modal={modal1} setModal={setModal1}/>
+          </DCArtboard>
+          <DCArtboard id="run-blocked" label="02 · Run blocked at halt" width={ART_W} height={ART_H}>
+            <Screen2/>
+          </DCArtboard>
+          <DCArtboard id="run-awaiting" label="03 · Awaiting user input" width={ART_W} height={ART_H}>
+            <Screen3/>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="edit" title="Edit mode" subtitle="Author and edit pipeline definitions">
+          <DCArtboard id="edit-node" label="04 · Edit · node selected" width={ART_W} height={ART_H}>
+            <Screen4/>
+          </DCArtboard>
+          <DCArtboard id="edit-edge" label="05 · Edit · edge with when:" width={ART_W} height={ART_H}>
+            <Screen5/>
+          </DCArtboard>
+          <DCArtboard id="edit-pipeline" label="06 · Edit · pipeline-level inspector" width={ART_W} height={ART_H}>
+            <Screen6/>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="states" title="Modals & empty states">
+          <DCArtboard id="new-run-modal" label="07 · + New Run modal" width={ART_W} height={ART_H}>
+            <Screen7/>
+          </DCArtboard>
+          <DCArtboard id="empty" label="08 · First launch — empty state" width={ART_W} height={ART_H}>
+            <Screen8/>
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection label="Theme"/>
+        <TweakColor label="Accent" value={t.accent}
+          options={['#10b981','#a78bfa','#3b82f6','#f59e0b','#e5e5e5']}
+          onChange={(v) => setTweak('accent', v)}/>
+        <TweakColor label="Background" value={t.background}
+          options={['#000000','#0f1115','#13110f']}
+          onChange={(v) => setTweak('background', v)}/>
+      </TweaksPanel>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<MaestroApp/>);
+</script>
+
+</body>
+</html>

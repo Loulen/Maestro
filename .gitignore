@@ -1,0 +1,23 @@
+# Node
+node_modules/
+dist/
+*.log
+
+# Rust (will be relevant once Slice 1 lands)
+target/
+Cargo.lock.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Sandcastle local state
+.sandcastle/logs/
+.sandcastle/worktrees/
+.sandcastle/.env
+
+# Env files at any path
+.env
+.env.local
