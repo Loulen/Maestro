@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 import { useDaemonSocket } from "./hooks/useDaemonSocket";
 import type { ConnectionStatus } from "./hooks/useDaemonSocket";
@@ -21,6 +21,9 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "./components/ui/resizable";
+
+const PANEL_IDS = ["left", "center", "right"];
+const DEFAULT_SIZES = { left: 15, center: 60, right: 25 };
 
 function useRuns() {
   const [runs, setRuns] = useState<RunListEntry[]>([]);
@@ -127,10 +130,8 @@ export default function App() {
 
   const isArchived = selectedRun?.status === "archived";
 
-  const panelIds = useMemo(() => ["left", "center", "right"], []);
-  const defaultSizes = useMemo(() => ({ left: 15, center: 60, right: 25 }), []);
-  const runLayout = useResizableLayout("run", panelIds, defaultSizes);
-  const editLayout = useResizableLayout("edit", panelIds, defaultSizes);
+  const runLayout = useResizableLayout("run", PANEL_IDS, DEFAULT_SIZES);
+  const editLayout = useResizableLayout("edit", PANEL_IDS, DEFAULT_SIZES);
   const layout = editMode ? editLayout : runLayout;
   const minSizePx = `${layout.minSizePx}px`;
 
