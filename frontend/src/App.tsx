@@ -110,20 +110,21 @@ export default function App() {
           onSelectNode={setSelectedNodeId}
           selectedNodeId={selectedNodeId}
         />
-        {selectedNode && selectedRun ? (
+        {selectedNode && selectedRun && (
           <NodeDetailPanel
             node={selectedNode}
             runId={selectedRun.run_id}
             isArchived={isArchived}
           />
-        ) : isArchived && selectedRun ? (
+        )}
+        {!selectedNode && isArchived && selectedRun && (
           <aside className="flex w-[340px] shrink-0 flex-col items-center justify-center border-l border-line bg-bg-2 text-fg-4" style={{ fontSize: "12px" }}>
             <div className="text-center px-6">
               <div className="font-medium text-fg-3">Run archived</div>
               <div className="mt-1">No live state available. Select a node to view its final status.</div>
             </div>
           </aside>
-        ) : null}
+        )}
       </main>
       <StatusBar status={status} />
     </div>
