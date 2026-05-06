@@ -82,6 +82,15 @@ struct NodeFailRequest {
     iter: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct RunCommandRequest {
+    kind: String,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    iter: Option<i64>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -137,6 +146,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/events", get(get_run_events))
         .route("/runs/{run_id}/nodes/{node_id}/done", post(node_done))
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
+        .route("/runs/{run_id}/commands", post(run_command))
+        .route("/sessions/{session_id}/attach", post(session_attach))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -303,6 +314,21 @@ async fn spawn_node(state: &AppState, spawn_ctx: &SpawnContext<'_>, node: &pipel
         state.port,
     ) {
         error!("failed to spawn tmux session: {e}");
+    }
+
+    if node.interactive {
+        let awaiting = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::NodeAwaitingUser,
+            node_id: Some(node.id.clone()),
+            iter: Some(1),
+            payload: None,
+        };
+        if let Err(e) = append_event(state, &awaiting).await {
+            error!("failed to append node_awaiting_user: {e}");
+        }
     }
 }
 
@@ -672,6 +698,240 @@ async fn node_fail(
 
     info!("Node {node_id} failed in run {run_id}");
     (StatusCode::OK, "ok").into_response()
+}
+
+async fn run_command(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+    Json(req): Json<RunCommandRequest>,
+) -> Response {
+    match req.kind.as_str() {
+        "mark_node_done" => {
+            let Some(node_id) = req.node_id else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "node_id required for mark_node_done" })),
+                )
+                    .into_response();
+            };
+            let iter = req.iter.unwrap_or(1);
+
+            // Verify the node is in awaiting_user state
+            let events = match load_events(&state.db, &run_id).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            };
+            if let Some(run_state) = event_log::project(&events) {
+                if let Some(node) = run_state.nodes.get(&node_id) {
+                    if node.status != event_log::NodeStatus::AwaitingUser
+                        && node.status != event_log::NodeStatus::Running
+                    {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(serde_json::json!({
+                                "error": format!("node {} is {:?}, cannot mark done", node_id, node.status)
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+
+            let event = event_log::Event {
+                id: None,
+                run_id: run_id.clone(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeCompleted,
+                node_id: Some(node_id.clone()),
+                iter: Some(iter),
+                payload: Some(serde_json::json!({ "source": "mark_node_done" })),
+            };
+
+            if let Err(e) = append_event(&state, &event).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+            }
+
+            // Check if all nodes completed → emit run_completed
+            let events = match load_events(&state.db, &run_id).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            };
+
+            if let Some(run_state) = event_log::project(&events) {
+                let all_done = !run_state.nodes.is_empty()
+                    && run_state
+                        .nodes
+                        .values()
+                        .all(|n| n.status == event_log::NodeStatus::Completed);
+
+                if all_done
+                    && (run_state.status == event_log::RunStatus::Running
+                        || run_state.status == event_log::RunStatus::AwaitingUser)
+                {
+                    let run_completed = event_log::Event {
+                        id: None,
+                        run_id: run_id.clone(),
+                        ts: event_log::now_iso(),
+                        kind: event_log::EventKind::RunCompleted,
+                        node_id: None,
+                        iter: None,
+                        payload: None,
+                    };
+                    if let Err(e) = append_event(&state, &run_completed).await {
+                        error!("failed to append run_completed: {e}");
+                    }
+                }
+            }
+
+            info!("mark_node_done: node {node_id} in run {run_id}");
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("unknown command kind: {}", req.kind) })),
+        )
+            .into_response(),
+    }
+}
+
+// --- Session attach ---
+
+#[derive(Serialize)]
+struct AttachResponse {
+    ok: bool,
+    session: String,
+    terminal: String,
+}
+
+async fn session_attach(AxumPath(session_id): AxumPath<String>) -> Response {
+    let terminal = detect_terminal();
+
+    match spawn_terminal_attach(&terminal, &session_id) {
+        Ok(()) => {
+            info!("Attached terminal {terminal} to session {session_id}");
+            (
+                StatusCode::OK,
+                Json(AttachResponse {
+                    ok: true,
+                    session: session_id,
+                    terminal,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("failed to attach: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+fn detect_terminal() -> String {
+    // MAESTRO_TERMINAL env var overrides
+    if let Ok(t) = std::env::var("MAESTRO_TERMINAL") {
+        if !t.is_empty() {
+            return t;
+        }
+    }
+
+    // Heuristic: check TERM_PROGRAM
+    if let Ok(tp) = std::env::var("TERM_PROGRAM") {
+        let tp_lower = tp.to_lowercase();
+        if tp_lower.contains("kitty") {
+            return "kitty".into();
+        }
+        if tp_lower.contains("alacritty") {
+            return "alacritty".into();
+        }
+        if tp_lower.contains("iterm") {
+            return "open -a iTerm".into();
+        }
+    }
+
+    // OS heuristic
+    if cfg!(target_os = "macos") {
+        return "open -a Terminal".into();
+    }
+
+    // Linux: check for common terminals in PATH
+    for candidate in &["kitty", "alacritty", "gnome-terminal", "konsole", "xterm"] {
+        if which_exists(candidate) {
+            return (*candidate).into();
+        }
+    }
+
+    "xterm".into()
+}
+
+fn which_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn spawn_terminal_attach(terminal: &str, session_name: &str) -> Result<()> {
+    let parts: Vec<&str> = terminal.split_whitespace().collect();
+    let (cmd, prefix_args) = parts
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("empty terminal command"))?;
+
+    let escaped_name = shell_escape(session_name);
+    let tmux_cmd = format!("tmux attach -t {escaped_name}");
+
+    let mut command = std::process::Command::new(cmd);
+    command.args(prefix_args);
+
+    match *cmd {
+        "gnome-terminal" => {
+            command.args(["--", "bash", "-c", &tmux_cmd]);
+        }
+        "konsole" => {
+            command.args(["-e", "bash", "-c", &tmux_cmd]);
+        }
+        "kitty" => {
+            command.args(["bash", "-c", &tmux_cmd]);
+        }
+        "alacritty" => {
+            command.args(["-e", "bash", "-c", &tmux_cmd]);
+        }
+        "xterm" => {
+            command.args(["-e", &tmux_cmd]);
+        }
+        "open" => {
+            // macOS: open -a Terminal <script>
+            // We create a temp script that attaches
+            let script = format!("#!/bin/bash\ntmux attach -t {escaped_name}\n");
+            let script_path =
+                std::env::temp_dir().join(format!("maestro-attach-{session_name}.sh"));
+            std::fs::write(&script_path, &script)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+            }
+            command.arg(script_path);
+        }
+        _ => {
+            command.args(["-e", "bash", "-c", &tmux_cmd]);
+        }
+    }
+
+    let child = command.spawn().context("failed to spawn terminal")?;
+    std::mem::forget(child);
+
+    Ok(())
 }
 
 // --- WebSocket handler with event broadcasting ---
@@ -1131,6 +1391,155 @@ mod tests {
             run_state.nodes["worker"].status,
             event_log::NodeStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn mark_node_done_command_completes_awaiting_node() {
+        let state = test_state().await;
+
+        let run_id = "test-interactive-run";
+        // Simulate: run_started → node_started → node_awaiting_user
+        for event in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunStarted,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({ "pipeline_name": "interactive" })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("griller".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeAwaitingUser,
+                node_id: Some("griller".into()),
+                iter: Some(1),
+                payload: None,
+            },
+        ] {
+            append_event(&state, &event).await.unwrap();
+        }
+
+        // Verify run is awaiting_user
+        let events = load_events(&state.db, run_id).await.unwrap();
+        let run_state = event_log::project(&events).unwrap();
+        assert_eq!(run_state.status, event_log::RunStatus::AwaitingUser);
+
+        // Call mark_node_done
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind": "mark_node_done", "node_id": "griller", "iter": 1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Verify run is completed (single-node pipeline)
+        let events = load_events(&state.db, run_id).await.unwrap();
+        let run_state = event_log::project(&events).unwrap();
+        assert_eq!(run_state.status, event_log::RunStatus::Completed);
+        assert_eq!(
+            run_state.nodes["griller"].status,
+            event_log::NodeStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_node_done_rejects_unknown_command() {
+        let state = test_state().await;
+
+        let run_id = "test-unknown-cmd";
+        let event = event_log::Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "test" })),
+        };
+        append_event(&state, &event).await.unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind": "nope"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mark_node_done_requires_node_id() {
+        let state = test_state().await;
+
+        let run_id = "test-no-node-id";
+        let event = event_log::Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "test" })),
+        };
+        append_event(&state, &event).await.unwrap();
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind": "mark_node_done"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn detect_terminal_respects_env_override() {
+        // Save and set MAESTRO_TERMINAL
+        let prev = std::env::var("MAESTRO_TERMINAL").ok();
+        std::env::set_var("MAESTRO_TERMINAL", "my-custom-terminal");
+        let result = detect_terminal();
+        // Restore
+        match prev {
+            Some(v) => std::env::set_var("MAESTRO_TERMINAL", v),
+            None => std::env::remove_var("MAESTRO_TERMINAL"),
+        }
+        assert_eq!(result, "my-custom-terminal");
     }
 
     #[tokio::test]

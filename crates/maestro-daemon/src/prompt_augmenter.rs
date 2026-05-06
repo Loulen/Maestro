@@ -132,16 +132,29 @@ pub fn build_preamble(ctx: &AugmentContext<'_>) -> String {
 
     // CLI commands
     preamble.push_str("## Completion\n\n");
-    preamble.push_str(
-        "When you are done, signal completion by running:\n\
-         ```\n\
-         maestro complete\n\
-         ```\n\n\
-         If you cannot complete the task, signal failure:\n\
-         ```\n\
-         maestro fail --reason \"<description of the problem>\"\n\
-         ```\n\n",
-    );
+    if ctx.node.interactive {
+        preamble.push_str(
+            "This is an **interactive** node. Do NOT call `maestro complete`.\n\
+             The user will attach to this terminal session, interact with you,\n\
+             and click **\"Mark complete\"** in the Maestro UI when done.\n\
+             Write your outputs to the paths listed above before the user marks complete.\n\n\
+             If you cannot complete the task, signal failure:\n\
+             ```\n\
+             maestro fail --reason \"<description of the problem>\"\n\
+             ```\n\n",
+        );
+    } else {
+        preamble.push_str(
+            "When you are done, signal completion by running:\n\
+             ```\n\
+             maestro complete\n\
+             ```\n\n\
+             If you cannot complete the task, signal failure:\n\
+             ```\n\
+             maestro fail --reason \"<description of the problem>\"\n\
+             ```\n\n",
+        );
+    }
 
     // Variables
     if !ctx.variables.is_empty() {
@@ -320,6 +333,36 @@ mod tests {
             inputs[0].path,
             PathBuf::from("/repo/.maestro/artifacts/planner/iter-1/plan.md")
         );
+    }
+
+    #[test]
+    fn interactive_node_preamble_omits_maestro_complete_instruction() {
+        let mut pipeline = sample_pipeline();
+        pipeline.nodes[0].interactive = true;
+        let node = &pipeline.nodes[0];
+        let vars = HashMap::new();
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let preamble = build_preamble(&ctx);
+        assert!(
+            !preamble.contains("signal completion by running"),
+            "interactive node should not instruct to run maestro complete"
+        );
+        assert!(preamble.contains("Do NOT call `maestro complete`"));
+        assert!(preamble.contains("Mark complete"));
+        assert!(preamble.contains("maestro fail --reason"));
+    }
+
+    #[test]
+    fn non_interactive_node_preamble_includes_maestro_complete() {
+        let pipeline = sample_pipeline();
+        let node = &pipeline.nodes[0];
+        assert!(!node.interactive);
+        let vars = HashMap::new();
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let preamble = build_preamble(&ctx);
+        assert!(preamble.contains("maestro complete"));
     }
 
     #[test]
