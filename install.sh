@@ -56,7 +56,7 @@ download_and_verify() {
 
   info "Verifying" "SHA256 checksum"
   local expected
-  expected="$(grep "${archive}" "${tmpdir}/${checksum_file}" | awk '{print $1}')"
+  expected="$(grep -F "${archive}" "${tmpdir}/${checksum_file}" | awk '{print $1}')"
   [ -n "$expected" ] || err "No checksum found for ${archive}"
 
   local actual

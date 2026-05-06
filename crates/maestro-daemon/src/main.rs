@@ -21,7 +21,7 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -47,7 +47,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(clap::Subcommand, Debug)]
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the Maestro daemon
     Daemon {
