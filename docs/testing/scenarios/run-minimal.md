@@ -92,6 +92,30 @@
    At minimum `_input.md` is present; depending on what claude wrote, an
    `only.md` artifact may also be there.
 
+### Step 5c — Inputs/Outputs sections visible (refs #27)
+
+After selecting the running (or completed) node `only` in the DAG, the right
+panel should show **Inputs** and **Outputs** sections below the terminal
+preview.  Assert:
+
+- **Inputs** section lists port `in` with a status dot (green if the file
+  exists, grey if not).
+- **Outputs** section lists port `out`.  Once the node completes and writes
+  `only/iter-1/out.md`, the status dot turns green and a file-size badge
+  appears.
+- Each port row displays a truncated artifact path.
+
+### Step 5d — Click output → modal contains MAESTRO_RUN_MINIMAL_OK (refs #27)
+
+Once step 6 confirms the node completed and the artifact exists:
+
+1. Click the **"open ↗"** link on the `out` output port row.
+2. Assert the **MarkdownArtifactModal** opens (`.artifact-markdown` visible).
+3. The modal body must contain the string **`MAESTRO_RUN_MINIMAL_OK`**.
+4. If the output file has YAML frontmatter, a frontmatter card is displayed
+   above the markdown body.
+5. Close the modal via the **X** button, **Escape** key, or backdrop click.
+
 ### Step 1c — Edit-this-run toggle (refs #28)
 
 9. With the Run still visible (any status), click the **"Edit this run"**

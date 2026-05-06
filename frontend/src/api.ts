@@ -62,6 +62,49 @@ export async function fetchPrompt(
   return resp.text();
 }
 
+// --- Node IO ---
+
+export interface FileInfo {
+  path: string;
+  exists: boolean;
+  size: number | null;
+  frontmatter: Record<string, unknown> | null;
+}
+
+export interface PortIO {
+  port: string;
+  repeated: boolean;
+  files: FileInfo[];
+}
+
+export interface NodeIO {
+  inputs: PortIO[];
+  outputs: PortIO[];
+}
+
+export async function fetchNodeIO(
+  runId: string,
+  nodeId: string,
+  iter: number,
+): Promise<NodeIO> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/io?iter=${iter}`,
+  );
+  if (!resp.ok) throw new Error(`GET io failed: ${resp.status}`);
+  return resp.json();
+}
+
+export async function fetchArtifact(
+  runId: string,
+  relativePath: string,
+): Promise<string> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/artifact?path=${encodeURIComponent(relativePath)}`,
+  );
+  if (!resp.ok) throw new Error(`GET artifact failed: ${resp.status}`);
+  return resp.text();
+}
+
 export async function fetchPane(
   runId: string,
   nodeId: string,

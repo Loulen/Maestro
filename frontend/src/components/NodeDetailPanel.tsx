@@ -1,13 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal, ExternalLink, CheckCircle, AlertCircle } from "lucide-react";
+import {
+  Terminal,
+  ExternalLink,
+  CheckCircle,
+  AlertCircle,
+} from "lucide-react";
 import Convert from "ansi-to-html";
 import type { NodeState, NodeStatus } from "../types";
-import { markNodeDone, attachSession, fetchPane, fetchPrompt } from "../api";
+import {
+  markNodeDone,
+  attachSession,
+  fetchPane,
+  fetchPrompt,
+  fetchNodeIO,
+} from "../api";
+import type { PortIO, FileInfo } from "../api";
 import {
   ResizablePanelGroup,
   ResizablePanel,
   ResizableHandle,
 } from "./ui/resizable";
+import MarkdownArtifactModal from "./MarkdownArtifactModal";
 
 const STATUS_LABELS: Record<NodeStatus, string> = {
   pending: "Pending",
@@ -46,9 +59,17 @@ interface Props {
   isArchived?: boolean;
 }
 
+interface ModalState {
+  portName: string;
+  files: FileInfo[];
+}
+
 export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
   const [terminalHtml, setTerminalHtml] = useState<string>("");
   const [promptText, setPromptText] = useState<string | null>(null);
+  const [inputs, setInputs] = useState<PortIO[]>([]);
+  const [outputs, setOutputs] = useState<PortIO[]>([]);
+  const [modal, setModal] = useState<ModalState | null>(null);
   const terminalRef = useRef<HTMLPreElement>(null);
   const sessionName = `maestro-${runId}-${node.node_id}-iter-${node.iter}`;
   const interval = pollInterval(node.status);
@@ -97,6 +118,32 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
     };
   }, [runId, node.node_id, node.iter, shouldFetchPrompt]);
 
+  // Fetch IO at the same cadence as terminal polling
+  useEffect(() => {
+    if (interval === null) return;
+
+    let cancelled = false;
+
+    async function pollIO() {
+      try {
+        const io = await fetchNodeIO(runId, node.node_id, node.iter);
+        if (!cancelled) {
+          setInputs(io.inputs);
+          setOutputs(io.outputs);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    pollIO();
+    const timer = setInterval(pollIO, interval);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [interval, node.node_id, node.iter, runId]);
+
   // Auto-scroll terminal to bottom on content change
   useEffect(() => {
     if (terminalRef.current) {
@@ -137,7 +184,10 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
             {STATUS_LABELS[node.status] ?? node.status}
           </span>
         </div>
-        <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "10px" }}>
+        <div
+          className="mt-0.5 font-mono text-fg-4"
+          style={{ fontSize: "10px" }}
+        >
           iter {node.iter}
           {node.started_at && ` · started ${formatTime(node.started_at)}`}
           {node.completed_at && ` · ended ${formatTime(node.completed_at)}`}
@@ -148,7 +198,10 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
       {node.status === "awaiting_user" && (
         <div className="flex items-center gap-2 border-b border-st-await/30 bg-st-await-bg px-3 py-2">
           <AlertCircle size={14} className="shrink-0 text-st-await" />
-          <span className="text-st-await" style={{ fontSize: "11.5px", fontWeight: 500 }}>
+          <span
+            className="text-st-await"
+            style={{ fontSize: "11.5px", fontWeight: 500 }}
+          >
             Awaiting user — attach terminal and interact, then mark complete
           </span>
         </div>
@@ -156,7 +209,7 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
 
       <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
         {/* Terminal preview */}
-        <ResizablePanel defaultSize={60} minSize="100px" id="terminal">
+        <ResizablePanel defaultSize={45} minSize="100px" id="terminal">
           <div className="flex h-full flex-col overflow-hidden">
             <div
               className="flex items-center gap-1.5 border-b border-line px-3 py-1.5 text-fg-3"
@@ -174,9 +227,7 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
               }
             >
               {!terminalHtml && (
-                <span className="text-fg-4">
-                  {terminalPlaceholder(node)}
-                </span>
+                <span className="text-fg-4">{terminalPlaceholder(node)}</span>
               )}
             </pre>
           </div>
@@ -184,9 +235,10 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
 
         <ResizableHandle />
 
-        {/* Actions + Initial prompt */}
-        <ResizablePanel defaultSize={40} minSize="100px" id="details">
+        {/* Inputs / Outputs / Actions / Prompt */}
+        <ResizablePanel defaultSize={55} minSize="100px" id="details">
           <div className="flex h-full flex-col overflow-auto">
+            {/* Actions */}
             <div className="flex flex-col gap-1.5 px-3 py-2">
               {showOpenTerminal && (
                 <button
@@ -216,6 +268,32 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
               )}
             </div>
 
+            {/* Inputs section */}
+            {inputs.length > 0 && (
+              <IOSection
+                title="Inputs"
+                ports={inputs}
+                runId={runId}
+                onOpenFile={(portName, files) =>
+                  setModal({ portName, files })
+                }
+              />
+            )}
+
+            {/* Outputs section */}
+            {outputs.length > 0 && (
+              <IOSection
+                title="Outputs"
+                ports={outputs}
+                runId={runId}
+                showFrontmatter
+                onOpenFile={(portName, files) =>
+                  setModal({ portName, files })
+                }
+              />
+            )}
+
+            {/* Initial Prompt */}
             <div className="border-t border-line">
               <div
                 className="flex items-center gap-1.5 px-3 py-1.5 text-fg-3"
@@ -239,7 +317,184 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+
+      {modal && (
+        <MarkdownArtifactModal
+          runId={runId}
+          portName={modal.portName}
+          files={modal.files}
+          onClose={() => setModal(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+// --- IO Section ---
+
+function IOSection({
+  title,
+  ports,
+  runId,
+  showFrontmatter,
+  onOpenFile,
+}: {
+  title: string;
+  ports: PortIO[];
+  runId: string;
+  showFrontmatter?: boolean;
+  onOpenFile: (portName: string, files: FileInfo[]) => void;
+}) {
+  return (
+    <div className="border-t border-line">
+      <div
+        className="flex items-center gap-1.5 px-3 py-1.5 text-fg-3"
+        style={{ fontSize: "11px" }}
+      >
+        {title}
+        <span
+          className="font-mono text-fg-4"
+          style={{ fontSize: "10px" }}
+        >
+          {ports.length}
+        </span>
+      </div>
+      <div className="flex flex-col gap-1 px-3 pb-2">
+        {ports.map((port) => (
+          <PortRow
+            key={port.port}
+            port={port}
+            runId={runId}
+            showFrontmatter={showFrontmatter}
+            onOpen={() => onOpenFile(port.port, port.files)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// --- Port Row ---
+
+function PortRow({
+  port,
+  showFrontmatter,
+  onOpen,
+}: {
+  port: PortIO;
+  runId: string;
+  showFrontmatter?: boolean;
+  onOpen: () => void;
+}) {
+  const firstFile = port.files[0];
+  const anyExists = port.files.some((f) => f.exists);
+  const dotClass = anyExists
+    ? port.repeated && port.files.length > 1
+      ? "bg-st-running"
+      : "bg-st-done"
+    : "bg-fg-5";
+
+  const displayPath =
+    port.files.length === 1
+      ? firstFile?.path ?? ""
+      : port.repeated
+        ? `${port.files.length} files`
+        : firstFile?.path ?? "";
+
+  const totalSize = port.files.reduce(
+    (sum, f) => sum + (f.size ?? 0),
+    0,
+  );
+
+  const frontmatter =
+    showFrontmatter && firstFile?.frontmatter
+      ? firstFile.frontmatter
+      : null;
+
+  return (
+    <div
+      className="port-row grid items-center gap-2 rounded-md border border-line bg-bg-3 px-2.5 py-2"
+      style={{
+        gridTemplateColumns: "8px 1fr auto",
+        fontSize: "11.5px",
+      }}
+    >
+      {/* Status dot */}
+      <div
+        className={`h-2 w-2 rounded-full ${dotClass}`}
+      />
+
+      {/* Name + path */}
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-fg" style={{ fontSize: "11.5px" }}>
+            {port.port}
+          </span>
+          {port.repeated && (
+            <span
+              className="rounded border border-line-strong bg-bg-4 px-1 py-px font-mono text-fg-4"
+              style={{ fontSize: "9px" }}
+            >
+              repeated
+            </span>
+          )}
+        </div>
+        <div
+          className="mt-0.5 truncate font-mono text-fg-3"
+          style={{ fontSize: "10.5px" }}
+        >
+          {displayPath}
+        </div>
+      </div>
+
+      {/* Meta + open link */}
+      <div className="flex items-center gap-2">
+        {anyExists && totalSize > 0 && (
+          <span
+            className="font-mono text-fg-4"
+            style={{ fontSize: "10px" }}
+          >
+            {formatSize(totalSize)}
+          </span>
+        )}
+        {anyExists && (
+          <button
+            onClick={onOpen}
+            className="open-link font-mono text-fg-3 transition-colors hover:text-acc"
+            style={{ fontSize: "10.5px" }}
+          >
+            open ↗
+          </button>
+        )}
+      </div>
+
+      {/* Frontmatter card (spans full width below) */}
+      {frontmatter && Object.keys(frontmatter).length > 0 && (
+        <div
+          className="col-span-3 mt-1 grid rounded border border-line bg-bg-0 p-1.5 font-mono"
+          style={{
+            fontSize: "10px",
+            gridTemplateColumns: "auto 1fr",
+            gap: "2px 8px",
+          }}
+        >
+          {Object.entries(frontmatter).map(([k, v]) => (
+            <FrontmatterKV key={k} field={k} value={v} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FrontmatterKV({ field, value }: { field: string; value: unknown }) {
+  const display =
+    typeof value === "object" ? JSON.stringify(value) : String(value);
+  return (
+    <>
+      <span className="text-fg-3">{field}</span>
+      <span className="text-fg">{display}</span>
+    </>
   );
 }
 
@@ -269,4 +524,10 @@ function formatTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

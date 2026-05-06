@@ -2,6 +2,7 @@ mod blackboard;
 mod condition;
 mod event_log;
 mod frontmatter_parser;
+mod node_io_resolver;
 mod pipeline;
 mod pipeline_watcher;
 mod prompt_augmenter;
@@ -345,6 +346,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
         .route("/runs/{run_id}/nodes/{node_id}/pane", get(node_pane))
         .route("/runs/{run_id}/nodes/{node_id}/prompt", get(node_prompt))
+        .route("/runs/{run_id}/nodes/{node_id}/io", get(node_io))
+        .route("/runs/{run_id}/artifact", get(artifact))
         .route("/runs/{run_id}/pipeline", get(get_run_pipeline))
         .route(
             "/runs/{run_id}/pipeline",
@@ -1572,6 +1575,123 @@ async fn node_prompt(
         )
             .into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "prompt file not found").into_response(),
+    }
+}
+
+// --- Node IO endpoint ---
+
+async fn node_io(
+    State(state): State<Arc<AppState>>,
+    AxumPath((run_id, node_id)): AxumPath<(String, String)>,
+    Query(query): Query<IterQuery>,
+) -> Response {
+    let iter = query.iter;
+
+    let events = match load_events(&state.db, &run_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+        }
+    };
+
+    let run_state = match event_log::project(&events) {
+        Some(s) => s,
+        None => {
+            return (StatusCode::NOT_FOUND, "run not found").into_response();
+        }
+    };
+
+    if !run_state.nodes.contains_key(&node_id)
+        && !run_state.node_defs.iter().any(|nd| nd.id == node_id)
+    {
+        return (StatusCode::NOT_FOUND, "node not found in run").into_response();
+    }
+
+    let yaml_path = run_scoped_pipeline_path(&state.repo_root, &run_id);
+    let pipeline = match std::fs::read_to_string(&yaml_path)
+        .ok()
+        .and_then(|y| pipeline::parse_pipeline(&y).ok())
+    {
+        Some(r) => r.pipeline,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not load run pipeline",
+            )
+                .into_response();
+        }
+    };
+
+    let worktree_dir = state
+        .repo_root
+        .join(".maestro")
+        .join("runs")
+        .join(&run_id)
+        .join("worktree");
+    let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
+
+    let io = node_io_resolver::resolve(&pipeline, &artifacts_dir, &node_id, iter);
+    Json(io).into_response()
+}
+
+// --- Artifact endpoint ---
+
+#[derive(Deserialize)]
+struct ArtifactQuery {
+    path: String,
+}
+
+async fn artifact(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(query): Query<ArtifactQuery>,
+) -> Response {
+    let events = match load_events(&state.db, &run_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+        }
+    };
+
+    if event_log::project(&events).is_none() {
+        return (StatusCode::NOT_FOUND, "run not found").into_response();
+    }
+
+    let worktree_dir = state
+        .repo_root
+        .join(".maestro")
+        .join("runs")
+        .join(&run_id)
+        .join("worktree");
+    let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
+
+    let requested = Path::new(&query.path);
+    let resolved = match artifacts_dir.join(requested).canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, "artifact not found").into_response();
+        }
+    };
+
+    let canonical_artifacts = match artifacts_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, "artifacts directory not found").into_response();
+        }
+    };
+
+    if !resolved.starts_with(&canonical_artifacts) {
+        return (StatusCode::BAD_REQUEST, "path traversal not allowed").into_response();
+    }
+
+    match std::fs::read_to_string(&resolved) {
+        Ok(content) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/markdown")],
+            content,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
     }
 }
 
@@ -4169,5 +4289,305 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ---- Layer 2 contract tests: /io endpoint ----
+
+    fn seed_io_test(dir: &std::path::Path, run_id: &str) {
+        let run_dir = dir.join(".maestro/runs").join(run_id);
+        let pipeline_path = run_dir.join("pipeline.yaml");
+        std::fs::create_dir_all(run_dir.join("worktree/.maestro/artifacts/planner/iter-1"))
+            .unwrap();
+        std::fs::create_dir_all(run_dir.join("worktree/.maestro/artifacts/implementer/iter-1"))
+            .unwrap();
+        std::fs::create_dir_all(pipeline_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &pipeline_path,
+            r#"
+name: io-test-pipe
+nodes:
+  - id: planner
+    type: doc-only
+    prompt_file: p.md
+    inputs:
+      - name: task
+    outputs:
+      - name: plan
+  - id: implementer
+    type: code-mutating
+    prompt_file: p.md
+    inputs:
+      - name: plan
+    outputs:
+      - name: summary
+edges:
+  - source: { node: planner, port: plan }
+    target: { node: implementer, port: plan }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("worktree/.maestro/artifacts/planner/iter-1/plan.md"),
+            "# Plan\nDo stuff.",
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("worktree/.maestro/artifacts/implementer/iter-1/summary.md"),
+            "---\nverdict: PASS\nscore: 9\n---\n\n## Summary\nAll good.",
+        )
+        .unwrap();
+    }
+
+    async fn seed_io_run_events(state: &Arc<AppState>, run_id: &str) {
+        for event in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunStarted,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({
+                    "pipeline_name": "io-test-pipe",
+                    "input": "test",
+                    "node_defs": [
+                        { "id": "planner", "node_type": "doc-only", "inputs": ["task"], "outputs": ["plan"] },
+                        { "id": "implementer", "node_type": "code-mutating", "inputs": ["plan"], "outputs": ["summary"] }
+                    ],
+                    "edges": [
+                        { "source_node": "planner", "source_port": "plan", "target_node": "implementer", "target_port": "plan" }
+                    ]
+                })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("planner".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeCompleted,
+                node_id: Some("planner".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("implementer".into()),
+                iter: Some(1),
+                payload: None,
+            },
+        ] {
+            append_event(state, &event).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn node_io_returns_404_for_missing_run() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/nope/nodes/worker/io?iter=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn node_io_returns_404_for_missing_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "io-missing-node";
+        seed_io_test(tmp.path(), run_id);
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_io_run_events(&state, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/ghost/io?iter=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn node_io_returns_correct_payload_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "io-shape-test";
+        seed_io_test(tmp.path(), run_id);
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_io_run_events(&state, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/implementer/io?iter=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let io: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // inputs array
+        let inputs = io["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0]["port"], "plan");
+        assert_eq!(inputs[0]["repeated"], false);
+        assert!(!inputs[0]["files"].as_array().unwrap().is_empty());
+        assert_eq!(inputs[0]["files"][0]["exists"], true);
+
+        // outputs array
+        let outputs = io["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["port"], "summary");
+        assert_eq!(outputs[0]["files"][0]["exists"], true);
+        // frontmatter parsed
+        let fm = &outputs[0]["files"][0]["frontmatter"];
+        assert_eq!(fm["verdict"], "PASS");
+        assert_eq!(fm["score"], 9);
+    }
+
+    #[tokio::test]
+    async fn node_io_defaults_iter_to_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "io-default-iter";
+        seed_io_test(tmp.path(), run_id);
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_io_run_events(&state, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/implementer/io"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ---- Layer 2 contract tests: /artifact endpoint ----
+
+    #[tokio::test]
+    async fn artifact_returns_404_for_missing_run() {
+        let state = test_state().await;
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/nope/artifact?path=planner/iter-1/plan.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn artifact_returns_content_with_text_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "artifact-content-test";
+        seed_io_test(tmp.path(), run_id);
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_io_run_events(&state, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/runs/{run_id}/artifact?path=planner/iter-1/plan.md"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "text/markdown");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("# Plan"));
+    }
+
+    #[tokio::test]
+    async fn artifact_returns_400_on_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "artifact-traversal";
+        seed_io_test(tmp.path(), run_id);
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_io_run_events(&state, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/runs/{run_id}/artifact?path=../../../../../../etc/passwd"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Should be 400 (traversal) or 404 (file not found after canonicalize fails)
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
+            "expected 400 or 404 for traversal, got {}",
+            resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_returns_404_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_id = "artifact-missing-file";
+        seed_io_test(tmp.path(), run_id);
+        let state = test_state_with_dir(tmp.path()).await;
+        seed_io_run_events(&state, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/runs/{run_id}/artifact?path=planner/iter-1/nonexistent.md"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
