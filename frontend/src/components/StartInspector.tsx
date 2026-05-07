@@ -7,9 +7,10 @@ import MarkdownArtifactModal from "./MarkdownArtifactModal";
 interface Props {
   startNode: StartNodeInfo;
   runId: string;
+  nodeId: string;
 }
 
-export default function StartInspector({ startNode, runId }: Props) {
+export default function StartInspector({ startNode, runId, nodeId }: Props) {
   const [inputText, setInputText] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -53,10 +54,10 @@ export default function StartInspector({ startNode, runId }: Props) {
           </span>
         </div>
         <div
-          className="mt-0.5 text-fg-4"
+          className="mt-0.5 font-mono text-fg-4"
           style={{ fontSize: "10px" }}
         >
-          runtime &middot; pseudo-node
+          {nodeId}
         </div>
       </div>
 

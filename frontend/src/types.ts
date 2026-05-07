@@ -56,6 +56,18 @@ export interface StartNodeInfo {
   target_node_ids: string[];
 }
 
+export interface EndPortStatus {
+  port_name: string;
+  status: string;
+  reason: string | null;
+  fired_at: string | null;
+}
+
+export interface EndNodeInfo {
+  id: string;
+  ports: EndPortStatus[];
+}
+
 export interface RunState {
   run_id: string;
   status: RunStatus;
@@ -67,6 +79,7 @@ export interface RunState {
   edges: EdgeInfo[];
   node_defs: NodeDefInfo[];
   start_node: StartNodeInfo | null;
+  end_node: EndNodeInfo | null;
 }
 
 export interface DaemonEvent {

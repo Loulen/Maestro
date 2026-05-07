@@ -109,6 +109,20 @@ pub struct StartNodeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndPortStatus {
+    pub port_name: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub fired_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndNodeInfo {
+    pub id: String,
+    pub ports: Vec<EndPortStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
     pub status: RunStatus,
@@ -123,6 +137,8 @@ pub struct RunState {
     pub node_defs: Vec<NodeDefInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_node: Option<StartNodeInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_node: Option<EndNodeInfo>,
 }
 
 impl RunState {
@@ -138,6 +154,7 @@ impl RunState {
             edges: Vec::new(),
             node_defs: Vec::new(),
             start_node: None,
+            end_node: None,
         }
     }
 }
@@ -221,6 +238,22 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                         started_at: event.ts.clone(),
                         target_node_ids: entry_node_ids(&state.edges, &state.node_defs),
                     });
+
+                    if let Some(end_def) = state.node_defs.iter().find(|n| n.node_type == "end") {
+                        state.end_node = Some(EndNodeInfo {
+                            id: end_def.id.clone(),
+                            ports: end_def
+                                .inputs
+                                .iter()
+                                .map(|port_name| EndPortStatus {
+                                    port_name: port_name.clone(),
+                                    status: "pending".to_string(),
+                                    reason: None,
+                                    fired_at: None,
+                                })
+                                .collect(),
+                        });
+                    }
                 }
             }
             EventKind::NodeStarted => {
@@ -311,6 +344,14 @@ pub fn project(events: &[Event]) -> Option<RunState> {
             EventKind::RunCompleted => {
                 state.status = RunStatus::Completed;
                 state.completed_at = Some(event.ts.clone());
+                if let Some(ref mut end_node) = state.end_node {
+                    for port in &mut end_node.ports {
+                        if port.status == "pending" {
+                            port.status = "received".to_string();
+                            port.fired_at = Some(event.ts.clone());
+                        }
+                    }
+                }
             }
             EventKind::RunFailed => {
                 state.status = RunStatus::Failed;
@@ -319,10 +360,24 @@ pub fn project(events: &[Event]) -> Option<RunState> {
             EventKind::RunHalted => {
                 state.status = RunStatus::Halted;
                 state.completed_at = Some(event.ts.clone());
+                if let Some(ref mut end_node) = state.end_node {
+                    let reason = event
+                        .payload
+                        .as_ref()
+                        .and_then(|p| p.get("message"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    for port in &mut end_node.ports {
+                        port.status = "received".to_string();
+                        port.reason = reason.clone();
+                        port.fired_at = Some(event.ts.clone());
+                    }
+                }
             }
             EventKind::RunArchived => {
                 state.status = RunStatus::Archived;
                 state.start_node = None;
+                state.end_node = None;
             }
             EventKind::CommandIssued => {
                 if let Some(ref payload) = event.payload {
@@ -1166,5 +1221,127 @@ mod tests {
         ];
         let state = project(&events).unwrap();
         assert_eq!(state.status, RunStatus::Running);
+    }
+
+    // --- End node projection tests (issue #39) ---
+
+    #[test]
+    fn end_node_pending_while_running() {
+        let events = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "with-end",
+                "input": "go",
+                "node_defs": [start_node_def(), end_node_def(), node_def("worker")],
+                "edges": [
+                    edge_info("start", "worker"),
+                    edge_info("worker", "end"),
+                ],
+            }),
+        )];
+
+        let state = project(&events).unwrap();
+        let end = state.end_node.as_ref().expect("end_node should be present");
+        assert_eq!(end.id, "end");
+        assert_eq!(end.ports.len(), 1);
+        assert_eq!(end.ports[0].port_name, "result");
+        assert_eq!(end.ports[0].status, "pending");
+        assert!(end.ports[0].reason.is_none());
+        assert!(end.ports[0].fired_at.is_none());
+    }
+
+    #[test]
+    fn end_node_received_on_run_completed() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({
+                    "pipeline_name": "complete-test",
+                    "input": "go",
+                    "node_defs": [start_node_def(), end_node_def(), node_def("worker")],
+                    "edges": [
+                        edge_info("start", "worker"),
+                        edge_info("worker", "end"),
+                    ],
+                }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("worker"), Some(1)),
+            make_event(EventKind::RunCompleted, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        let end = state.end_node.as_ref().expect("end_node should be present");
+        assert_eq!(end.ports[0].status, "received");
+        assert!(end.ports[0].reason.is_none());
+        assert!(end.ports[0].fired_at.is_some());
+    }
+
+    #[test]
+    fn end_node_received_with_reason_on_halt() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({
+                    "pipeline_name": "halt-end-test",
+                    "input": "iterate",
+                    "node_defs": [start_node_def(), end_node_def(), node_def("reviewer")],
+                    "edges": [
+                        edge_info("start", "reviewer"),
+                        {
+                            "source_node": "reviewer", "source_port": "review",
+                            "target_node": "end", "target_port": "result",
+                            "halt_message": "Blocked after 3 iterations",
+                            "when_clause": {"iter": {"gte": 3}}
+                        },
+                    ],
+                }),
+            ),
+            make_event(EventKind::NodeStarted, Some("reviewer"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("reviewer"), Some(1)),
+            make_event_with_payload(
+                EventKind::RunHalted,
+                None,
+                serde_json::json!({ "message": "Blocked after 3 iterations" }),
+            ),
+        ];
+
+        let state = project(&events).unwrap();
+        let end = state.end_node.as_ref().expect("end_node should be present");
+        assert_eq!(end.ports[0].status, "received");
+        assert_eq!(
+            end.ports[0].reason.as_deref(),
+            Some("Blocked after 3 iterations")
+        );
+        assert!(end.ports[0].fired_at.is_some());
+    }
+
+    #[test]
+    fn end_node_cleared_on_archived() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({
+                    "pipeline_name": "archive-end-test",
+                    "input": "go",
+                    "node_defs": [start_node_def(), end_node_def(), node_def("worker")],
+                    "edges": [
+                        edge_info("start", "worker"),
+                        edge_info("worker", "end"),
+                    ],
+                }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("worker"), Some(1)),
+            make_event(EventKind::RunCompleted, None, None),
+            make_event(EventKind::RunArchived, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert!(state.end_node.is_none());
     }
 }

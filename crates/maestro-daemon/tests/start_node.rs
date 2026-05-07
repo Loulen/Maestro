@@ -124,6 +124,35 @@ async fn run_state_includes_start_node_with_entry_targets() {
 }
 
 #[tokio::test]
+async fn run_state_includes_end_node_with_pending_port() {
+    unsafe {
+        std::env::set_var("MAESTRO_TMUX_CMD_OVERRIDE", "exec sleep 300");
+    }
+
+    let daemon = TestDaemon::spawn(seed).await.unwrap();
+    let run_id = create_run(&daemon.url()).await;
+
+    let resp = reqwest::get(format!("{}/runs/{}", daemon.url(), run_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let run_state: serde_json::Value = resp.json().await.unwrap();
+
+    let end_node = &run_state["end_node"];
+    assert!(!end_node.is_null(), "end_node should be non-null");
+    assert_eq!(end_node["id"], "end");
+
+    let ports = end_node["ports"]
+        .as_array()
+        .expect("ports should be an array");
+    assert_eq!(ports.len(), 1);
+    assert_eq!(ports[0]["port_name"], "result");
+    assert_eq!(ports[0]["status"], "pending");
+    assert!(ports[0]["reason"].is_null());
+}
+
+#[tokio::test]
 async fn artifact_endpoint_serves_input_md() {
     unsafe {
         std::env::set_var("MAESTRO_TMUX_CMD_OVERRIDE", "exec sleep 300");

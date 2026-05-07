@@ -16,6 +16,7 @@ import NodeInspector from "./components/NodeInspector";
 import EdgeInspector from "./components/EdgeInspector";
 import PipelineInspector from "./components/PipelineInspector";
 import StartInspector from "./components/StartInspector";
+import EndInspector from "./components/EndInspector";
 import { useEditStore } from "./stores/editStore";
 import {
   ResizablePanelGroup,
@@ -245,6 +246,14 @@ export default function App() {
                   <StartInspector
                     startNode={selectedRun.start_node}
                     runId={selectedRun.run_id}
+                    nodeId={selectedNodeId!}
+                  />
+                )}
+                {selectedRun?.end_node && selectedRun.node_defs?.some(
+                  (d) => d.node_type === "end" && d.id === selectedNodeId,
+                ) && (
+                  <EndInspector
+                    endNode={selectedRun.end_node}
                   />
                 )}
                 {selectedNode && selectedRun && !selectedRun.node_defs?.some(

@@ -20,6 +20,13 @@
   name: run-minimal-scenario
   version: "1.0"
   nodes:
+    - id: start
+      name: Start
+      type: start
+      inputs: []
+      outputs:
+        - name: user_prompt
+      view: { x: 0, y: 100 }
     - id: xCsiuWj7
       name: only
       type: doc-only
@@ -29,8 +36,20 @@
       outputs:
         - name: out
           side: top
-      view: { x: 100, y: 100 }
-  edges: []
+      view: { x: 200, y: 100 }
+    - id: end
+      name: End
+      type: end
+      inputs:
+        - name: result
+          side: left
+      outputs: []
+      view: { x: 400, y: 100 }
+  edges:
+    - source: { node: start, port: user_prompt }
+      target: { node: xCsiuWj7, port: in }
+    - source: { node: xCsiuWj7, port: out }
+      target: { node: end, port: result }
   ```
 
   And `.maestro/pipelines/run-minimal-scenario.prompts/xCsiuWj7.md`:
@@ -42,21 +61,27 @@
 
 ## Steps the agent executes
 
-### Step 0b — Run start pseudo-node visible (refs #30)
+### Step 0b — Start and End nodes visible (refs #30, #39)
 
 After selecting a Run in step 2, assert:
 
-- A **Start pseudo-node** (green play-button circle, `▶`) is visible to the
+- A **Start node** (green play-button circle, `▶`) is visible to the
   left of the `only` node in the DAG canvas.
-- Synthetic edges connect the Start node to each entry node (in this case,
-  just `only`).
+- An **End node** (orange circle, `◯`) is visible to the right of the
+  `only` node in the DAG canvas.
+- Edges connect Start → `only` → End.
 - Click the Start node → the right panel swaps to the **StartInspector**:
-  - Header reads **"Run start"** with subtitle **"runtime · pseudo-node"**
-    and a `runtime` badge.
+  - Header reads **"Run start"** with a `runtime` badge.
+  - Subtitle shows the start node's id (e.g. `start`).
   - Body shows the user's submitted input (e.g. `hi`) inline as monospace
     `<pre>` text.
   - A **"View as markdown ↗"** link at the bottom opens the
     `MarkdownArtifactModal` on `_input.md`.
+- Click the End node → the right panel swaps to the **EndInspector**:
+  - Header reads **"Run end"** with a `runtime` badge.
+  - Subtitle shows the end node's id (e.g. `end`).
+  - "Termination reasons" section lists the `result` port with status
+    **"pending"** (no edge has fired yet).
 
 1. Open the UI; confirm the **`Daemon: connected`** label is visible.
 2. Open the **New Run** modal. Pick `run-minimal-scenario`. Provide any input
@@ -162,6 +187,18 @@ curl -sf "http://127.0.0.1:5172/runs/<run_id>/nodes/only/prompt?iter=1"
 This verifies that sub-worktrees (for `code-mutating` nodes) and prompt files
 survive node completion — they are only removed by `cleanup_run`.
 
+### Step 7c — End node shows received after completion (refs #39)
+
+After the run completes (step 7):
+
+1. Click the **End node** (orange circle) in the DAG canvas.
+2. The right panel swaps to the **EndInspector**:
+   - Header reads **"Run end"** with a `runtime` badge.
+   - Subtitle shows the end node's id (e.g. `end`).
+   - "Termination reasons" section lists the `result` port with status
+     **"received"** (green dot, no reason text since this is a normal
+     completion — not a halt).
+
 8. Confirm the artifact file exists:
 
    ```bash
@@ -198,7 +235,7 @@ Once step 6 confirms the node completed and the artifact exists:
 6. Verify that the `in` input port row (no files exist) renders as a
    non-interactive `<div>` — no pointer cursor, no hover effect.
 
-### Step 1c — Edit-this-run toggle + save indicator (refs #28 #35)
+### Step 1c — Edit-this-run toggle + save indicator (refs #28 #35 #39)
 
 9. With the Run still visible (any status), click the **"Edit this run"**
    button on the run overlay. Assert:
@@ -209,6 +246,8 @@ Once step 6 confirms the node completed and the artifact exists:
    - A footnote reading **"Editing run-scoped copy · template unchanged"**
      is visible beneath the run overlay.
    - The **TabBar** is visible above the canvas with the run-scoped tab.
+   - Both **Start** and **End** nodes remain visible on the edit canvas
+     (they are non-deletable and always present).
 9b. Make any edit (e.g. change the node prompt). Assert:
    - The tab title is prefixed with **`•`** (dirty indicator).
    - The **Save** button in the TabBar is enabled.
