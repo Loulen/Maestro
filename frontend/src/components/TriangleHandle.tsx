@@ -15,7 +15,6 @@ interface TriangleHandleProps {
   side: PortSide;
   index: number;
   total: number;
-  isEdit?: boolean;
 }
 
 export default function TriangleHandle({
@@ -24,7 +23,6 @@ export default function TriangleHandle({
   side,
   index,
   total,
-  isEdit,
 }: TriangleHandleProps) {
   const type = kind === "input" ? "target" : "source";
   const position = SIDE_TO_POSITION[side];
@@ -36,8 +34,6 @@ export default function TriangleHandle({
     ? { top: `${pct}%`, transform: "translateY(-50%)" }
     : { left: `${pct}%`, transform: "translateX(-50%)" };
 
-  const size = isEdit ? 16 : 16;
-
   return (
     <Handle
       id={id}
@@ -45,8 +41,8 @@ export default function TriangleHandle({
       position={position}
       style={{
         ...style,
-        width: size,
-        height: size,
+        width: 16,
+        height: 16,
         background: "transparent",
         border: "none",
         borderRadius: 0,
@@ -71,4 +67,3 @@ export default function TriangleHandle({
     </Handle>
   );
 }
-

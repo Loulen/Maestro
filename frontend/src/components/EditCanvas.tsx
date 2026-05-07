@@ -60,7 +60,6 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
           side={port.side}
           index={i}
           total={data.inputs.length}
-          isEdit
         />
       ))}
       <div className="flex items-center gap-2">
@@ -92,7 +91,6 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
           side={port.side}
           index={i}
           total={data.outputs.length}
-          isEdit
         />
       ))}
     </div>
