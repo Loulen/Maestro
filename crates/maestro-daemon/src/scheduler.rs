@@ -184,6 +184,7 @@ mod tests {
                 .map(|n| Port {
                     name: (*n).into(),
                     repeated: false,
+                    side: None,
                     frontmatter: None,
                 })
                 .collect(),
@@ -192,6 +193,7 @@ mod tests {
                 .map(|n| Port {
                     name: (*n).into(),
                     repeated: false,
+                    side: None,
                     frontmatter: None,
                 })
                 .collect(),

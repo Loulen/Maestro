@@ -318,11 +318,13 @@ mod tests {
                 inputs: vec![Port {
                     name: "task".into(),
                     repeated: false,
+                    side: None,
                     frontmatter: None,
                 }],
                 outputs: vec![Port {
                     name: "plan".into(),
                     repeated: false,
+                    side: None,
                     frontmatter: None,
                 }],
                 interactive: false,
@@ -431,11 +433,13 @@ mod tests {
             inputs: vec![Port {
                 name: "plan".into(),
                 repeated: false,
+                side: None,
                 frontmatter: None,
             }],
             outputs: vec![Port {
                 name: "summary".into(),
                 repeated: false,
+                side: None,
                 frontmatter: None,
             }],
             interactive: false,
@@ -524,6 +528,7 @@ mod tests {
                     outputs: vec![Port {
                         name: "plan".into(),
                         repeated: false,
+                        side: None,
                         frontmatter: None,
                     }],
                     interactive: false,
@@ -537,6 +542,7 @@ mod tests {
                     outputs: vec![Port {
                         name: "context".into(),
                         repeated: false,
+                        side: None,
                         frontmatter: None,
                     }],
                     interactive: false,
@@ -550,17 +556,20 @@ mod tests {
                         Port {
                             name: "plan".into(),
                             repeated: false,
+                            side: None,
                             frontmatter: None,
                         },
                         Port {
                             name: "context".into(),
                             repeated: false,
+                            side: None,
                             frontmatter: None,
                         },
                     ],
                     outputs: vec![Port {
                         name: "summary".into(),
                         repeated: false,
+                        side: None,
                         frontmatter: None,
                     }],
                     interactive: false,
@@ -632,11 +641,13 @@ mod tests {
                 inputs: vec![Port {
                     name: "code".into(),
                     repeated: false,
+                    side: None,
                     frontmatter: None,
                 }],
                 outputs: vec![Port {
                     name: "review".into(),
                     repeated: false,
+                    side: None,
                     frontmatter: Some(
                         [(
                             "verdict".into(),

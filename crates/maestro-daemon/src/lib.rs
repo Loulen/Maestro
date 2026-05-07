@@ -3068,6 +3068,16 @@ fn augment_run_state_from_disk(run_state: &mut event_log::RunState, repo_root: &
     run_state.edges = pipe.edges.iter().map(edge_info_from_pipeline).collect();
 }
 
+fn port_brief(p: &pipeline::Port, default_side: &str) -> event_log::PortBrief {
+    event_log::PortBrief {
+        name: p.name.clone(),
+        side: p
+            .side
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_side.into()),
+    }
+}
+
 fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
     event_log::NodeDefInfo {
         id: n.id.clone(),
@@ -3078,8 +3088,8 @@ fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
         },
         view_x: n.view.as_ref().map(|v| v.x),
         view_y: n.view.as_ref().map(|v| v.y),
-        inputs: n.inputs.iter().map(|p| p.name.clone()).collect(),
-        outputs: n.outputs.iter().map(|p| p.name.clone()).collect(),
+        inputs: n.inputs.iter().map(|p| port_brief(p, "left")).collect(),
+        outputs: n.outputs.iter().map(|p| port_brief(p, "right")).collect(),
     }
 }
 

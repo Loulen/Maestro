@@ -32,11 +32,33 @@ pub struct FrontmatterFieldDecl {
     pub allowed: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl std::fmt::Display for PortSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortSide::Left => write!(f, "left"),
+            PortSide::Right => write!(f, "right"),
+            PortSide::Top => write!(f, "top"),
+            PortSide::Bottom => write!(f, "bottom"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Port {
     pub name: String,
     #[serde(default)]
     pub repeated: bool,
+    #[serde(default)]
+    pub side: Option<PortSide>,
     #[serde(default)]
     pub frontmatter: Option<HashMap<String, FrontmatterFieldDecl>>,
 }
@@ -281,7 +303,20 @@ pub fn parse_pipeline(yaml: &str) -> Result<ParseResult, ParseError> {
         }
     }
 
-    let pipeline: PipelineDef = serde_yaml::from_value(raw.clone())?;
+    let mut pipeline: PipelineDef = serde_yaml::from_value(raw.clone())?;
+
+    for node in &mut pipeline.nodes {
+        for port in &mut node.inputs {
+            if port.side.is_none() {
+                port.side = Some(PortSide::Left);
+            }
+        }
+        for port in &mut node.outputs {
+            if port.side.is_none() {
+                port.side = Some(PortSide::Right);
+            }
+        }
+    }
 
     let known_keys: &[&str] = &["name", "version", "variables", "nodes", "edges"];
     if let Some(mapping) = raw.as_mapping() {
@@ -931,6 +966,85 @@ nodes:
         );
         assert_eq!(schema["score"].field_type, "int");
         assert!(schema["score"].allowed.is_none());
+    }
+
+    #[test]
+    fn port_side_defaults_left_for_inputs_right_for_outputs() {
+        let result = parse_pipeline(VALID_MINIMAL).unwrap();
+        let node = &result.pipeline.nodes[0];
+        assert_eq!(node.inputs[0].side, Some(PortSide::Left));
+        assert_eq!(node.outputs[0].side, Some(PortSide::Right));
+    }
+
+    #[test]
+    fn parses_explicit_port_side_all_four_values() {
+        let yaml = r#"
+name: sides-test
+nodes:
+  - id: ab12cd34
+    name: worker
+    type: doc-only
+    inputs:
+      - name: left-in
+        side: left
+      - name: right-in
+        side: right
+      - name: top-in
+        side: top
+      - name: bottom-in
+        side: bottom
+    outputs:
+      - name: left-out
+        side: left
+      - name: right-out
+        side: right
+      - name: top-out
+        side: top
+      - name: bottom-out
+        side: bottom
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        let node = &result.pipeline.nodes[0];
+
+        assert_eq!(node.inputs[0].side, Some(PortSide::Left));
+        assert_eq!(node.inputs[1].side, Some(PortSide::Right));
+        assert_eq!(node.inputs[2].side, Some(PortSide::Top));
+        assert_eq!(node.inputs[3].side, Some(PortSide::Bottom));
+
+        assert_eq!(node.outputs[0].side, Some(PortSide::Left));
+        assert_eq!(node.outputs[1].side, Some(PortSide::Right));
+        assert_eq!(node.outputs[2].side, Some(PortSide::Top));
+        assert_eq!(node.outputs[3].side, Some(PortSide::Bottom));
+    }
+
+    #[test]
+    fn port_side_omitted_gets_contextual_default() {
+        let yaml = r#"
+name: defaults-test
+nodes:
+  - id: ab12cd34
+    name: worker
+    type: doc-only
+    inputs:
+      - name: a
+      - name: b
+        side: top
+    outputs:
+      - name: x
+      - name: y
+        side: bottom
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        let node = &result.pipeline.nodes[0];
+
+        // Omitted input defaults to left
+        assert_eq!(node.inputs[0].side, Some(PortSide::Left));
+        // Explicit side preserved
+        assert_eq!(node.inputs[1].side, Some(PortSide::Top));
+        // Omitted output defaults to right
+        assert_eq!(node.outputs[0].side, Some(PortSide::Right));
+        // Explicit side preserved
+        assert_eq!(node.outputs[1].side, Some(PortSide::Bottom));
     }
 
     #[test]

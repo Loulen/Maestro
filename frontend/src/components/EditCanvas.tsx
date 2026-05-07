@@ -8,24 +8,23 @@ import {
   type Edge,
   type NodeProps,
   type Connection,
-  Handle,
-  Position,
   MarkerType,
   ReactFlowProvider,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Plus } from "lucide-react";
-import type { NodeDef, NodeType, PipelineDef } from "../types";
+import type { NodeDef, NodeType, PipelineDef, PortBrief } from "../types";
 import { useEditStore } from "../stores/editStore";
 import { generateNodeId } from "../lib/nanoid";
 import { PREDICATE_LABELS } from "../predicates";
+import TriangleHandle from "./TriangleHandle";
 
 interface EditNodeData {
   label: string;
   nodeId: string;
   nodeType: NodeType;
-  inputCount: number;
-  outputCount: number;
+  inputs: PortBrief[];
+  outputs: PortBrief[];
   interactive: boolean;
   [key: string]: unknown;
 }
@@ -53,13 +52,16 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
       }`}
       style={{ minWidth: 160, fontSize: "12px" }}
     >
-      {data.inputCount > 0 && (
-        <Handle
-          type="target"
-          position={Position.Left}
-          className="!bg-fg-4 !border-line !w-2.5 !h-2.5 hover:!bg-acc"
+      {data.inputs.map((port, i) => (
+        <TriangleHandle
+          key={`in-${port.name}`}
+          id={port.name}
+          kind="input"
+          side={port.side}
+          index={i}
+          total={data.inputs.length}
         />
-      )}
+      ))}
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 shrink-0 rounded-full bg-st-pending" />
         <span className="font-medium text-fg">{data.label}</span>
@@ -81,13 +83,16 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
       <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "9px" }}>
         {data.nodeId}
       </div>
-      {data.outputCount > 0 && (
-        <Handle
-          type="source"
-          position={Position.Right}
-          className="!bg-fg-4 !border-line !w-2.5 !h-2.5 hover:!bg-acc"
+      {data.outputs.map((port, i) => (
+        <TriangleHandle
+          key={`out-${port.name}`}
+          id={port.name}
+          kind="output"
+          side={port.side}
+          index={i}
+          total={data.outputs.length}
         />
-      )}
+      ))}
     </div>
   );
 }
@@ -121,8 +126,8 @@ function deriveEditNodes(pipeline: PipelineDef): Node[] {
       label: n.name ?? n.id,
       nodeId: n.id,
       nodeType: n.type,
-      inputCount: n.inputs.length,
-      outputCount: n.outputs.length,
+      inputs: n.inputs.map((p) => ({ name: p.name, side: p.side ?? "left" })),
+      outputs: n.outputs.map((p) => ({ name: p.name, side: p.side ?? "right" })),
       interactive: n.interactive,
     },
   }));
@@ -143,10 +148,15 @@ function deriveEditEdges(pipeline: PipelineDef): Edge[] {
       ? "var(--color-st-blocked, #f97316)"
       : "var(--color-fg-4)";
 
+    const sourcePort = e.source.port;
+    const targetPort = isHalt ? null : (e.target as { port: string }).port;
+
     return {
       id: `e-${i}`,
       source: e.source.node,
       target: targetId,
+      sourceHandle: sourcePort || null,
+      targetHandle: targetPort || null,
       type: "default",
       style: {
         stroke: strokeColor,
@@ -225,8 +235,8 @@ function EditCanvasInner() {
       if (!pipeline) return;
       const sourceNode = pipeline.nodes.find((n) => n.id === connection.source);
       const targetNode = pipeline.nodes.find((n) => n.id === connection.target);
-      const sourcePort = sourceNode?.outputs[0]?.name ?? "out";
-      const targetPort = targetNode?.inputs[0]?.name ?? "in";
+      const sourcePort = connection.sourceHandle ?? sourceNode?.outputs[0]?.name ?? "out";
+      const targetPort = connection.targetHandle ?? targetNode?.inputs[0]?.name ?? "in";
 
       addEdgeToStore({
         source: { node: connection.source, port: sourcePort },
@@ -289,8 +299,8 @@ function EditCanvasInner() {
       id,
       name,
       type,
-      inputs: [{ name: "in", repeated: false }],
-      outputs: [{ name: "out", repeated: false }],
+      inputs: [{ name: "in", repeated: false, side: "left" }],
+      outputs: [{ name: "out", repeated: false, side: "right" }],
       interactive: false,
       view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
     };

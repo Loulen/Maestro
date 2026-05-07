@@ -15,6 +15,12 @@ pub struct EdgeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortBrief {
+    pub name: String,
+    pub side: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDefInfo {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,8 +28,8 @@ pub struct NodeDefInfo {
     pub node_type: String,
     pub view_x: Option<f64>,
     pub view_y: Option<f64>,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
+    pub inputs: Vec<PortBrief>,
+    pub outputs: Vec<PortBrief>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -646,7 +652,11 @@ mod tests {
     // --- start_node projection (issue #30) ---
 
     fn node_def(id: &str) -> serde_json::Value {
-        serde_json::json!({ "id": id, "node_type": "doc-only", "inputs": ["task"], "outputs": ["out"] })
+        serde_json::json!({
+            "id": id, "node_type": "doc-only",
+            "inputs": [{"name": "task", "side": "left"}],
+            "outputs": [{"name": "out", "side": "right"}]
+        })
     }
 
     fn edge_info(src: &str, tgt: &str) -> serde_json::Value {

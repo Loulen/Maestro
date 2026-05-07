@@ -91,6 +91,7 @@ mod tests {
         Port {
             name: name.into(),
             repeated: false,
+            side: None,
             frontmatter: None,
         }
     }
@@ -99,6 +100,7 @@ mod tests {
         Port {
             name: name.into(),
             repeated: true,
+            side: None,
             frontmatter: None,
         }
     }
