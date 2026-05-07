@@ -935,14 +935,8 @@ async fn spawn_ready_after_event(state: &AppState, run_id: &str) {
         return;
     }
 
-    let pipeline_path = {
-        let run_scoped = run_scoped_pipeline_path(&state.repo_root, run_id);
-        if run_scoped.exists() {
-            run_scoped
-        } else {
-            resolve_pipeline_path(&state.repo_root, &run_state.pipeline_name)
-        }
-    };
+    let pipeline_path =
+        resolve_run_pipeline_path(&state.repo_root, run_id, &run_state.pipeline_name);
     let Ok(yaml) = std::fs::read_to_string(&pipeline_path) else {
         return;
     };
@@ -1817,35 +1811,11 @@ async fn node_done(
         _ => {}
     }
 
-    // Validate output ports before marking complete
-    {
-        let pipeline_path = {
-            let run_scoped = run_scoped_pipeline_path(&state.repo_root, &run_id);
-            if run_scoped.exists() {
-                run_scoped
-            } else {
-                resolve_pipeline_path(&state.repo_root, &pre_run_state.pipeline_name)
-            }
-        };
-        if let Ok(yaml) = std::fs::read_to_string(&pipeline_path) {
-            if let Ok(parse_result) = pipeline::parse_pipeline(&yaml) {
-                if let Err(missing) = outputs_validator::validate(
-                    &parse_result.pipeline,
-                    &node_id,
-                    iter,
-                    &worktree_dir.join(".maestro").join("artifacts"),
-                ) {
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(serde_json::json!({
-                            "error": "missing_outputs",
-                            "missing": missing,
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    let pipeline_path =
+        resolve_run_pipeline_path(&state.repo_root, &run_id, &pre_run_state.pipeline_name);
+    let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
+    if let Some(resp) = check_output_validation(&pipeline_path, &node_id, iter, &artifacts_dir) {
+        return resp;
     }
 
     let event = event_log::Event {
@@ -1988,8 +1958,9 @@ async fn run_command(
                         .into_response();
                 }
             };
-            if let Some(run_state) = event_log::project(&events) {
-                if let Some(node) = run_state.nodes.get(&node_id) {
+            let run_state = event_log::project(&events);
+            if let Some(ref rs) = run_state {
+                if let Some(node) = rs.nodes.get(&node_id) {
                     if node.status != event_log::NodeStatus::AwaitingUser
                         && node.status != event_log::NodeStatus::Running
                         && node.status != event_log::NodeStatus::Failed
@@ -2005,43 +1976,22 @@ async fn run_command(
                 }
             }
 
-            // Validate output ports before completing
-            let pipeline_path = {
-                let run_scoped = run_scoped_pipeline_path(&state.repo_root, &run_id);
-                if run_scoped.exists() {
-                    run_scoped
-                } else if let Some(rs) = event_log::project(&events) {
-                    resolve_pipeline_path(&state.repo_root, &rs.pipeline_name)
-                } else {
-                    resolve_pipeline_path(&state.repo_root, "")
-                }
-            };
-            if let Ok(yaml) = std::fs::read_to_string(&pipeline_path) {
-                if let Ok(parse_result) = pipeline::parse_pipeline(&yaml) {
-                    let worktree_dir = state
-                        .repo_root
-                        .join(".maestro")
-                        .join("runs")
-                        .join(&run_id)
-                        .join("worktree");
-                    let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
-
-                    if let Err(missing) = outputs_validator::validate(
-                        &parse_result.pipeline,
-                        &node_id,
-                        iter,
-                        &artifacts_dir,
-                    ) {
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(serde_json::json!({
-                                "error": "missing_outputs",
-                                "missing": missing,
-                            })),
-                        )
-                            .into_response();
-                    }
-                }
+            let pipeline_name = run_state
+                .as_ref()
+                .map(|rs| rs.pipeline_name.as_str())
+                .unwrap_or("");
+            let pipeline_path =
+                resolve_run_pipeline_path(&state.repo_root, &run_id, pipeline_name);
+            let artifacts_dir = state
+                .repo_root
+                .join(".maestro")
+                .join("runs")
+                .join(&run_id)
+                .join("worktree/.maestro/artifacts");
+            if let Some(resp) =
+                check_output_validation(&pipeline_path, &node_id, iter, &artifacts_dir)
+            {
+                return resp;
             }
 
             let event = event_log::Event {
@@ -2579,6 +2529,43 @@ fn resolve_pipeline_path(repo_root: &std::path::Path, pipeline_name: &str) -> Pa
     }
 
     repo_path
+}
+
+fn resolve_run_pipeline_path(
+    repo_root: &std::path::Path,
+    run_id: &str,
+    pipeline_name: &str,
+) -> PathBuf {
+    let run_scoped = run_scoped_pipeline_path(repo_root, run_id);
+    if run_scoped.exists() {
+        run_scoped
+    } else {
+        resolve_pipeline_path(repo_root, pipeline_name)
+    }
+}
+
+fn check_output_validation(
+    pipeline_path: &std::path::Path,
+    node_id: &str,
+    iter: i64,
+    artifacts_dir: &std::path::Path,
+) -> Option<Response> {
+    let yaml = std::fs::read_to_string(pipeline_path).ok()?;
+    let parse_result = pipeline::parse_pipeline(&yaml).ok()?;
+    let Err(missing) = outputs_validator::validate(&parse_result.pipeline, node_id, iter, artifacts_dir)
+    else {
+        return None;
+    };
+    Some(
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "missing_outputs",
+                "missing": missing,
+            })),
+        )
+            .into_response(),
+    )
 }
 
 fn dirs_next_home() -> Option<PathBuf> {

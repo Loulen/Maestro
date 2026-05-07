@@ -11,11 +11,9 @@ pub struct ReadySpawn {
 pub fn compute_ready_to_spawn(pipeline: &PipelineDef, run_state: &RunState) -> Vec<ReadySpawn> {
     scheduler::ready_nodes(pipeline, run_state)
         .into_iter()
-        .filter(|node_id| {
-            !run_state
-                .nodes
-                .get(node_id)
-                .is_some_and(|n| n.status != NodeStatus::Completed)
+        .filter(|node_id| match run_state.nodes.get(node_id) {
+            None => true,
+            Some(n) => n.status == NodeStatus::Completed,
         })
         .map(|node_id| ReadySpawn { node_id, iter: 1 })
         .collect()
