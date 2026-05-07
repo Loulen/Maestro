@@ -113,3 +113,128 @@ _[tool: fork_verifier_agent]_
 
 Cliquer sur un artboard pour le voir en plein écran. Dis-moi ce que tu veux ajuster — densité, couleurs, layout du DAG, copy.
 
+## User
+
+
+
+## Assistant
+
+_[tool: snip]_
+
+_[tool: update_todos]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: snip]_
+
+Plan d'attaque, dans cet ordre :
+
+1. **Start node** in `dag.jsx` (new `StartNode` + edges from start, special inspector). Add CSS for `.start-node` + `.run-edit-mode`.
+2. **Markdown viewer modal** (new `md-modal.jsx` with sample content + repeated-port nav).
+3. **Edit-this-run** (new `RunOverlay` button + 9b screen reusing `NodeInspectorEdit` with runs-list left panel).
+4. Wire all into `screens.jsx`, add screens 9 / 10 / 11 / 12 to `Maestro.html`.
+
+Let me extend the CSS first, then the components.
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: snip]_
+
+_[tool: write_file]_
+
+_[tool: write_file]_
+
+Let me check the current state of Maestro.html and related files to understand what's already built.
+
+_[tool: list_files]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: snip]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: update_todos]_
+
+_[tool: snip]_
+
+Now let me look at chrome.jsx to understand the AddPalette + run-overlay structure, and then start implementing.
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: snip]_
+
+Now I have full context. Let me update the existing files efficiently. First, fix start-node.jsx (the panel header in StartInspector should match the Frame structure - it doesn't have a wrapping panel head, just the body):
+
+_[tool: read_file]_
+
+_[tool: read_file]_
+
+_[tool: snip]_
+
+Now I have all context. Let me implement the three additions. I'll work in this order: data updates → start node integration in DAG → screens.jsx updates → Maestro.html.
+
+First, update the run-overlay to take an `onEditRun` button + footnote, and the AddPalette to be cleaner. Let me check existing styles for the run-overlay buttons since prompt #3 specifies height 22px / fontSize 10px in a column layout:
+
+_[tool: grep]_
+
+Good — RunOverlay already has `ro-actions-col` styling. Let me update RunOverlay to include the Edit-this-run button + footnote, then implement the rest.
+
+_[tool: str_replace_edit]_
+
+Now let me update screens.jsx to wire in the start node, the new screens, and the Edit-this-run state. I'll rewrite RunCanvas to accept startNode, and add Screen9/9b/9c.
+
+_[tool: str_replace_edit]_
+
+_[tool: snip]_
+
+Now I need to add the new Screen9 (markdown modal showcase), Screen10 (edit-this-run state), and update screens.jsx. Let me also check that the StartNode uses correct positions. Looking at start-node.jsx — it sends `id='start'` but I'm checking `__start`. Let me fix the start-node.jsx for consistency:
+
+_[tool: str_replace_edit]_
+
+Let me add the remaining screens and finish.
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: snip]_
+
+_[tool: update_todos]_
+
+_[tool: done]_
+
+_[tool: fork_verifier_agent]_
+
+_[tool: snip]_
+
+Trois ajouts intégrés au canvas :
+
+- **Start pseudo-node** sur écrans 01/02/03 — pill stadium avec ▶, label "Run start", timestamp + run-id en mono. Cliqué sur S1 → inspecteur dédié avec le prompt utilisateur en `prompt-block` + lien "View as markdown ↗".
+- **Bouton "Edit this run"** dans la run-overlay, entre le statut et Cleanup. **Nouvel écran 09** ("Edit this run · in-place editing") montre l'état actif : top-border violet, AddPalette top-right, NodeInspector edit à droite, runs list (pas pipelines list) à gauche, footnote "Editing run-scoped copy · template unchanged".
+- **Markdown viewer modal** en deux variantes (écrans 10 et 11) : verdict simple avec frontmatter PASS, et `review_feedback` répété avec navigateur `< iter 4 of 5 >`. GFM complet : h1-h3, listes, code inline + bloc, blockquote, table, links accent.
+

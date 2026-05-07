@@ -1,6 +1,6 @@
 // inspector.jsx — right panel for both Run and Edit modes
 
-function NodeDetail({ node, awaiting }) {
+function NodeDetail({ node, awaiting, failed }) {
   if (!node) return null;
   return (
     <div className="p-body">
@@ -10,11 +10,32 @@ function NodeDetail({ node, awaiting }) {
           <div style={{flex: 1, minWidth: 0}}>
             <div style={{fontSize: 13, fontWeight: 600}}>{node.name}</div>
             <div style={{fontSize: 11, color: 'var(--fg-3)', marginTop: 2}} className="mono">{node.id}</div>
+            {node.nid && <div style={{fontSize: 10, color: 'var(--fg-4)', marginTop: 1}} className="mono">{node.nid}</div>}
           </div>
           <span className={"badge " + (node.type === 'code' ? 'code' : 'doc')}>{node.type === 'code' ? 'code' : 'doc'}</span>
           {node.iter && <span className="badge">iter {node.iter}</span>}
         </div>
       </div>
+
+      {failed && (
+        <div className="p-sect" style={{paddingTop: 8, paddingBottom: 8}}>
+          <div className="fail-banner">
+            <div className="fb-title"><Ic.Warn/> failed</div>
+            {node.failure_reason || 'Tool call exited 1: command not found `pnpm test`. Worker has stopped.'}
+            <div className="fb-meta">iter {node.iter || '3/5'} failed at 14:32:08</div>
+          </div>
+          <div style={{display: 'flex', gap: 6, marginTop: 8}}>
+            <button className="btn primary sm" style={{flex: 1, justifyContent: 'center'}}><Ic.Check/> Mark complete</button>
+            <button className="btn sm"><Ic.Terminal/> Open terminal</button>
+          </div>
+          {node.validationFail && (
+            <div className="fail-subbanner">
+              <span className="fsb-label">409</span>
+              <span>output validation failed — missing required ports: <span style={{color:'var(--fg-2)'}}>diff</span>, <span style={{color:'var(--fg-2)'}}>summary</span></span>
+            </div>
+          )}
+        </div>
+      )}
 
       {awaiting && (
         <div className="p-sect" style={{paddingTop: 8, paddingBottom: 8}}>
@@ -37,18 +58,27 @@ function NodeDetail({ node, awaiting }) {
           <span className="spacer"/>
           <button className="btn ghost sm" style={{height: 22, padding: '0 6px'}}><Ic.External/> Open terminal</button>
         </div>
-        <div className="term-preview">
-          <div className="term-line"><span className="term-prompt">claude › </span>reading plan.md…</div>
-          <div className="term-line term-dim">  ↳ 247 lines, last edited 4m ago</div>
-          <div className="term-line"><span className="term-prompt">claude › </span>scanning src/filters/</div>
-          <div className="term-line term-dim">  ↳ 12 files matched · 2 modified</div>
-          <div className="term-line"><span className="term-blue">tool_use</span> <span className="term-dim">edit_file</span> src/filters/archived.ts</div>
-          <div className="term-line term-ok">  ✓ patch applied (+47, -12)</div>
-          <div className="term-line"><span className="term-blue">tool_use</span> <span className="term-dim">bash</span> npm test -- archived.test.ts</div>
-          <div className="term-line term-dim">  PASS  src/filters/archived.test.ts</div>
-          <div className="term-line term-dim">    ✓ filters by deletedAt (12 ms)</div>
-          <div className="term-line term-dim">    ✓ excludes parent of archived (8 ms)</div>
-          <div className="term-line"><span className="term-prompt">claude › </span>writing diff.md<span className="term-cursor"/></div>
+        <div className="term-wrap">
+          <div className="term-preview">
+            <div className="term-line"><span className="term-prompt">claude › </span>reading plan.md…</div>
+            <div className="term-line term-dim">  ↳ 247 lines, last edited 4m ago</div>
+            <div className="term-line"><span className="term-prompt">claude › </span>scanning src/filters/</div>
+            <div className="term-line term-dim">  ↳ 12 files matched · 2 modified</div>
+            <div className="term-line"><span className="term-blue">tool_use</span> <span className="term-dim">edit_file</span> src/filters/archived.ts</div>
+            <div className="term-line term-ok">  ✓ patch applied (+47, -12)</div>
+            <div className="term-line"><span className="term-blue">tool_use</span> <span className="term-dim">bash</span> npm test -- archived.test.ts</div>
+            <div className="term-line term-dim">  PASS  src/filters/archived.test.ts</div>
+            <div className="term-line term-dim">    ✓ filters by deletedAt (12 ms)</div>
+            <div className="term-line term-dim">    ✓ excludes parent of archived (8 ms)</div>
+            <div className="term-line"><span className="term-prompt">claude › </span>writing diff.md<span className="term-cursor"/></div>
+          </div>
+          {node.scrolledUp && (
+            <button className="pin-btn" title="Pin to bottom">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M7 2v9M3 8l4 4 4-4"/>
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 
@@ -124,12 +154,13 @@ function NodeInspectorEdit({ node }) {
       <div className="p-sect">
         <SectionHead title="Identity"/>
         <div className="field">
-          <label>id</label>
-          <input className="input mono" defaultValue={node.id}/>
+          <label>id <span style={{color:'var(--fg-4)', fontWeight:400}}>· immutable</span></label>
+          <div className="input mono" style={{background:'var(--bg-0)', color:'var(--fg-3)', cursor:'default', userSelect:'all'}}>{node.nid || 'k7m2x9'}</div>
         </div>
         <div className="field">
           <label>Display name</label>
           <input className="input" defaultValue={node.name}/>
+          <div className="help">Renaming never breaks edge references — those are bound to the immutable id.</div>
         </div>
       </div>
 
@@ -172,20 +203,32 @@ Write a diff summary to $diff with frontmatter:
 
       <div className="p-sect">
         <SectionHead title="Inputs" count={2}/>
-        <div className="port-row" style={{gridTemplateColumns: '12px 1fr auto'}}>
+        <div className="port-row" style={{gridTemplateColumns: '12px 1fr 80px auto'}}>
           <span className="pdot"/>
           <div>
             <div className="pname">plan</div>
             <div className="help" style={{marginTop: 2}}>repeated: off</div>
           </div>
+          <select className="select mono" defaultValue="left" style={{height:22, padding:'0 6px', fontSize:10.5}}>
+            <option value="left">← left</option>
+            <option value="right">right →</option>
+            <option value="top">↑ top</option>
+            <option value="bottom">↓ bot</option>
+          </select>
           <button className="icon-btn" style={{width: 22, height: 22}}><Ic.Kebab/></button>
         </div>
-        <div className="port-row" style={{gridTemplateColumns: '12px 1fr auto'}}>
+        <div className="port-row" style={{gridTemplateColumns: '12px 1fr 80px auto'}}>
           <span className="pdot"/>
           <div>
             <div className="pname">review_feedback</div>
             <div className="help" style={{marginTop: 2}}>repeated: on (reads iter-*/)</div>
           </div>
+          <select className="select mono" defaultValue="top" style={{height:22, padding:'0 6px', fontSize:10.5}}>
+            <option value="left">← left</option>
+            <option value="right">right →</option>
+            <option value="top">↑ top</option>
+            <option value="bottom">↓ bot</option>
+          </select>
           <button className="icon-btn" style={{width: 22, height: 22}}><Ic.Kebab/></button>
         </div>
         <button className="btn ghost sm" style={{marginTop: 6}}><Ic.PlusSm/> Add input port</button>
@@ -193,7 +236,7 @@ Write a diff summary to $diff with frontmatter:
 
       <div className="p-sect">
         <SectionHead title="Outputs" count={1}/>
-        <div className="port-row" style={{gridTemplateColumns: '12px 1fr auto', alignItems: 'flex-start'}}>
+        <div className="port-row" style={{gridTemplateColumns: '12px 1fr 80px auto', alignItems: 'flex-start'}}>
           <span className="pdot" style={{marginTop: 4}}/>
           <div style={{flex: 1}}>
             <div className="pname">diff</div>
@@ -203,7 +246,13 @@ Write a diff summary to $diff with frontmatter:
               <span className="k">tests_added</span><span className="v">int</span>
             </div>
           </div>
-          <button className="icon-btn" style={{width: 22, height: 22}}><Ic.Kebab/></button>
+          <select className="select mono" defaultValue="right" style={{height:22, padding:'0 6px', fontSize:10.5, marginTop:2}}>
+            <option value="left">← left</option>
+            <option value="right">right →</option>
+            <option value="top">↑ top</option>
+            <option value="bottom">↓ bot</option>
+          </select>
+          <button className="icon-btn" style={{width: 22, height: 22, marginTop:2}}><Ic.Kebab/></button>
         </div>
         <button className="btn ghost sm" style={{marginTop: 6}}><Ic.PlusSm/> Add output port</button>
       </div>

@@ -7,8 +7,27 @@ function statusBorder(s) {
   })[s] || 'var(--st-pending)';
 }
 
+function TriHandle({ side = 'left', kind = 'in', active = false }) {
+  // Triangle pointing toward node body (in) or away (out), per side.
+  // Vertices for an inward-pointing triangle on each side:
+  let points;
+  const inward = (kind === 'in');
+  if (side === 'left')   points = inward ? "2,5 2,11 10,8" : "10,5 10,11 2,8";
+  if (side === 'right')  points = inward ? "10,5 10,11 2,8" : "2,5 2,11 10,8";
+  if (side === 'top')    points = inward ? "5,2 11,2 8,10" : "5,10 11,10 8,2";
+  if (side === 'bottom') points = inward ? "5,10 11,10 8,2" : "5,2 11,2 8,10";
+  return (
+    <span className={"tri-handle side-" + side + (active ? ' active' : '')}>
+      <svg width="13" height="13" viewBox="0 0 13 13"><polygon className="tri" points={points}/></svg>
+    </span>
+  );
+}
+
 function Node({ node, selected, onSelect }) {
-  const { id, name, type, status, x, y, iter } = node;
+  const { id, nid, name, type, status, x, y, iter, ports = {} } = node;
+  const inSide  = node.inSide  || 'left';
+  const outSide = node.outSide || 'right';
+  const flowing = (status === 'running' || status === 'done');
   return (
     <div className={"node " + status + (selected ? " selected" : "")}
          style={{ left: x, top: y }}
@@ -18,6 +37,7 @@ function Node({ node, selected, onSelect }) {
         <span className="node-name">{name}</span>
         {iter && <span className="node-iter mono">iter {iter}</span>}
       </div>
+      {nid && <div className="mono" style={{fontSize: 9, color: 'var(--fg-4)', letterSpacing: '0.02em', marginTop: -2}}>{nid}</div>}
       <div className="node-meta">
         <span className={"badge " + (type === 'code' ? 'code' : 'doc')}>
           {type === 'code' ? <Ic.Code/> : <Ic.Doc/>}
@@ -31,8 +51,8 @@ function Node({ node, selected, onSelect }) {
            status === 'failed' ? '· failed' : '· pending'}
         </span>
       </div>
-      <span className="node-handle in" style={{ top: 28 }} />
-      <span className={"node-handle out" + (status === 'running' || status === 'done' ? ' active' : '')} style={{ top: 28 }} />
+      <TriHandle side={inSide}  kind="in"  active={false}/>
+      <TriHandle side={outSide} kind="out" active={flowing}/>
     </div>
   );
 }
@@ -184,11 +204,12 @@ function CanvasControls() {
   );
 }
 
-function RunOverlay({ run, blocked = false, onOpenManager }) {
+function RunOverlay({ run, blocked = false, onOpenManager, editingRun = false, onToggleEditRun }) {
+  const terminal = run.status === 'done' || run.status === 'failed' || run.status === 'archived';
   return (
     <div className="run-overlay">
       <div className="ro-head">
-        <span className={"st-dot " + run.status}/>
+        <span className={"st-dot " + run.status} style={editingRun ? {animation: 'none'} : {}}/>
         <span className="ro-title">{run.pipeline}</span>
         <span className={"badge " + (run.status === 'running' ? 'running' : run.status === 'blocked' ? 'blocked' : run.status === 'awaiting_user' ? 'awaiting' : 'done')}>
           {run.status === 'awaiting_user' ? 'awaiting' : run.status}
@@ -208,13 +229,24 @@ function RunOverlay({ run, blocked = false, onOpenManager }) {
         </div>
       )}
 
-      <div className="ro-actions">
-        <button className={"btn sm" + (blocked ? " highlight" : "")} onClick={onOpenManager}>
+      <div className="ro-actions-col" style={{marginTop: 12}}>
+        <button className={"btn" + (blocked ? " highlight" : "")} onClick={onOpenManager}>
           <Ic.Manager/> Open Manager
         </button>
-        {run.status === 'running' && <button className="btn sm warn"><Ic.X/> Cancel</button>}
-        {(run.status === 'done' || run.status === 'failed' || run.status === 'archived') && <button className="btn sm ghost">Cleanup</button>}
+        <button className="btn"
+          onClick={onToggleEditRun}
+          style={editingRun ? {color: 'var(--edit-tint)', borderColor: 'rgba(167,139,250,0.32)', background: 'rgba(167,139,250,0.10)'} : {}}>
+          <Ic.Pencil/> {editingRun ? 'Stop editing' : 'Edit this run'}
+        </button>
+        {run.status === 'running' && !editingRun && <button className="btn warn"><Ic.X/> Cancel</button>}
+        {terminal && <button className="btn">Cleanup</button>}
       </div>
+
+      {editingRun && (
+        <div className="ro-edit-foot mono">
+          Editing run-scoped copy · template unchanged
+        </div>
+      )}
     </div>
   );
 }

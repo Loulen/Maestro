@@ -68,17 +68,26 @@ function NewRunModal({ open, onClose }) {
   );
 }
 
-function TabBar({ tabs, activeId, onSelect, onClose }) {
+function TabBar({ tabs, activeId, onSelect, onClose, dirty = false, savedAt = null, onSave }) {
+  const anyDirty = dirty || tabs.some(t => t.dirty);
   return (
     <div className="tabs">
       {tabs.map(t => (
         <div key={t.id} className={"tab" + (t.id === activeId ? " active" : "")} onClick={() => onSelect(t.id)}>
-          {t.dirty && <span className="dot-dirty"/>}
+          {t.dirty && <span className="dirty-dot mono">•</span>}
           <span className="mono">{t.id}.yaml</span>
           <span className="x" onClick={(e)=>{e.stopPropagation(); onClose && onClose(t.id);}}><Ic.X/></span>
         </div>
       ))}
-      <div style={{flex: 1}}/>
+      <div className="tabs-save">
+        {savedAt && <span className="saved-stamp">Saved {savedAt}</span>}
+        <button className={"icon-btn save-icon" + (anyDirty ? ' dirty' : '')}
+          disabled={!anyDirty}
+          onClick={onSave}
+          title={anyDirty ? 'Save' : 'Saved'}>
+          <Ic.Floppy/>
+        </button>
+      </div>
     </div>
   );
 }

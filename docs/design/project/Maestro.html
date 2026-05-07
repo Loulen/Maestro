@@ -25,9 +25,12 @@
 <script type="text/babel" src="icons.jsx"></script>
 <script type="text/babel" src="chrome.jsx"></script>
 <script type="text/babel" src="dag.jsx"></script>
+<script type="text/babel" src="start-node.jsx"></script>
+<script type="text/babel" src="end-node.jsx"></script>
 <script type="text/babel" src="runs-list.jsx"></script>
 <script type="text/babel" src="inspector.jsx"></script>
 <script type="text/babel" src="modal.jsx"></script>
+<script type="text/babel" src="md-modal.jsx"></script>
 <script type="text/babel" src="screens.jsx"></script>
 
 <script type="text/babel" data-presets="env,react">
@@ -72,6 +75,9 @@ function MaestroApp() {
           <DCArtboard id="run-awaiting" label="03 · Awaiting user input" width={ART_W} height={ART_H}>
             <Screen3/>
           </DCArtboard>
+          <DCArtboard id="run-edit" label="09 · Edit this run · in-place editing" width={ART_W} height={ART_H}>
+            <Screen10/>
+          </DCArtboard>
         </DCSection>
 
         <DCSection id="edit" title="Edit mode" subtitle="Author and edit pipeline definitions">
@@ -92,6 +98,15 @@ function MaestroApp() {
           </DCArtboard>
           <DCArtboard id="empty" label="08 · First launch — empty state" width={ART_W} height={ART_H}>
             <Screen8/>
+          </DCArtboard>
+          <DCArtboard id="md-verdict" label="10 · Markdown viewer · verdict" width={ART_W} height={ART_H}>
+            <Screen9/>
+          </DCArtboard>
+          <DCArtboard id="md-feedback" label="11 · Markdown viewer · iter 4 of 5" width={ART_W} height={ART_H}>
+            <Screen9b/>
+          </DCArtboard>
+          <DCArtboard id="failed-state" label="12 · Failed node · validation error" width={ART_W} height={ART_H}>
+            <Screen12/>
           </DCArtboard>
         </DCSection>
       </DesignCanvas>

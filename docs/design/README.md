@@ -6,17 +6,17 @@ This folder is the **source of truth for visual design** of Maestro v1. It was g
 
 ## How to read this folder
 
-- **`project/Maestro.html`** — entry point. Renders all 8 screens side-by-side as artboards on a design canvas. Open in a browser only if you genuinely need to (the source is more informative than a screenshot).
+- **`project/Maestro.html`** — entry point. Renders all 12 screens side-by-side as artboards on a design canvas. Open in a browser only if you genuinely need to (the source is more informative than a screenshot).
 - **`project/styles.css`** — design tokens (CSS variables for colors, spacing, typography) + all component styles. **Read this first** when implementing any UI piece.
-- **`project/screens.jsx`** — composition of the 8 screens. Look here to see how panels and components fit together for each state.
-- **`project/*.jsx`** — modular components (chrome, dag, runs-list, inspector, modal, icons). The HTML prototype uses Babel-standalone in-browser; for production we'll port the same structure to React + Vite + xyflow + shadcn/ui (cf. ADR-0003).
+- **`project/screens.jsx`** — composition of the 12 screens. Look here to see how panels and components fit together for each state.
+- **`project/*.jsx`** — modular components (chrome, dag, runs-list, inspector, modal, md-modal, start-node, end-node, icons). The HTML prototype uses Babel-standalone in-browser; for production we'll port the same structure to React + Vite + xyflow + shadcn/ui (cf. ADR-0003).
 - **`project/data.js`** — sample data shape. Useful as a hint for what the daemon's HTTP API will need to return.
 - **`chats/chat1.md`** — the conversation transcript that produced the design. Read for understanding the user's preferences and trade-offs that aren't captured in the final files.
 - **`HANDOFF-README.md`** — the original auto-generated README from Claude Design (kept for reference).
 
 ---
 
-## What's covered (8 screens)
+## What's covered (12 screens)
 
 | # | Screen | Source | Reflects spec section |
 |---|---|---|---|
@@ -28,6 +28,18 @@ This folder is the **source of truth for visual design** of Maestro v1. It was g
 | 06 | Edit · pipeline-level inspector | `Screen6` | § *Variables pipeline* + § *Pipeline* |
 | 07 | "+ New Run" modal | `Screen7` | § *UX — modes Run et Edit* / Workflow utilisateur typique au démarrage |
 | 08 | Empty state — first launch | `Screen8` | § *UX — modes Run et Edit* / Status icon par Run |
+| 09 | Markdown viewer modal — verdict (single file) | `Screen9` | Right-panel I/O ports → port content viewer |
+| 09b | Markdown viewer modal — repeated port w/ navigator | `Screen9b` | Right-panel I/O for `repeated: true` ports (e.g. `review_feedback` reading `iter-*/feedback.md`) |
+| 10 | Edit-this-run active state | `Screen10` | Run-scoped pipeline editing — local toggle inside Run mode (does not switch global mode) |
+| 12 | Run with failed node — failure banner + output validation | `Screen12` | Failed-node interactivity: same Mark complete + Open terminal as awaiting_user, plus failure_reason banner and 409-missing-outputs sub-banner |
+
+Screens 9, 9b, and 10 land alongside the run-scoped pipeline copy mechanism: every Run gets `<repo>/.maestro/runs/<run-id>/pipeline.yaml` snapshotted at `RunStarted`, and the *Edit this run* button on the run overlay (cf. `RunOverlay` in `dag.jsx`) toggles the canvas + inspector into editor primitives bound to that copy. The template under `<repo>/.maestro/pipelines/` stays untouched — the footnote *"Editing run-scoped copy · template unchanged"* on Screen 10 communicates this.
+
+Three sub-components introduced:
+
+- **`md-modal.jsx`** — `MdShell` is the reusable modal (header with port name + path + close, optional iter navigator for repeated ports, frontmatter card, GFM-rendered body, footer). Two variants (`MdVerdictModal`, `MdFeedbackModal`) are exported as concrete examples with realistic content.
+- **`start-node.jsx`** — `StartNode`, `StartEdges`, `StartInspector`. **Now mandatory and rendered in BOTH run and edit modes.** Start is an authored YAML node (`type: start`) with a single output port `user_prompt` whose contents = `_input.md`. Authors connect `start.user_prompt → some_node.some_port` like any other edge.
+- **`end-node.jsx`** — `EndNode`, `EndEdges`, `EndInspector`. Mandatory authored YAML node (`type: end`) with a single input port `result`. The pipeline halts when any edge to End fires; edges may carry an optional `reason` string (replaces the legacy `target: { halt: ... }` syntax). EndInspector lists the **Termination reasons** — which edges fired and which still pend.
 
 ---
 
@@ -103,6 +115,10 @@ When porting to the production stack:
 - **DAG canvas (`dag.jsx` + node/edge components)** → re-implement on top of **xyflow**. The visual style of nodes (border-left status, body color, handle dots) maps cleanly to xyflow's custom node API.
 - **Inspector forms (`inspector.jsx`)** → use shadcn `Input`, `Select`, `Textarea`, `Switch`, `RadioGroup` — visual style already aligned with the design tokens.
 - **Modal (`modal.jsx`)** → shadcn `Dialog`. Same dimensions (480 px wide).
+- **Markdown viewer modal (`md-modal.jsx`)** → shadcn `Dialog` (~640 px wide, max 80vh) + react-markdown + remark-gfm for the body. Frontmatter card is a static key/value grid above the rendered body. The repeated-port navigator is a small prev/next pair driven by an iter index. Close on backdrop click, Escape, or the X button (all standard `Dialog` behavior).
+- **Start / End nodes (`start-node.jsx`, `end-node.jsx`)** → custom xyflow node types. **Both are mandatory authored YAML nodes** (`type: start`, `type: end`); the pipeline parser fails if either is missing. They render in both run and edit modes, are draggable but cannot be deleted, and don't spawn tmux sessions or have prompt files. Start has one output port `user_prompt` (filled from `_input.md`); End has one input port `result`.
+- **Triangle handles** → all node ports render as triangles, not circles. Direction encodes flow: input = inward, output = outward. Each port has a `side` field (`left` | `right` | `top` | `bottom`) that picks the rotation; defaults are `left` for inputs, `right` for outputs. Author can override per port for nice cycles.
+- **Stable id + name** → every node carries a `id` (immutable nanoid, system-generated) and a `name` (user-visible, renameable). Edges, prompts, and on-disk paths key by `id`. The id is rendered small/muted on the node card in the canvas and as a mono subtitle in the inspector header.
 - **Run overlay** is custom (floating card with backdrop-blur) — not a shadcn primitive. Implement directly.
 - **Sample data shape (`data.js`)** is a hint for the **HTTP endpoint contract**: the daemon's `GET /runs/<id>` should return roughly the shape of `RUNS[i]` (id, pipeline, status, title, when, elapsed, iter). The pipeline-graph endpoint should return `FWR_NODES` + `FWR_EDGES` shape.
 

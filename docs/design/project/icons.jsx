@@ -149,4 +149,10 @@ Ic.Logo = (props) => (
   </svg>
 );
 
+Ic.Floppy = make(<>
+  <path d="M2.5 2.5h7.5l2 2v7a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z"/>
+  <path d="M4.5 2.5v3h5v-3"/>
+  <path d="M4.5 12.5V8h5v4.5"/>
+</>);
+
 window.Ic = Ic;
