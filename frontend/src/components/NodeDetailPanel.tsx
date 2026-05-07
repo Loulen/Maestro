@@ -338,7 +338,7 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
                 </button>
               )}
 
-              {(node.status === "awaiting_user" || node.status === "failed") && !isArchived && (
+              {(node.status === "awaiting_user" || node.status === "running" || node.status === "failed") && !isArchived && (
                 <>
                   <button
                     onClick={handleMarkComplete}

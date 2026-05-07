@@ -1817,6 +1817,37 @@ async fn node_done(
         _ => {}
     }
 
+    // Validate output ports before marking complete
+    {
+        let pipeline_path = {
+            let run_scoped = run_scoped_pipeline_path(&state.repo_root, &run_id);
+            if run_scoped.exists() {
+                run_scoped
+            } else {
+                resolve_pipeline_path(&state.repo_root, &pre_run_state.pipeline_name)
+            }
+        };
+        if let Ok(yaml) = std::fs::read_to_string(&pipeline_path) {
+            if let Ok(parse_result) = pipeline::parse_pipeline(&yaml) {
+                if let Err(missing) = outputs_validator::validate(
+                    &parse_result.pipeline,
+                    &node_id,
+                    iter,
+                    &worktree_dir.join(".maestro").join("artifacts"),
+                ) {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": "missing_outputs",
+                            "missing": missing,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
     let event = event_log::Event {
         id: None,
         run_id: run_id.clone(),
@@ -4676,5 +4707,234 @@ edges:
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- Layer-2: output validation via mark_node_done (refs #36) ---
+
+    fn write_pipeline_with_outputs(dir: &std::path::Path, name: &str) {
+        let pipelines_dir = dir.join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        let yaml = format!(
+            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: summary\n      - name: report\n    view: {{ x: 100, y: 100 }}\nedges: []\n"
+        );
+        std::fs::write(pipelines_dir.join(format!("{name}.yaml")), yaml).unwrap();
+    }
+
+    async fn seed_awaiting_run(state: &Arc<AppState>, run_id: &str, pipeline_name: &str) {
+        for event in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunStarted,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({ "pipeline_name": pipeline_name })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("worker".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeAwaitingUser,
+                node_id: Some("worker".into()),
+                iter: Some(1),
+                payload: None,
+            },
+        ] {
+            append_event(state, &event).await.unwrap();
+        }
+    }
+
+    async fn seed_failed_run(state: &Arc<AppState>, run_id: &str, pipeline_name: &str) {
+        for event in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunStarted,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({ "pipeline_name": pipeline_name })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("worker".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeFailed,
+                node_id: Some("worker".into()),
+                iter: Some(1),
+                payload: Some(serde_json::json!({ "reason": "tool call exited 1" })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunFailed,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({ "reason": "tool call exited 1" })),
+            },
+        ] {
+            append_event(state, &event).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_node_done_returns_409_when_outputs_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_name = "validate-test";
+        write_pipeline_with_outputs(tmp.path(), pipe_name);
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let run_id = "validate-409";
+        seed_awaiting_run(&state, run_id, pipe_name).await;
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind": "mark_node_done", "node_id": "worker", "iter": 1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "missing_outputs");
+        let missing = body["missing"].as_array().unwrap();
+        assert!(missing.iter().any(|v| v == "summary"));
+        assert!(missing.iter().any(|v| v == "report"));
+    }
+
+    #[tokio::test]
+    async fn mark_node_done_accepts_failed_node_with_outputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_name = "failed-rescue";
+        write_pipeline_with_outputs(tmp.path(), pipe_name);
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let run_id = "failed-rescue-1";
+        seed_failed_run(&state, run_id, pipe_name).await;
+
+        // Create the required output files
+        let artifacts_dir = tmp
+            .path()
+            .join(".maestro/runs")
+            .join(run_id)
+            .join("worktree/.maestro/artifacts/worker/iter-1");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        std::fs::write(artifacts_dir.join("summary.md"), "# Summary\nDone.").unwrap();
+        std::fs::write(artifacts_dir.join("report.md"), "# Report\nAll good.").unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind": "mark_node_done", "node_id": "worker", "iter": 1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = load_events(&state.db, run_id).await.unwrap();
+        let run_state = event_log::project(&events).unwrap();
+        assert_eq!(
+            run_state.nodes["worker"].status,
+            event_log::NodeStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn node_done_returns_409_when_outputs_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_name = "node-done-validate";
+        write_pipeline_with_outputs(tmp.path(), pipe_name);
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let run_id = "node-done-409";
+
+        for event in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunStarted,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({ "pipeline_name": pipe_name })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("worker".into()),
+                iter: Some(1),
+                payload: None,
+            },
+        ] {
+            append_event(&state, &event).await.unwrap();
+        }
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/nodes/worker/done"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "missing_outputs");
+        let missing = body["missing"].as_array().unwrap();
+        assert!(missing.iter().any(|v| v == "summary"));
+        assert!(missing.iter().any(|v| v == "report"));
     }
 }
