@@ -15,7 +15,7 @@ import {
   fetchPrompt,
   fetchNodeIO,
 } from "../api";
-import type { PortIO, FileInfo } from "../api";
+import type { PortIO, FileInfo, MarkNodeDoneResult } from "../api";
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -77,6 +77,7 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
   const [inputs, setInputs] = useState<PortIO[]>([]);
   const [outputs, setOutputs] = useState<PortIO[]>([]);
   const [modal, setModal] = useState<ModalState | null>(null);
+  const [missingOutputs, setMissingOutputs] = useState<string[] | null>(null);
   const [userSelectedIter, setUserSelectedIter] = useState<{
     nodeId: string;
     iter: number;
@@ -212,8 +213,12 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
   }, [sessionName]);
 
   const handleMarkComplete = useCallback(async () => {
+    setMissingOutputs(null);
     try {
-      await markNodeDone(runId, node.node_id, selectedIter);
+      const result: MarkNodeDoneResult = await markNodeDone(runId, node.node_id, selectedIter);
+      if (!result.ok && result.missingOutputs) {
+        setMissingOutputs(result.missingOutputs.missing);
+      }
     } catch (e) {
       console.error("Failed to mark node done:", e);
     }
@@ -263,6 +268,19 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
             style={{ fontSize: "11.5px", fontWeight: 500 }}
           >
             Awaiting user — attach terminal and interact, then mark complete
+          </span>
+        </div>
+      )}
+
+      {/* Failed banner */}
+      {node.status === "failed" && (
+        <div className="flex items-center gap-2 border-b border-st-failed/30 bg-st-failed-bg px-3 py-2">
+          <AlertCircle size={14} className="shrink-0 text-st-failed" />
+          <span
+            className="text-st-failed"
+            style={{ fontSize: "11.5px", fontWeight: 500 }}
+          >
+            Failed{node.failure_reason ? ` — ${node.failure_reason}` : ""}
           </span>
         </div>
       )}
@@ -320,15 +338,29 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
                 </button>
               )}
 
-              {node.status === "awaiting_user" && !isArchived && (
-                <button
-                  onClick={handleMarkComplete}
-                  className="flex w-full items-center justify-center gap-1.5 rounded-md border border-st-done/40 bg-st-done-bg px-3 py-1.5 text-st-done transition-colors hover:border-st-done/60 hover:bg-st-done/20"
-                  style={{ fontSize: "11.5px", fontWeight: 500 }}
-                >
-                  <CheckCircle size={12} />
-                  Mark complete
-                </button>
+              {(node.status === "awaiting_user" || node.status === "failed") && !isArchived && (
+                <>
+                  <button
+                    onClick={handleMarkComplete}
+                    className="flex w-full items-center justify-center gap-1.5 rounded-md border border-st-done/40 bg-st-done-bg px-3 py-1.5 text-st-done transition-colors hover:border-st-done/60 hover:bg-st-done/20"
+                    style={{ fontSize: "11.5px", fontWeight: 500 }}
+                  >
+                    <CheckCircle size={12} />
+                    Mark complete
+                  </button>
+
+                  {missingOutputs && missingOutputs.length > 0 && (
+                    <div
+                      className="flex items-start gap-1.5 rounded-md border border-st-failed/30 bg-st-failed-bg px-2.5 py-1.5 font-mono text-st-failed"
+                      style={{ fontSize: "10.5px" }}
+                    >
+                      <AlertCircle size={12} className="mt-px shrink-0" />
+                      <span>
+                        Missing outputs: {missingOutputs.join(", ")}
+                      </span>
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
