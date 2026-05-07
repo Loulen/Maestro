@@ -2037,6 +2037,23 @@ async fn run_command(
                 return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
             }
 
+            let cmd_event = event_log::Event {
+                id: None,
+                run_id: run_id.clone(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::CommandIssued,
+                node_id: Some(node_id.clone()),
+                iter: Some(iter),
+                payload: Some(serde_json::json!({
+                    "command": "mark_node_done",
+                    "node_id": node_id,
+                    "iter": iter,
+                })),
+            };
+            if let Err(e) = append_event(&state, &cmd_event).await {
+                error!("failed to append mark_node_done command event: {e}");
+            }
+
             let events = match load_events(&state.db, &run_id).await {
                 Ok(e) => e,
                 Err(e) => {
@@ -3750,6 +3767,70 @@ mod tests {
             run_state.nodes["griller"].status,
             event_log::NodeStatus::Completed
         );
+    }
+
+    #[tokio::test]
+    async fn mark_node_done_emits_command_issued_event() {
+        let state = test_state().await;
+
+        let run_id = "test-mnd-cmd-event";
+        for event in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunStarted,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::json!({ "pipeline_name": "interactive" })),
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeStarted,
+                node_id: Some("griller".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeAwaitingUser,
+                node_id: Some("griller".into()),
+                iter: Some(1),
+                payload: None,
+            },
+        ] {
+            append_event(&state, &event).await.unwrap();
+        }
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind": "mark_node_done", "node_id": "griller", "iter": 1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = load_events(&state.db, run_id).await.unwrap();
+        let cmd_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == event_log::EventKind::CommandIssued)
+            .collect();
+        assert_eq!(cmd_events.len(), 1);
+        let payload = cmd_events[0].payload.as_ref().unwrap();
+        assert_eq!(payload["command"], "mark_node_done");
+        assert_eq!(payload["node_id"], "griller");
     }
 
     #[tokio::test]
