@@ -33,22 +33,20 @@ fn port_missing_side(ports: &[serde_yaml::Value]) -> bool {
     })
 }
 
+fn nodes_contain_type(nodes: &[serde_yaml::Value], node_type: &str) -> bool {
+    nodes.iter().any(|n| {
+        n.get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == node_type)
+    })
+}
+
 fn has_start_end_nodes(yaml_value: &serde_yaml::Value) -> bool {
     let nodes = match yaml_value.get("nodes").and_then(|n| n.as_sequence()) {
         Some(seq) => seq,
         None => return false,
     };
-    let has_start = nodes.iter().any(|n| {
-        n.get("type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| t == "start")
-    });
-    let has_end = nodes.iter().any(|n| {
-        n.get("type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| t == "end")
-    });
-    has_start && has_end
+    nodes_contain_type(nodes, "start") && nodes_contain_type(nodes, "end")
 }
 
 fn has_halt_edges(yaml_value: &serde_yaml::Value) -> bool {
@@ -291,16 +289,8 @@ fn inject_start_end_nodes(doc: &mut serde_yaml::Value) {
         None => return,
     };
 
-    let has_start = nodes.iter().any(|n| {
-        n.get("type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| t == "start")
-    });
-    let has_end = nodes.iter().any(|n| {
-        n.get("type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| t == "end")
-    });
+    let has_start = nodes_contain_type(nodes, "start");
+    let has_end = nodes_contain_type(nodes, "end");
 
     if !has_start {
         let mut start = serde_yaml::Mapping::new();

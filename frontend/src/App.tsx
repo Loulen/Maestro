@@ -170,6 +170,10 @@ export default function App() {
       ? selectedRun.nodes[selectedNodeId] ?? null
       : null;
 
+  const selectedNodeType = selectedRun?.node_defs?.find(
+    (d) => d.id === selectedNodeId,
+  )?.node_type ?? null;
+
   const isArchived = selectedRun?.status === "archived";
 
   const runLayout = useResizableLayout("run", PANEL_IDS, DEFAULT_SIZES);
@@ -240,25 +244,19 @@ export default function App() {
               </>
             ) : (
               <>
-                {selectedRun?.start_node && selectedRun.node_defs?.some(
-                  (d) => d.node_type === "start" && d.id === selectedNodeId,
-                ) && (
+                {selectedNodeType === "start" && selectedRun?.start_node && (
                   <StartInspector
                     startNode={selectedRun.start_node}
                     runId={selectedRun.run_id}
                     nodeId={selectedNodeId!}
                   />
                 )}
-                {selectedRun?.end_node && selectedRun.node_defs?.some(
-                  (d) => d.node_type === "end" && d.id === selectedNodeId,
-                ) && (
+                {selectedNodeType === "end" && selectedRun?.end_node && (
                   <EndInspector
                     endNode={selectedRun.end_node}
                   />
                 )}
-                {selectedNode && selectedRun && !selectedRun.node_defs?.some(
-                  (d) => (d.node_type === "start" || d.node_type === "end") && d.id === selectedNodeId,
-                ) && (
+                {selectedNode && selectedRun && selectedNodeType !== "start" && selectedNodeType !== "end" && (
                   <NodeDetailPanel
                     node={selectedNode}
                     runId={selectedRun.run_id}
@@ -266,9 +264,7 @@ export default function App() {
                     nodeName={selectedRun.node_defs?.find((d) => d.id === selectedNodeId)?.name}
                   />
                 )}
-                {!selectedNode && !selectedRun?.node_defs?.some(
-                  (d) => d.node_type === "start" && d.id === selectedNodeId,
-                ) && isArchived && selectedRun && (
+                {!selectedNode && selectedNodeType !== "start" && isArchived && selectedRun && (
                   <aside className="flex h-full flex-col items-center justify-center bg-bg-2 text-fg-4" style={{ fontSize: "12px" }}>
                     <div className="text-center px-6">
                       <div className="font-medium text-fg-3">Run archived</div>

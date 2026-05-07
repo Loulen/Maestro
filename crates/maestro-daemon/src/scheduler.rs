@@ -207,23 +207,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
-    fn make_start_node() -> NodeDef {
-        NodeDef {
-            id: "start".into(),
-            name: "Start".into(),
-            node_type: NodeType::Start,
-            inputs: vec![],
-            outputs: vec![Port {
-                name: "user_prompt".into(),
-                repeated: false,
-                frontmatter: None,
-            }],
-            interactive: false,
-            view: None,
-        }
-    }
-
     fn make_end_node() -> NodeDef {
         NodeDef {
             id: "end".into(),
