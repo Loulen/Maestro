@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { expectNonZeroBBox } from "./assertions";
 
 // Layer 4 — Cold-start integration spec (#37).
 // Drives the full flow from empty state: goto("/") → connected → click run →
@@ -110,13 +111,10 @@ test("cold-start full flow: run → node → modal → edit toggle, no console e
   // 3. Click the run from the list
   await page.getByText(runId.slice(0, 8)).first().click({ timeout: 5_000 });
 
-  // 4. Assert .react-flow has non-zero bounding box height (canvas-height-0 guard)
+  // 4. Assert .react-flow has non-zero bounding box (canvas-height-0 guard)
   const reactFlow = page.locator(".react-flow");
   await expect(reactFlow).toBeVisible({ timeout: 5_000 });
-  const flowBox = await reactFlow.boundingBox();
-  expect(flowBox).toBeTruthy();
-  expect(flowBox!.height).toBeGreaterThan(0);
-  expect(flowBox!.width).toBeGreaterThan(0);
+  await expectNonZeroBBox(reactFlow);
 
   // 5. Click the worker node
   await page.waitForTimeout(500);

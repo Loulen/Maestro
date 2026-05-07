@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { expectNonZeroBBox } from "./assertions";
 
 // Layer 3b — proves issue #28 run-mode authoring toggle. Boots the daemon,
 // creates a run, opens the "Edit this run" overlay, asserts that the editor
@@ -52,21 +53,14 @@ test("edit-this-run toggle swaps to editor and back", async ({ page, request }) 
   await expect(runEntry).toBeVisible({ timeout: 5_000 });
   await runEntry.click();
 
-  // Assert the canvas rendered with non-zero dimensions
   const reactFlow = page.locator(".react-flow");
   await expect(reactFlow).toBeVisible({ timeout: 5_000 });
-  const flowBox = await reactFlow.boundingBox();
-  expect(flowBox).toBeTruthy();
-  expect(flowBox!.height).toBeGreaterThan(0);
-  expect(flowBox!.width).toBeGreaterThan(0);
+  await expectNonZeroBBox(reactFlow);
 
   // The run overlay should show the pipeline name
   const pipelineLabel = page.getByText(PIPELINE_NAME).first();
   await expect(pipelineLabel).toBeVisible();
-  const overlayBox = await pipelineLabel.boundingBox();
-  expect(overlayBox).toBeTruthy();
-  expect(overlayBox!.height).toBeGreaterThan(0);
-  expect(overlayBox!.width).toBeGreaterThan(0);
+  await expectNonZeroBBox(pipelineLabel);
 
   // Click "Edit this run"
   const editButton = page.getByRole("button", { name: "Edit this run" });
