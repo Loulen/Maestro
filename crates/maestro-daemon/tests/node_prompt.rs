@@ -13,15 +13,26 @@ const NODE_ID: &str = "worker";
 const PIPELINE_YAML: &str = r#"name: prompt-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: worker
     name: worker
     type: doc-only
-    prompt_file: prompt-test.prompts/worker.md
     inputs:
       - name: task
     outputs:
       - name: result
-edges: []
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: worker, port: task }
 "#;
 
 const ROLE_PROMPT: &str = "You are a worker. Do the task.\n";

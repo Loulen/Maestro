@@ -14,7 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Pencil, Trash2, Terminal } from "lucide-react";
-import type { NodeStatus, NodeType, RunState, RunStatus, StartNodeInfo, PortBrief } from "../types";
+import type { NodeStatus, NodeType, RunState, RunStatus, PortBrief } from "../types";
 import { cleanupRun, attachManager } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
 import TriangleHandle from "./TriangleHandle";
@@ -55,11 +55,15 @@ const RUN_STATUS_DOTS: Record<RunStatus, string> = {
 const TYPE_LABELS: Record<NodeType, string> = {
   "doc-only": "doc",
   "code-mutating": "code",
+  "start": "start",
+  "end": "end",
 };
 
 const TYPE_COLORS: Record<NodeType, string> = {
   "doc-only": "border-st-pending text-fg-3",
   "code-mutating": "border-acc text-acc",
+  "start": "border-acc text-acc",
+  "end": "border-st-blocked text-st-blocked",
 };
 
 interface PipelineNodeData {
@@ -135,12 +139,12 @@ function PipelineNode({ data }: NodeProps<Node<PipelineNodeData>>) {
   );
 }
 
-interface HaltNodeData {
+interface EndNodeData {
   [key: string]: unknown;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-function HaltNode(_props: NodeProps<Node<HaltNodeData>>) {
+function EndNode(_props: NodeProps<Node<EndNodeData>>) {
   return (
     <div
       className="grid place-items-center rounded-full border font-mono font-bold"
@@ -191,7 +195,7 @@ function StartNode(_props: NodeProps<Node<StartNodeData>>) {
   );
 }
 
-const nodeTypes = { pipeline: PipelineNode, halt: HaltNode, start: StartNode };
+const nodeTypes = { pipeline: PipelineNode, end: EndNode, start: StartNode };
 
 const OP_SYMBOLS: Record<string, string> = {
   eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=",
@@ -227,37 +231,102 @@ const START_NODE_OFFSET_X = 180;
 function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
   const nodeDefs = run.node_defs ?? [];
   const nodeEntries = Object.values(run.nodes);
-  const hasStart = run.start_node != null;
-  const shiftX = hasStart ? START_NODE_OFFSET_X : 0;
 
-  const nodes: Node[] = nodeDefs.length > 0
-    ? nodeDefs.map((def, i) => {
-        const nodeState = run.nodes[def.id];
-        const status: NodeStatus = nodeState?.status ?? "pending";
-        const iter = nodeState?.iter ?? 1;
-        return {
-          id: def.id,
-          type: "pipeline",
-          position: {
-            x: (def.view_x ?? 200) + shiftX,
-            y: def.view_y ?? 80 + i * 140,
-          },
-          data: {
-            label: def.name ?? def.id,
-            nodeId: def.id,
-            status,
-            nodeType: def.node_type,
-            inputs: def.inputs,
-            outputs: def.outputs,
-            iter,
-          },
-          selected: def.id === selectedNodeId,
-        };
-      })
-    : nodeEntries.map((ns, i) => ({
+  const allNodes: Node[] = [];
+
+  if (nodeDefs.length > 0) {
+    const regularDefs = nodeDefs.filter(
+      (d) => d.node_type !== "start" && d.node_type !== "end",
+    );
+
+    const pipelineNodes: Node[] = regularDefs.map((def, i) => {
+      const nodeState = run.nodes[def.id];
+      const status: NodeStatus = nodeState?.status ?? "pending";
+      const iter = nodeState?.iter ?? 1;
+      return {
+        id: def.id,
+        type: "pipeline",
+        position: {
+          x: (def.view_x ?? 200) + START_NODE_OFFSET_X,
+          y: def.view_y ?? 80 + i * 140,
+        },
+        data: {
+          label: def.name ?? def.id,
+          nodeId: def.id,
+          status,
+          nodeType: def.node_type,
+          inputs: def.inputs,
+          outputs: def.outputs,
+          iter,
+        },
+        selected: def.id === selectedNodeId,
+      };
+    });
+
+    const startDef = nodeDefs.find((d) => d.node_type === "start");
+    if (startDef) {
+      const targetNodeIds = run.start_node?.target_node_ids ?? [];
+      const targetNodes = pipelineNodes.filter((n) =>
+        targetNodeIds.includes(n.id),
+      );
+      const avgY =
+        targetNodes.length > 0
+          ? targetNodes.reduce((sum, n) => sum + n.position.y, 0) /
+            targetNodes.length
+          : 80;
+      const minX =
+        targetNodes.length > 0
+          ? Math.min(...targetNodes.map((n) => n.position.x))
+          : 200 + START_NODE_OFFSET_X;
+
+      allNodes.push({
+        id: startDef.id,
+        type: "start",
+        position: {
+          x: startDef.view_x ?? minX - START_NODE_OFFSET_X,
+          y: startDef.view_y ?? avgY,
+        },
+        data: {},
+        selected: startDef.id === selectedNodeId,
+      });
+    }
+
+    allNodes.push(...pipelineNodes);
+
+    const endDef = nodeDefs.find((d) => d.node_type === "end");
+    if (endDef) {
+      const edgeInfos = run.edges ?? [];
+      const endEdges = edgeInfos.filter((ei) => ei.target_node === endDef.id);
+      const sourceNodes = endEdges.map((ei) =>
+        pipelineNodes.find((n) => n.id === ei.source_node),
+      ).filter(Boolean) as Node[];
+      const maxX =
+        sourceNodes.length > 0
+          ? Math.max(...sourceNodes.map((n) => n.position.x))
+          : 200;
+      const avgY =
+        sourceNodes.length > 0
+          ? sourceNodes.reduce((sum, n) => sum + n.position.y, 0) /
+            sourceNodes.length
+          : 80;
+
+      allNodes.push({
+        id: endDef.id,
+        type: "end",
+        position: {
+          x: endDef.view_x ?? maxX + 280,
+          y: endDef.view_y ?? avgY + 50,
+        },
+        data: {},
+        selected: endDef.id === selectedNodeId,
+      });
+    }
+  } else {
+    allNodes.push(
+      ...nodeEntries.map((ns, i) => ({
         id: ns.node_id,
         type: "pipeline",
-        position: { x: 200 + shiftX, y: 80 + i * 140 },
+        position: { x: 200, y: 80 + i * 140 },
         data: {
           label: ns.node_id,
           nodeId: ns.node_id,
@@ -268,89 +337,31 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
           iter: ns.iter,
         },
         selected: ns.node_id === selectedNodeId,
-      }));
-
-  const startNodes: Node[] = [];
-  if (run.start_node) {
-    const targetNodes = nodes.filter((n) =>
-      run.start_node!.target_node_ids.includes(n.id),
+      })),
     );
-    const avgY =
-      targetNodes.length > 0
-        ? targetNodes.reduce((sum, n) => sum + n.position.y, 0) /
-          targetNodes.length
-        : 80;
-    const minX = targetNodes.length > 0
-      ? Math.min(...targetNodes.map((n) => n.position.x))
-      : 200 + shiftX;
-
-    startNodes.push({
-      id: "__start",
-      type: "start",
-      position: { x: minX - START_NODE_OFFSET_X, y: avgY },
-      data: {},
-      selected: "__start" === selectedNodeId,
-    });
   }
 
-  const edgeInfos = run.edges ?? [];
-  const haltEdges = edgeInfos.filter((ei) => ei.target_node === "__halt__");
-  const haltNodes: Node[] = haltEdges.map((ei, i) => {
-    const sourceNode = nodes.find((n) => n.id === ei.source_node);
-    const sx = sourceNode?.position?.x ?? 200;
-    const sy = sourceNode?.position?.y ?? 80;
-    return {
-      id: `__halt__${i}`,
-      type: "halt",
-      position: { x: sx + 280, y: sy + 50 + i * 60 },
-      data: {},
-      selectable: false,
-    };
-  });
-
-  return [...startNodes, ...nodes, ...haltNodes];
-}
-
-function deriveStartEdges(startNode: StartNodeInfo): Edge[] {
-  return startNode.target_node_ids.map((targetId, i) => ({
-    id: `start-e-${i}`,
-    source: "__start",
-    target: targetId,
-    sourceHandle: null as string | null,
-    targetHandle: null as string | null,
-    type: "default",
-    animated: false,
-    style: {
-      stroke: "var(--color-fg-4)",
-      strokeWidth: 1.5,
-    },
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      color: "var(--color-fg-4)",
-      width: 16,
-      height: 16,
-    },
-  }));
+  return allNodes;
 }
 
 function deriveEdges(run: RunState): Edge[] {
   const edgeInfos = run.edges ?? [];
-  const haltEdges = edgeInfos.filter((ei) => ei.target_node === "__halt__");
+  const nodeDefs = run.node_defs ?? [];
+  const endNodeId = nodeDefs.find((d) => d.node_type === "end")?.id;
+  const startNodeId = nodeDefs.find((d) => d.node_type === "start")?.id;
 
-  const startEdges = run.start_node ? deriveStartEdges(run.start_node) : [];
-
-  const pipelineEdges = edgeInfos.map((ei, i) => {
-    const isHalt = ei.target_node === "__halt__";
+  return edgeInfos.map((ei, i) => {
+    const isEndEdge = endNodeId != null && ei.target_node === endNodeId;
+    const isStartEdge = startNodeId != null && ei.source_node === startNodeId;
     const isConditional = ei.when_clause != null;
-    const isDashed = isHalt || isConditional;
-    const targetId = isHalt ? `__halt__${haltEdges.indexOf(ei)}` : ei.target_node;
+    const isDashed = isEndEdge || isConditional;
 
     const condLabel = ei.when_clause
       ? formatWhenClause(ei.when_clause)
       : undefined;
 
     const label = condLabel
-      ?? (ei.source_port !== ei.target_port && !isHalt
+      ?? (ei.source_port !== ei.target_port && !isEndEdge && !isStartEdge
         ? `${ei.source_port} → ${ei.target_port}`
         : undefined);
 
@@ -361,11 +372,11 @@ function deriveEdges(run: RunState): Edge[] {
     return {
       id: `e-${i}`,
       source: ei.source_node,
-      target: targetId,
+      target: ei.target_node,
       sourceHandle: ei.source_port || null,
-      targetHandle: isHalt ? null : (ei.target_port || null),
+      targetHandle: isEndEdge ? null : (ei.target_port || null),
       type: "default",
-      animated: !isHalt && run.nodes[ei.source_node]?.status === "running",
+      animated: !isEndEdge && run.nodes[ei.source_node]?.status === "running",
       style: {
         stroke: strokeColor,
         strokeWidth: 1.5,
@@ -393,8 +404,6 @@ function deriveEdges(run: RunState): Edge[] {
       labelBgPadding: [4, 2] as [number, number],
     };
   });
-
-  return [...startEdges, ...pipelineEdges];
 }
 
 function DagCanvasInner({

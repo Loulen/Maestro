@@ -32,11 +32,15 @@ interface EditNodeData {
 const TYPE_LABELS: Record<NodeType, string> = {
   "doc-only": "doc",
   "code-mutating": "code",
+  "start": "start",
+  "end": "end",
 };
 
 const TYPE_COLORS: Record<NodeType, string> = {
   "doc-only": "border-st-pending text-fg-3",
   "code-mutating": "border-acc text-acc",
+  "start": "border-acc text-acc",
+  "end": "border-st-blocked text-st-blocked",
 };
 
 function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
@@ -134,11 +138,12 @@ function deriveEditNodes(pipeline: PipelineDef): Node[] {
 }
 
 function deriveEditEdges(pipeline: PipelineDef): Edge[] {
+  const endNodeId = pipeline.nodes.find((n) => n.type === "end")?.id;
+
   return pipeline.edges.map((e, i) => {
-    const isHalt = "halt" in e.target;
+    const isEndEdge = endNodeId != null && e.target.node === endNodeId;
     const isConditional = e.when != null;
-    const isDashed = isHalt || isConditional;
-    const targetId = isHalt ? `__halt__${i}` : (e.target as { node: string }).node;
+    const isDashed = isEndEdge || isConditional;
 
     const condLabel = isConditional
       ? formatWhenClause(e.when as Record<string, unknown>)
@@ -149,14 +154,14 @@ function deriveEditEdges(pipeline: PipelineDef): Edge[] {
       : "var(--color-fg-4)";
 
     const sourcePort = e.source.port;
-    const targetPort = isHalt ? null : (e.target as { port: string }).port;
+    const targetPort = e.target.port;
 
     return {
       id: `e-${i}`,
       source: e.source.node,
-      target: targetId,
+      target: e.target.node,
       sourceHandle: sourcePort || null,
-      targetHandle: targetPort || null,
+      targetHandle: isEndEdge ? null : (targetPort || null),
       type: "default",
       style: {
         stroke: strokeColor,
@@ -258,6 +263,8 @@ function EditCanvasInner() {
   const handleNodeContextMenu = useCallback(
     (event: React.MouseEvent, node: Node) => {
       event.preventDefault();
+      const nodeDef = pipeline?.nodes.find((n) => n.id === node.id);
+      if (nodeDef?.type === "start" || nodeDef?.type === "end") return;
       setContextMenu({
         x: event.clientX,
         y: event.clientY,
@@ -265,7 +272,7 @@ function EditCanvasInner() {
         id: node.id,
       });
     },
-    [],
+    [pipeline],
   );
 
   const handleEdgeContextMenu = useCallback(

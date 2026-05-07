@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::condition::{self, EvalContext};
 use crate::event_log::{NodeStatus, RunState};
-use crate::pipeline::{EdgeTarget, PipelineDef};
+use crate::pipeline::{NodeType, PipelineDef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerAction {
@@ -14,6 +14,9 @@ pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> 
     let mut ready = Vec::new();
 
     for node in &pipeline.nodes {
+        if node.node_type == NodeType::Start || node.node_type == NodeType::End {
+            continue;
+        }
         if run_state.nodes.contains_key(&node.id) {
             continue;
         }
@@ -21,15 +24,17 @@ pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> 
         let unconditional_upstream: HashSet<&str> = pipeline
             .edges
             .iter()
-            .filter(|e| {
-                matches!(&e.target, EdgeTarget::Node(ep) if ep.node == node.id) && e.when.is_none()
-            })
+            .filter(|e| e.target.node == node.id && e.when.is_none())
             .map(|e| e.source.node.as_str())
+            .filter(|src| {
+                !pipeline
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == *src && n.node_type == NodeType::Start)
+            })
             .collect();
 
         if unconditional_upstream.is_empty() {
-            // Entry node — no unconditional dependencies. Conditional incoming edges
-            // (back-edges in cycles) don't block initial scheduling.
             ready.push(node.id.clone());
         } else {
             let all_completed = unconditional_upstream.iter().all(|src| {
@@ -77,6 +82,12 @@ pub fn evaluate_outgoing_edges_with_context(
         .map(|n| n.iter)
         .unwrap_or(1);
 
+    let end_node_id = pipeline
+        .nodes
+        .iter()
+        .find(|n| n.node_type == NodeType::End)
+        .map(|n| n.id.as_str());
+
     let ctx = EvalContext::new(source_iter)
         .with_variables(resolved_vars.clone())
         .with_fields(frontmatter_fields.clone());
@@ -95,43 +106,40 @@ pub fn evaluate_outgoing_edges_with_context(
             continue;
         }
 
-        match &edge.target {
-            EdgeTarget::Node(ep) => {
-                let target_id = &ep.node;
+        let target_id = &edge.target.node;
 
-                let target_all_unconditional_upstream_completed =
-                    check_all_unconditional_upstream_completed(
-                        pipeline,
-                        run_state,
-                        target_id,
-                        completed_node_id,
-                    );
-
-                if target_all_unconditional_upstream_completed {
-                    let next_iter = run_state
-                        .nodes
-                        .get(target_id.as_str())
-                        .map(|n| n.iter + 1)
-                        .unwrap_or(1);
-
-                    actions.push(SchedulerAction::Spawn {
-                        node_id: target_id.clone(),
-                        iter: next_iter,
-                    });
-                }
-            }
-            EdgeTarget::Halt(h) => {
-                let raw_msg = h.message.as_deref().unwrap_or("Run halted");
-                let rendered = condition::render_halt_message(
-                    raw_msg,
-                    &condition::HaltContext {
-                        iter: source_iter,
-                        node_id: completed_node_id.to_string(),
-                        variables: resolved_vars.clone(),
-                        fields: frontmatter_fields.clone(),
-                    },
+        if end_node_id == Some(target_id.as_str()) {
+            let raw_msg = edge.reason.as_deref().unwrap_or("Run halted");
+            let rendered = condition::render_halt_message(
+                raw_msg,
+                &condition::HaltContext {
+                    iter: source_iter,
+                    node_id: completed_node_id.to_string(),
+                    variables: resolved_vars.clone(),
+                    fields: frontmatter_fields.clone(),
+                },
+            );
+            actions.push(SchedulerAction::Halt { message: rendered });
+        } else {
+            let target_all_unconditional_upstream_completed =
+                check_all_unconditional_upstream_completed(
+                    pipeline,
+                    run_state,
+                    target_id,
+                    completed_node_id,
                 );
-                actions.push(SchedulerAction::Halt { message: rendered });
+
+            if target_all_unconditional_upstream_completed {
+                let next_iter = run_state
+                    .nodes
+                    .get(target_id.as_str())
+                    .map(|n| n.iter + 1)
+                    .unwrap_or(1);
+
+                actions.push(SchedulerAction::Spawn {
+                    node_id: target_id.clone(),
+                    iter: next_iter,
+                });
             }
         }
     }
@@ -148,10 +156,7 @@ fn check_all_unconditional_upstream_completed(
     let unconditional_upstream: HashSet<&str> = pipeline
         .edges
         .iter()
-        .filter(|e| {
-            matches!(&e.target, EdgeTarget::Node(ep) if ep.node == target_node_id)
-                && e.when.is_none()
-        })
+        .filter(|e| e.target.node == target_node_id && e.when.is_none())
         .map(|e| e.source.node.as_str())
         .collect();
 
@@ -170,7 +175,7 @@ fn check_all_unconditional_upstream_completed(
 mod tests {
     use super::*;
     use crate::event_log::NodeState;
-    use crate::pipeline::{EdgeDef, EdgeEndpoint, EdgeTarget, HaltTarget, NodeDef, NodeType, Port};
+    use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port};
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
@@ -202,17 +207,51 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
+    fn make_start_node() -> NodeDef {
+        NodeDef {
+            id: "start".into(),
+            name: "Start".into(),
+            node_type: NodeType::Start,
+            inputs: vec![],
+            outputs: vec![Port {
+                name: "user_prompt".into(),
+                repeated: false,
+                frontmatter: None,
+            }],
+            interactive: false,
+            view: None,
+        }
+    }
+
+    fn make_end_node() -> NodeDef {
+        NodeDef {
+            id: "end".into(),
+            name: "End".into(),
+            node_type: NodeType::End,
+            inputs: vec![Port {
+                name: "result".into(),
+                repeated: false,
+                frontmatter: None,
+            }],
+            outputs: vec![],
+            interactive: false,
+            view: None,
+        }
+    }
+
     fn make_edge(src_node: &str, src_port: &str, tgt_node: &str, tgt_port: &str) -> EdgeDef {
         EdgeDef {
             source: EdgeEndpoint {
                 node: src_node.into(),
                 port: src_port.into(),
             },
-            target: EdgeTarget::Node(EdgeEndpoint {
+            target: EdgeEndpoint {
                 node: tgt_node.into(),
                 port: tgt_port.into(),
-            }),
+            },
             when: None,
+            reason: None,
         }
     }
 
@@ -228,18 +267,19 @@ mod tests {
                 node: src_node.into(),
                 port: src_port.into(),
             },
-            target: EdgeTarget::Node(EdgeEndpoint {
+            target: EdgeEndpoint {
                 node: tgt_node.into(),
                 port: tgt_port.into(),
-            }),
+            },
             when: Some(when),
+            reason: None,
         }
     }
 
-    fn make_halt_edge(
+    fn make_end_edge(
         src_node: &str,
         src_port: &str,
-        message: &str,
+        reason: &str,
         when: serde_yaml::Value,
     ) -> EdgeDef {
         EdgeDef {
@@ -247,10 +287,12 @@ mod tests {
                 node: src_node.into(),
                 port: src_port.into(),
             },
-            target: EdgeTarget::Halt(HaltTarget {
-                message: Some(message.into()),
-            }),
+            target: EdgeEndpoint {
+                node: "end".into(),
+                port: "result".into(),
+            },
             when: Some(when),
+            reason: Some(reason.into()),
         }
     }
 
@@ -567,13 +609,16 @@ mod tests {
     }
 
     #[test]
-    fn halt_edge_produces_halt_action() {
+    fn end_edge_produces_halt_action() {
         let pipeline = PipelineDef {
             name: "halt-test".into(),
             version: None,
             variables: HashMap::new(),
-            nodes: vec![make_node("reviewer", &["code"], &["review"])],
-            edges: vec![make_halt_edge(
+            nodes: vec![
+                make_node("reviewer", &["code"], &["review"]),
+                make_end_node(),
+            ],
+            edges: vec![make_end_edge(
                 "reviewer",
                 "review",
                 "Blocked after {iter} iterations on {node-id}",
@@ -596,13 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn halt_edge_does_not_fire_when_condition_false() {
+    fn end_edge_does_not_fire_when_condition_false() {
         let pipeline = PipelineDef {
             name: "halt-test".into(),
             version: None,
             variables: HashMap::new(),
-            nodes: vec![make_node("reviewer", &["code"], &["review"])],
-            edges: vec![make_halt_edge(
+            nodes: vec![
+                make_node("reviewer", &["code"], &["review"]),
+                make_end_node(),
+            ],
+            edges: vec![make_end_edge(
                 "reviewer",
                 "review",
                 "Blocked",
@@ -691,10 +739,10 @@ mod tests {
     }
 
     #[test]
-    fn two_node_cycle_with_halt_full_scenario() {
+    fn two_node_cycle_with_end_edge_full_scenario() {
         // implementer → reviewer (unconditional)
         // reviewer → implementer (when iter < 3)  — back-edge
-        // reviewer → halt (when iter >= 3)
+        // reviewer → end (when iter >= 3, reason)
         let pipeline = PipelineDef {
             name: "review-loop".into(),
             version: None,
@@ -702,6 +750,7 @@ mod tests {
             nodes: vec![
                 make_node("implementer", &["review"], &["code"]),
                 make_node("reviewer", &["code"], &["review"]),
+                make_end_node(),
             ],
             edges: vec![
                 make_edge("implementer", "code", "reviewer", "code"),
@@ -712,7 +761,7 @@ mod tests {
                     "review",
                     yaml("iter: { lt: 3 }"),
                 ),
-                make_halt_edge(
+                make_end_edge(
                     "reviewer",
                     "review",
                     "Halted after {iter} iterations",

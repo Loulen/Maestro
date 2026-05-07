@@ -16,16 +16,27 @@ const PIPELINE_NAME: &str = "run-edit-test";
 const PIPELINE_YAML: &str = r#"name: run-edit-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: planner
     name: planner
     type: doc-only
-    prompt_file: run-edit-test.prompts/planner.md
     inputs:
       - name: task
     outputs:
       - name: plan
     view: { x: 100, y: 100 }
-edges: []
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: planner, port: task }
 "#;
 
 const PROMPT_CONTENT: &str = "You are a planner. Plan the task.\n";
@@ -363,10 +374,14 @@ async fn get_run_returns_augmented_node_defs() {
     let new_yaml = r#"name: run-edit-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: planner
     name: planner
     type: doc-only
-    prompt_file: run-edit-test.prompts/planner.md
     inputs:
       - name: task
     outputs:
@@ -380,7 +395,14 @@ nodes:
     outputs:
       - name: summary
     view: { x: 300, y: 100 }
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
 edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: planner, port: task }
   - source: { node: planner, port: plan }
     target: { node: implementer, port: plan }
 "#;
@@ -393,16 +415,18 @@ edges:
     assert_eq!(resp.status(), 200);
     let run_state: serde_json::Value = resp.json().await.unwrap();
     let node_defs = run_state["node_defs"].as_array().unwrap();
-    assert_eq!(node_defs.len(), 2, "should reflect augmented node_defs");
+    assert_eq!(node_defs.len(), 4, "should reflect augmented node_defs");
     let ids: Vec<&str> = node_defs
         .iter()
         .map(|n| n["id"].as_str().unwrap())
         .collect();
+    assert!(ids.contains(&"start"));
     assert!(ids.contains(&"planner"));
     assert!(ids.contains(&"implementer"));
+    assert!(ids.contains(&"end"));
 
     let edges = run_state["edges"].as_array().unwrap();
-    assert_eq!(edges.len(), 1, "should reflect augmented edges");
+    assert_eq!(edges.len(), 2, "should reflect augmented edges");
 }
 
 // --- Symmetric test: removing a node from the YAML should not spawn it ---

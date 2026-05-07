@@ -12,10 +12,14 @@ const PIPELINE_NAME: &str = "io-test";
 const PIPELINE_YAML: &str = r#"name: io-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: planner
     name: planner
     type: doc-only
-    prompt_file: io-test.prompts/planner.md
     inputs:
       - name: task
     outputs:
@@ -23,7 +27,6 @@ nodes:
   - id: implementer
     name: implementer
     type: code-mutating
-    prompt_file: io-test.prompts/implementer.md
     inputs:
       - name: plan
     outputs:
@@ -32,7 +35,14 @@ nodes:
           verdict:
             type: enum
             allowed: [PASS, FAIL]
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
 edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: planner, port: task }
   - source: { node: planner, port: plan }
     target: { node: implementer, port: plan }
 "#;

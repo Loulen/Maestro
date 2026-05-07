@@ -169,7 +169,8 @@ describe("updateNode with name", () => {
     const node = makeNode({ id: "cccccccc", name: "Original" });
     const edge: EdgeDef = {
       source: { node: "cccccccc", port: "out" },
-      target: { halt: { message: "done" } },
+      target: { node: "end", port: "result" },
+      reason: "done",
     };
     seedTabWithPipeline(makePipeline([node], [edge]));
 

@@ -143,17 +143,30 @@ impl RunState {
 }
 
 fn entry_node_ids(edges: &[EdgeInfo], node_defs: &[NodeDefInfo]) -> Vec<String> {
-    let nodes_with_unconditional_incoming: HashSet<&str> = edges
+    let start_id = node_defs
         .iter()
-        .filter(|e| e.target_node != "__halt__" && e.when_clause.is_none())
-        .map(|e| e.target_node.as_str())
-        .collect();
+        .find(|n| n.node_type == "start")
+        .map(|n| n.id.as_str());
 
-    node_defs
-        .iter()
-        .filter(|n| !nodes_with_unconditional_incoming.contains(n.id.as_str()))
-        .map(|n| n.id.clone())
-        .collect()
+    if let Some(start_id) = start_id {
+        edges
+            .iter()
+            .filter(|e| e.source_node == start_id)
+            .map(|e| e.target_node.clone())
+            .collect()
+    } else {
+        let nodes_with_unconditional_incoming: HashSet<&str> = edges
+            .iter()
+            .filter(|e| e.when_clause.is_none())
+            .map(|e| e.target_node.as_str())
+            .collect();
+
+        node_defs
+            .iter()
+            .filter(|n| !nodes_with_unconditional_incoming.contains(n.id.as_str()))
+            .map(|n| n.id.clone())
+            .collect()
+    }
 }
 
 fn upsert_iteration(iterations: &mut Vec<IterationInfo>, new: IterationInfo) {
@@ -649,7 +662,15 @@ mod tests {
         assert!(id.contains('-'));
     }
 
-    // --- start_node projection (issue #30) ---
+    // --- start_node projection (issue #30, updated for #39) ---
+
+    fn start_node_def() -> serde_json::Value {
+        serde_json::json!({ "id": "start", "node_type": "start", "inputs": [], "outputs": ["user_prompt"] })
+    }
+
+    fn end_node_def() -> serde_json::Value {
+        serde_json::json!({ "id": "end", "node_type": "end", "inputs": ["result"], "outputs": [] })
+    }
 
     fn node_def(id: &str) -> serde_json::Value {
         serde_json::json!({
@@ -682,8 +703,12 @@ mod tests {
             serde_json::json!({
                 "pipeline_name": "linear",
                 "input": "hello world",
-                "node_defs": [node_def("planner"), node_def("implementer")],
-                "edges": [edge_info("planner", "implementer")],
+                "node_defs": [start_node_def(), end_node_def(), node_def("planner"), node_def("implementer")],
+                "edges": [
+                    edge_info("start", "planner"),
+                    edge_info("planner", "implementer"),
+                    edge_info("implementer", "end"),
+                ],
             }),
         )];
 
@@ -702,10 +727,13 @@ mod tests {
             serde_json::json!({
                 "pipeline_name": "fan-out",
                 "input": "build two things",
-                "node_defs": [node_def("impl-a"), node_def("impl-b"), node_def("merger")],
+                "node_defs": [start_node_def(), end_node_def(), node_def("impl-a"), node_def("impl-b"), node_def("merger")],
                 "edges": [
+                    edge_info("start", "impl-a"),
+                    edge_info("start", "impl-b"),
                     edge_info("impl-a", "merger"),
                     edge_info("impl-b", "merger"),
+                    edge_info("merger", "end"),
                 ],
             }),
         )];
@@ -725,10 +753,12 @@ mod tests {
             serde_json::json!({
                 "pipeline_name": "cycle",
                 "input": "iterate",
-                "node_defs": [node_def("implementer"), node_def("reviewer")],
+                "node_defs": [start_node_def(), end_node_def(), node_def("implementer"), node_def("reviewer")],
                 "edges": [
+                    edge_info("start", "implementer"),
                     edge_info("implementer", "reviewer"),
                     edge_info_conditional("reviewer", "implementer", serde_json::json!({"iter": {"lt": 3}})),
+                    edge_info("reviewer", "end"),
                 ],
             }),
         )];
@@ -747,8 +777,8 @@ mod tests {
                 serde_json::json!({
                     "pipeline_name": "archived-test",
                     "input": "test input",
-                    "node_defs": [node_def("only")],
-                    "edges": [],
+                    "node_defs": [start_node_def(), end_node_def(), node_def("only")],
+                    "edges": [edge_info("start", "only"), edge_info("only", "end")],
                 }),
             ),
             make_event(EventKind::NodeStarted, Some("only"), Some(1)),
@@ -763,38 +793,43 @@ mod tests {
     }
 
     #[test]
-    fn start_node_all_nodes_are_entry_when_no_edges() {
+    fn start_node_all_nodes_are_entry_when_no_inter_edges() {
         let events = vec![make_event_with_payload(
             EventKind::RunStarted,
             None,
             serde_json::json!({
                 "pipeline_name": "isolated",
                 "input": "go",
-                "node_defs": [node_def("a"), node_def("b")],
-                "edges": [],
+                "node_defs": [start_node_def(), end_node_def(), node_def("a"), node_def("b")],
+                "edges": [edge_info("start", "a"), edge_info("start", "b")],
             }),
         )];
 
         let state = project(&events).unwrap();
         let start = state.start_node.as_ref().unwrap();
-        assert_eq!(start.target_node_ids, vec!["a", "b"]);
+        let mut targets = start.target_node_ids.clone();
+        targets.sort();
+        assert_eq!(targets, vec!["a", "b"]);
     }
 
     #[test]
-    fn start_node_halt_edges_dont_block_entry() {
+    fn start_node_end_edges_dont_block_entry() {
         let events = vec![make_event_with_payload(
             EventKind::RunStarted,
             None,
             serde_json::json!({
-                "pipeline_name": "with-halt",
+                "pipeline_name": "with-end",
                 "input": "test",
-                "node_defs": [node_def("reviewer")],
-                "edges": [{
-                    "source_node": "reviewer", "source_port": "review",
-                    "target_node": "__halt__", "target_port": "",
-                    "halt_message": "Blocked",
-                    "when_clause": {"iter": {"gte": 3}}
-                }],
+                "node_defs": [start_node_def(), end_node_def(), node_def("reviewer")],
+                "edges": [
+                    edge_info("start", "reviewer"),
+                    {
+                        "source_node": "reviewer", "source_port": "review",
+                        "target_node": "end", "target_port": "result",
+                        "halt_message": "Blocked",
+                        "when_clause": {"iter": {"gte": 3}}
+                    },
+                ],
             }),
         )];
 

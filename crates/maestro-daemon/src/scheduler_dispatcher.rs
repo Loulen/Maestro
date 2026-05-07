@@ -23,7 +23,7 @@ pub fn compute_ready_to_spawn(pipeline: &PipelineDef, run_state: &RunState) -> V
 mod tests {
     use super::*;
     use crate::event_log::NodeState;
-    use crate::pipeline::{EdgeDef, EdgeEndpoint, EdgeTarget, NodeDef, NodeType, Port};
+    use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port};
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
@@ -61,11 +61,12 @@ mod tests {
                 node: src_node.into(),
                 port: src_port.into(),
             },
-            target: EdgeTarget::Node(EdgeEndpoint {
+            target: EdgeEndpoint {
                 node: tgt_node.into(),
                 port: tgt_port.into(),
-            }),
+            },
             when: None,
+            reason: None,
         }
     }
 

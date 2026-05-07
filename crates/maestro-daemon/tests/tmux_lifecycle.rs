@@ -17,6 +17,11 @@ const NODE_ID: &str = "worker";
 const PIPELINE_YAML: &str = r#"name: lifecycle-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: worker
     name: worker
     type: doc-only
@@ -24,7 +29,14 @@ nodes:
       - name: in
     outputs:
       - name: out
-edges: []
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: worker, port: in }
 "#;
 
 fn tmux_available() -> bool {

@@ -17,15 +17,26 @@ const PIPELINE_NAME: &str = "multi-iter-test";
 const PIPELINE_YAML: &str = r#"name: multi-iter-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: reviewer
     name: reviewer
     type: doc-only
-    prompt_file: multi-iter-test.prompts/reviewer.md
     inputs:
       - name: task
     outputs:
       - name: review
-edges: []
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: reviewer, port: task }
 "#;
 
 fn seed(repo: &std::path::Path) -> anyhow::Result<()> {

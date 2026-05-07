@@ -12,16 +12,27 @@ const PIPELINE_NAME: &str = "start-node-test";
 const PIPELINE_YAML: &str = r#"name: start-node-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: only
     name: only
     type: doc-only
-    prompt_file: start-node-test.prompts/only.md
     inputs:
       - name: task
     outputs:
       - name: out
     view: { x: 200, y: 100 }
-edges: []
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: only, port: task }
 "#;
 
 fn seed(repo: &std::path::Path) -> anyhow::Result<()> {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::frontmatter_parser;
-use crate::pipeline::{EdgeTarget, PipelineDef};
+use crate::pipeline::PipelineDef;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileInfo {
@@ -46,10 +46,7 @@ pub fn resolve(pipeline: &PipelineDef, artifacts_dir: &Path, node_id: &str, iter
         let mut found_edge = false;
 
         for edge in &pipeline.edges {
-            let EdgeTarget::Node(ref ep) = edge.target else {
-                continue;
-            };
-            if ep.node != node_id || ep.port != input_port.name {
+            if edge.target.node != node_id || edge.target.port != input_port.name {
                 continue;
             }
             found_edge = true;
@@ -223,7 +220,7 @@ fn glob_repeated(source_dir: &Path, port_name: &str) -> Vec<FileInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{EdgeDef, EdgeEndpoint, EdgeTarget, NodeDef, NodeType, Port};
+    use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port};
     use pretty_assertions::assert_eq;
     use std::fs;
 
@@ -277,11 +274,12 @@ mod tests {
                     node: "planner".into(),
                     port: "plan".into(),
                 },
-                target: EdgeTarget::Node(EdgeEndpoint {
+                target: EdgeEndpoint {
                     node: "implementer".into(),
                     port: "plan".into(),
-                }),
+                },
                 when: None,
+                reason: None,
             }],
         }
     }
@@ -414,11 +412,12 @@ mod tests {
                     node: "reviewer".into(),
                     port: "review".into(),
                 },
-                target: EdgeTarget::Node(EdgeEndpoint {
+                target: EdgeEndpoint {
                     node: "implementer".into(),
                     port: "reviews".into(),
-                }),
+                },
                 when: None,
+                reason: None,
             }],
         };
 
@@ -508,22 +507,24 @@ mod tests {
                         node: "a".into(),
                         port: "out".into(),
                     },
-                    target: EdgeTarget::Node(EdgeEndpoint {
+                    target: EdgeEndpoint {
                         node: "merger".into(),
                         port: "docs".into(),
-                    }),
+                    },
                     when: None,
+                    reason: None,
                 },
                 EdgeDef {
                     source: EdgeEndpoint {
                         node: "b".into(),
                         port: "out".into(),
                     },
-                    target: EdgeTarget::Node(EdgeEndpoint {
+                    target: EdgeEndpoint {
                         node: "merger".into(),
                         port: "docs".into(),
-                    }),
+                    },
                     when: None,
+                    reason: None,
                 },
             ],
         };

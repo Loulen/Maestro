@@ -14,6 +14,11 @@ const NODE_ID: &str = "impl-1";
 const PIPELINE_YAML: &str = r#"name: cm-survive-test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: impl-1
     name: impl-1
     type: code-mutating
@@ -21,7 +26,14 @@ nodes:
       - name: task
     outputs:
       - name: summary
-edges: []
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: impl-1, port: task }
 "#;
 
 const ROLE_PROMPT: &str = "You are an implementer. Do the task.\n";
@@ -112,7 +124,6 @@ async fn sub_worktree_survives_node_completion() {
     // Write a code change in the sub-worktree so merge has something to commit
     std::fs::write(sub_wt_dir.join("implementation.rs"), "fn main() {}\n").unwrap();
 
-    // Create required output artifact so output validation passes (refs #36)
     let artifacts_dir = daemon
         .repo_root()
         .join(".maestro/runs")
@@ -192,7 +203,6 @@ async fn cleanup_run_removes_surviving_sub_worktrees() {
     // Write a code change and mark done
     std::fs::write(sub_wt_dir.join("implementation.rs"), "fn main() {}\n").unwrap();
 
-    // Create required output artifact so output validation passes (refs #36)
     let artifacts_dir = daemon
         .repo_root()
         .join(".maestro/runs")

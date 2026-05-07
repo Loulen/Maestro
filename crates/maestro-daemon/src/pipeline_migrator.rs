@@ -33,12 +33,52 @@ fn port_missing_side(ports: &[serde_yaml::Value]) -> bool {
     })
 }
 
+fn has_start_end_nodes(yaml_value: &serde_yaml::Value) -> bool {
+    let nodes = match yaml_value.get("nodes").and_then(|n| n.as_sequence()) {
+        Some(seq) => seq,
+        None => return false,
+    };
+    let has_start = nodes.iter().any(|n| {
+        n.get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "start")
+    });
+    let has_end = nodes.iter().any(|n| {
+        n.get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "end")
+    });
+    has_start && has_end
+}
+
+fn has_halt_edges(yaml_value: &serde_yaml::Value) -> bool {
+    let edges = match yaml_value.get("edges").and_then(|e| e.as_sequence()) {
+        Some(seq) => seq,
+        None => return false,
+    };
+    edges.iter().any(|e| {
+        e.get("target")
+            .and_then(|t| t.as_mapping())
+            .is_some_and(|m| m.contains_key(serde_yaml::Value::String("halt".into())))
+    })
+}
+
 fn needs_migration(yaml_value: &serde_yaml::Value) -> bool {
+    if !has_start_end_nodes(yaml_value) {
+        return true;
+    }
+    if has_halt_edges(yaml_value) {
+        return true;
+    }
     let nodes = match yaml_value.get("nodes").and_then(|n| n.as_sequence()) {
         Some(seq) => seq,
         None => return false,
     };
     for node in nodes {
+        let node_type = node.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if node_type == "start" || node_type == "end" {
+            continue;
+        }
         if node.get("prompt_file").and_then(|v| v.as_str()).is_some() {
             return true;
         }
@@ -95,6 +135,14 @@ pub fn migrate_pipeline_yaml(
     for node in nodes.iter_mut() {
         let mapping = node.as_mapping_mut().ok_or("node is not a mapping")?;
 
+        let node_type = mapping
+            .get(serde_yaml::Value::String("type".into()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if node_type == "start" || node_type == "end" {
+            continue;
+        }
+
         let old_id = mapping
             .get(serde_yaml::Value::String("id".into()))
             .and_then(|v| v.as_str())
@@ -147,6 +195,7 @@ pub fn migrate_pipeline_yaml(
     if let Some(edges) = edges {
         for edge in edges.iter_mut() {
             rewrite_edge_endpoint(edge, "source", &id_map);
+            rewrite_halt_edge(edge);
             rewrite_edge_endpoint(edge, "target", &id_map);
         }
     }
@@ -158,6 +207,8 @@ pub fn migrate_pipeline_yaml(
             backfill_port_sides(node, "outputs", "right");
         }
     }
+
+    inject_start_end_nodes(&mut doc);
 
     let yaml_text =
         serde_yaml::to_string(&doc).map_err(|e| format!("YAML serialize error: {e}"))?;
@@ -184,6 +235,123 @@ fn backfill_port_sides(node: &mut serde_yaml::Value, key: &str, default_side: &s
                 );
             }
         }
+    }
+}
+
+fn rewrite_halt_edge(edge: &mut serde_yaml::Value) {
+    let target = match edge.get("target") {
+        Some(t) => t.clone(),
+        None => return,
+    };
+    let halt = match target
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("halt".into())))
+    {
+        Some(h) => h.clone(),
+        None => return,
+    };
+
+    let reason = halt
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("message".into())))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let mut new_target = serde_yaml::Mapping::new();
+    new_target.insert(
+        serde_yaml::Value::String("node".into()),
+        serde_yaml::Value::String("end".into()),
+    );
+    new_target.insert(
+        serde_yaml::Value::String("port".into()),
+        serde_yaml::Value::String("result".into()),
+    );
+
+    if let Some(e) = edge.as_mapping_mut() {
+        e.insert(
+            serde_yaml::Value::String("target".into()),
+            serde_yaml::Value::Mapping(new_target),
+        );
+        if let Some(reason) = reason {
+            e.insert(
+                serde_yaml::Value::String("reason".into()),
+                serde_yaml::Value::String(reason),
+            );
+        }
+    }
+}
+
+fn inject_start_end_nodes(doc: &mut serde_yaml::Value) {
+    if has_start_end_nodes(doc) {
+        return;
+    }
+
+    let nodes = match doc.get_mut("nodes").and_then(|n| n.as_sequence_mut()) {
+        Some(seq) => seq,
+        None => return,
+    };
+
+    let has_start = nodes.iter().any(|n| {
+        n.get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "start")
+    });
+    let has_end = nodes.iter().any(|n| {
+        n.get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "end")
+    });
+
+    if !has_start {
+        let mut start = serde_yaml::Mapping::new();
+        start.insert(
+            serde_yaml::Value::String("id".into()),
+            serde_yaml::Value::String("start".into()),
+        );
+        start.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("Start".into()),
+        );
+        start.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("start".into()),
+        );
+        let mut output_port = serde_yaml::Mapping::new();
+        output_port.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("user_prompt".into()),
+        );
+        start.insert(
+            serde_yaml::Value::String("outputs".into()),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(output_port)]),
+        );
+        nodes.insert(0, serde_yaml::Value::Mapping(start));
+    }
+
+    if !has_end {
+        let mut end = serde_yaml::Mapping::new();
+        end.insert(
+            serde_yaml::Value::String("id".into()),
+            serde_yaml::Value::String("end".into()),
+        );
+        end.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("End".into()),
+        );
+        end.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("end".into()),
+        );
+        let mut input_port = serde_yaml::Mapping::new();
+        input_port.insert(
+            serde_yaml::Value::String("name".into()),
+            serde_yaml::Value::String("result".into()),
+        );
+        end.insert(
+            serde_yaml::Value::String("inputs".into()),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(input_port)]),
+        );
+        nodes.push(serde_yaml::Value::Mapping(end));
     }
 }
 
@@ -295,6 +463,11 @@ mod tests {
 name: test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: aBcD1234
     name: implementer
     type: code-mutating
@@ -305,6 +478,11 @@ nodes:
       - name: code
         side: right
     view: { x: 100, y: 160 }
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
 edges: []
 "#;
         let result = migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
@@ -350,11 +528,13 @@ edges:
         let parsed: serde_yaml::Value = serde_yaml::from_str(&result.yaml_text).unwrap();
 
         let nodes = parsed["nodes"].as_sequence().unwrap();
-        assert_eq!(nodes[0]["id"].as_str().unwrap(), new_impl_id);
-        assert_eq!(nodes[0]["name"].as_str().unwrap(), "implementer");
-        assert!(nodes[0].get("prompt_file").is_none());
-        assert_eq!(nodes[1]["id"].as_str().unwrap(), new_rev_id);
-        assert_eq!(nodes[1]["name"].as_str().unwrap(), "reviewer");
+        assert_eq!(nodes[0]["type"].as_str().unwrap(), "start");
+        assert_eq!(nodes[1]["id"].as_str().unwrap(), new_impl_id);
+        assert_eq!(nodes[1]["name"].as_str().unwrap(), "implementer");
+        assert!(nodes[1].get("prompt_file").is_none());
+        assert_eq!(nodes[2]["id"].as_str().unwrap(), new_rev_id);
+        assert_eq!(nodes[2]["name"].as_str().unwrap(), "reviewer");
+        assert_eq!(nodes[3]["type"].as_str().unwrap(), "end");
 
         let edges = parsed["edges"].as_sequence().unwrap();
         assert_eq!(edges[0]["source"]["node"].as_str().unwrap(), new_impl_id);
@@ -389,7 +569,19 @@ edges:
         let new_id = deterministic_id("worker");
         let edges = parsed["edges"].as_sequence().unwrap();
         assert_eq!(edges[0]["source"]["node"].as_str().unwrap(), new_id);
-        assert!(edges[0]["target"]["halt"].is_mapping());
+        assert_eq!(edges[0]["target"]["node"].as_str().unwrap(), "end");
+        assert_eq!(edges[0]["target"]["port"].as_str().unwrap(), "result");
+        assert_eq!(edges[0]["reason"].as_str().unwrap(), "done");
+
+        let nodes = parsed["nodes"].as_sequence().unwrap();
+        assert!(
+            nodes.iter().any(|n| n["type"].as_str() == Some("start")),
+            "start node should be injected"
+        );
+        assert!(
+            nodes.iter().any(|n| n["type"].as_str() == Some("end")),
+            "end node should be injected"
+        );
     }
 
     #[test]

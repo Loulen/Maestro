@@ -1,6 +1,6 @@
 export type RunStatus = "running" | "awaiting_user" | "completed" | "failed" | "halted" | "archived";
 export type NodeStatus = "pending" | "running" | "awaiting_user" | "completed" | "failed";
-export type NodeType = "doc-only" | "code-mutating";
+export type NodeType = "doc-only" | "code-mutating" | "start" | "end";
 
 export interface RunListEntry {
   run_id: string;
@@ -142,18 +142,11 @@ export interface EdgeEndpoint {
   port: string;
 }
 
-export interface HaltTarget {
-  message?: string | null;
-}
-
-export type EdgeTargetDef =
-  | { node: string; port: string }
-  | { halt: HaltTarget };
-
 export interface EdgeDef {
   source: EdgeEndpoint;
-  target: EdgeTargetDef;
+  target: EdgeEndpoint;
   when?: Record<string, unknown> | null;
+  reason?: string | null;
 }
 
 export interface PipelineDef {

@@ -24,6 +24,11 @@ const NODE_ID: &str = "solo";
 const PIPELINE_YAML: &str = r#"name: cli-cycle
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: solo
     name: solo
     type: doc-only
@@ -31,6 +36,14 @@ nodes:
       - name: in
     outputs:
       - name: out
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: solo, port: in }
 "#;
 
 fn seed(repo: &std::path::Path) -> anyhow::Result<()> {

@@ -710,7 +710,7 @@ async fn create_pipeline(
     }
 
     let scaffold = format!(
-        "name: {safe_name}\nversion: \"1.0\"\n\nvariables: {{}}\n\nnodes: []\n\nedges: []\n"
+        "name: {safe_name}\nversion: \"1.0\"\n\nvariables: {{}}\n\nnodes:\n  - id: start\n    name: Start\n    type: start\n    outputs:\n      - name: user_prompt\n  - id: end\n    name: End\n    type: end\n    inputs:\n      - name: result\n\nedges: []\n"
     );
     if let Err(e) = std::fs::write(&path, &scaffold) {
         return (
@@ -793,6 +793,8 @@ async fn spawn_node(
             "node_type": match node.node_type {
                 pipeline::NodeType::DocOnly => "doc-only",
                 pipeline::NodeType::CodeMutating => "code-mutating",
+                pipeline::NodeType::Start => "start",
+                pipeline::NodeType::End => "end",
             },
         })),
     };
@@ -3085,6 +3087,8 @@ fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
         node_type: match n.node_type {
             pipeline::NodeType::DocOnly => "doc-only".into(),
             pipeline::NodeType::CodeMutating => "code-mutating".into(),
+            pipeline::NodeType::Start => "start".into(),
+            pipeline::NodeType::End => "end".into(),
         },
         view_x: n.view.as_ref().map(|v| v.x),
         view_y: n.view.as_ref().map(|v| v.y),
@@ -3094,17 +3098,13 @@ fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
 }
 
 fn edge_info_from_pipeline(e: &pipeline::EdgeDef) -> event_log::EdgeInfo {
-    let (target_node, target_port, halt_message) = match &e.target {
-        pipeline::EdgeTarget::Node(ep) => (ep.node.clone(), ep.port.clone(), None::<String>),
-        pipeline::EdgeTarget::Halt(h) => ("__halt__".into(), String::new(), h.message.clone()),
-    };
     let when_json = e.when.as_ref().and_then(|w| serde_json::to_value(w).ok());
     event_log::EdgeInfo {
         source_node: e.source.node.clone(),
         source_port: e.source.port.clone(),
-        target_node,
-        target_port,
-        halt_message,
+        target_node: e.target.node.clone(),
+        target_port: e.target.port.clone(),
+        halt_message: e.reason.clone(),
         when_clause: when_json,
     }
 }
@@ -4502,11 +4502,13 @@ mod tests {
         })
     }
 
+    const START_END_YAML: &str = "  - id: start\n    name: Start\n    type: start\n    outputs:\n      - name: user_prompt\n  - id: end\n    name: End\n    type: end\n    inputs:\n      - name: result\n";
+
     fn write_test_pipeline(dir: &std::path::Path, name: &str) {
         let pipelines_dir = dir.join(".maestro").join("pipelines");
         std::fs::create_dir_all(&pipelines_dir).unwrap();
         let yaml = format!(
-            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n"
+            "name: {name}\nversion: \"1.0\"\nnodes:\n{START_END_YAML}  - id: worker\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n"
         );
         std::fs::write(pipelines_dir.join(format!("{name}.yaml")), yaml).unwrap();
     }
@@ -4590,8 +4592,12 @@ mod tests {
         let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(detail["id"], "my-pipe");
         assert_eq!(detail["pipeline"]["name"], "my-pipe");
-        assert_eq!(detail["pipeline"]["nodes"].as_array().unwrap().len(), 1);
-        assert_eq!(detail["pipeline"]["nodes"][0]["id"], "worker");
+        assert_eq!(detail["pipeline"]["nodes"].as_array().unwrap().len(), 3);
+        assert!(detail["pipeline"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "worker"));
         assert!(detail["yaml"].as_str().unwrap().contains("name: my-pipe"));
     }
 
@@ -4681,7 +4687,8 @@ mod tests {
         let state = test_state_with_dir(tmp.path()).await;
         let app = build_router(state);
 
-        let new_yaml = "name: editable\nversion: \"2.0\"\nnodes: []\nedges: []\n";
+        let new_yaml =
+            format!("name: editable\nversion: \"2.0\"\nnodes:\n{START_END_YAML}edges: []\n");
         let body = serde_json::json!({
             "yaml": new_yaml,
             "prompts": {}
@@ -4746,7 +4753,7 @@ mod tests {
         let state = test_state_with_dir(tmp.path()).await;
         let app = build_router(state);
 
-        let yaml = "name: prompt-save\nversion: \"1.0\"\nnodes:\n  - id: ab12cd34\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n";
+        let yaml = format!("name: prompt-save\nversion: \"1.0\"\nnodes:\n{START_END_YAML}  - id: ab12cd34\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n");
         let body = serde_json::json!({
             "yaml": yaml,
             "prompts": { "ab12cd34": "You are a worker agent." }
@@ -4829,7 +4836,7 @@ mod tests {
         let entry = &list[0];
         assert_eq!(entry["name"], "meta-pipe");
         assert_eq!(entry["scope"], "repo");
-        assert_eq!(entry["node_count"], 1);
+        assert_eq!(entry["node_count"], 3);
         assert!(entry["modified"].as_str().is_some());
     }
 
@@ -5337,27 +5344,9 @@ mod tests {
         std::fs::create_dir_all(pipeline_path.parent().unwrap()).unwrap();
         std::fs::write(
             &pipeline_path,
-            r#"
-name: io-test-pipe
-nodes:
-  - id: planner
-    name: planner
-    type: doc-only
-    inputs:
-      - name: task
-    outputs:
-      - name: plan
-  - id: implementer
-    name: implementer
-    type: code-mutating
-    inputs:
-      - name: plan
-    outputs:
-      - name: summary
-edges:
-  - source: { node: planner, port: plan }
-    target: { node: implementer, port: plan }
-"#,
+            format!(
+                "name: io-test-pipe\nnodes:\n{START_END_YAML}  - id: planner\n    name: planner\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: plan\n  - id: implementer\n    name: implementer\n    type: code-mutating\n    inputs:\n      - name: plan\n    outputs:\n      - name: summary\nedges:\n  - source: {{ node: planner, port: plan }}\n    target: {{ node: implementer, port: plan }}\n"
+            ),
         )
         .unwrap();
         std::fs::write(
@@ -5631,7 +5620,7 @@ edges:
         let pipelines_dir = dir.join(".maestro").join("pipelines");
         std::fs::create_dir_all(&pipelines_dir).unwrap();
         let yaml = format!(
-            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: summary\n      - name: report\n    view: {{ x: 100, y: 100 }}\nedges: []\n"
+            "name: {name}\nversion: \"1.0\"\nnodes:\n{START_END_YAML}  - id: worker\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: summary\n      - name: report\n    view: {{ x: 100, y: 100 }}\nedges: []\n"
         );
         std::fs::write(pipelines_dir.join(format!("{name}.yaml")), yaml).unwrap();
     }
@@ -6150,11 +6139,12 @@ edges:
                     node: "reviewer".into(),
                     port: "review".into(),
                 },
-                target: EdgeTarget::Node(EdgeEndpoint {
+                target: EdgeEndpoint {
                     node: "implementer".into(),
                     port: "review".into(),
-                }),
+                },
                 when: Some(serde_yaml::from_str("iter: { lt: \"$max_iter_review\" }").unwrap()),
+                reason: None,
             }],
         };
 
@@ -6176,11 +6166,12 @@ edges:
                     node: "a".into(),
                     port: "out".into(),
                 },
-                target: EdgeTarget::Node(EdgeEndpoint {
+                target: EdgeEndpoint {
                     node: "b".into(),
                     port: "in".into(),
-                }),
+                },
                 when: Some(serde_yaml::from_str("iter: { lt: 3 }").unwrap()),
+                reason: None,
             }],
         };
 

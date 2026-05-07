@@ -30,31 +30,39 @@ pub fn resolve_input_paths(ctx: &AugmentContext<'_>) -> Vec<InputResolution> {
     let mut inputs = Vec::new();
 
     for edge in &ctx.pipeline.edges {
-        let crate::pipeline::EdgeTarget::Node(ref ep) = edge.target else {
+        if edge.target.node != ctx.node.id {
             continue;
-        };
-        if ep.node == ctx.node.id {
-            let target_port = ctx.node.inputs.iter().find(|p| p.name == ep.port);
-            let repeated = target_port.is_some_and(|p| p.repeated);
-
-            let path = if repeated {
-                ctx.artifacts_dir
-                    .join(&edge.source.node)
-                    .join("iter-*")
-                    .join(format!("{}.md", edge.source.port))
-            } else {
-                ctx.artifacts_dir
-                    .join(&edge.source.node)
-                    .join(format!("iter-{}", ctx.iter))
-                    .join(format!("{}.md", edge.source.port))
-            };
-
-            inputs.push(InputResolution {
-                port_name: ep.port.clone(),
-                path,
-                repeated,
-            });
         }
+
+        let target_port = ctx.node.inputs.iter().find(|p| p.name == edge.target.port);
+        let repeated = target_port.is_some_and(|p| p.repeated);
+
+        let source_node = &edge.source.node;
+        let is_start = ctx
+            .pipeline
+            .nodes
+            .iter()
+            .any(|n| n.id == *source_node && n.node_type == crate::pipeline::NodeType::Start);
+
+        let path = if is_start {
+            ctx.artifacts_dir.join("_input.md")
+        } else if repeated {
+            ctx.artifacts_dir
+                .join(source_node)
+                .join("iter-*")
+                .join(format!("{}.md", edge.source.port))
+        } else {
+            ctx.artifacts_dir
+                .join(source_node)
+                .join(format!("iter-{}", ctx.iter))
+                .join(format!("{}.md", edge.source.port))
+        };
+
+        inputs.push(InputResolution {
+            port_name: edge.target.port.clone(),
+            path,
+            repeated,
+        });
     }
 
     if inputs.is_empty() && ctx.node.inputs.iter().any(|p| p.name == "task") {
@@ -304,7 +312,7 @@ pub fn build_manager_prompt(run_id: &str, daemon_url: &str, role_prompt: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{EdgeDef, EdgeEndpoint, EdgeTarget, NodeType, Port};
+    use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeType, Port};
 
     fn sample_pipeline() -> PipelineDef {
         PipelineDef {
@@ -450,11 +458,12 @@ mod tests {
                 node: "planner".into(),
                 port: "plan".into(),
             },
-            target: EdgeTarget::Node(EdgeEndpoint {
+            target: EdgeEndpoint {
                 node: "implementer".into(),
                 port: "plan".into(),
-            }),
+            },
             when: None,
+            reason: None,
         });
 
         let node = &pipeline.nodes[1]; // implementer
@@ -582,22 +591,24 @@ mod tests {
                         node: "planner".into(),
                         port: "plan".into(),
                     },
-                    target: EdgeTarget::Node(EdgeEndpoint {
+                    target: EdgeEndpoint {
                         node: "implementer".into(),
                         port: "plan".into(),
-                    }),
+                    },
                     when: None,
+                    reason: None,
                 },
                 EdgeDef {
                     source: EdgeEndpoint {
                         node: "researcher".into(),
                         port: "context".into(),
                     },
-                    target: EdgeTarget::Node(EdgeEndpoint {
+                    target: EdgeEndpoint {
                         node: "implementer".into(),
                         port: "context".into(),
-                    }),
+                    },
                     when: None,
+                    reason: None,
                 },
             ],
         };

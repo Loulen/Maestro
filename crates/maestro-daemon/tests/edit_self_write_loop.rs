@@ -15,28 +15,52 @@ const PIPELINE_NAME: &str = "editable";
 const INITIAL_YAML: &str = r#"name: editable
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: worker
     name: worker
     type: doc-only
-    prompt_file: prompts/worker.md
     inputs:
       - name: task
     outputs:
       - name: result
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: worker, port: task }
 "#;
 
 const UPDATED_YAML: &str = r#"name: editable
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
   - id: worker
     name: worker
     type: doc-only
-    prompt_file: prompts/worker.md
     inputs:
       - name: task
       - name: extra
     outputs:
       - name: result
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: worker, port: task }
 "#;
 
 fn seed_pipeline(repo: &std::path::Path) -> anyhow::Result<()> {
