@@ -24,6 +24,9 @@ Cargo.lock.*
 .maestro/maestro.db-wal
 .maestro/maestro.db-shm
 
+# Maestro per-run worktrees, sub-worktrees, prompts snapshots, artefacts
+.maestro/runs/
+
 # Playwright artefacts
 frontend/test-results/
 frontend/playwright-report/
