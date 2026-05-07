@@ -64,6 +64,7 @@ interface Props {
   node: NodeState;
   runId: string;
   isArchived?: boolean;
+  nodeName?: string | null;
 }
 
 interface ModalState {
@@ -71,7 +72,7 @@ interface ModalState {
   files: FileInfo[];
 }
 
-export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
+export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: Props) {
   const [terminalHtml, setTerminalHtml] = useState<string>("");
   const [promptText, setPromptText] = useState<string | null>(null);
   const [inputs, setInputs] = useState<PortIO[]>([]);
@@ -227,7 +228,7 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
       <div className="border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
           <span className="font-medium text-fg" style={{ fontSize: "12.5px" }}>
-            {node.node_id}
+            {nodeName ?? node.node_id}
           </span>
           <span
             className="rounded border border-line-strong bg-bg-3 px-1.5 py-0.5 text-fg-3"
@@ -235,6 +236,9 @@ export default function NodeDetailPanel({ node, runId, isArchived }: Props) {
           >
             {STATUS_LABELS[node.status] ?? node.status}
           </span>
+        </div>
+        <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "9px" }}>
+          {node.node_id}
         </div>
         <div
           className="mt-0.5 flex items-center gap-1 font-mono text-fg-4"

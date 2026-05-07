@@ -239,6 +239,7 @@ export default function App() {
                     node={selectedNode}
                     runId={selectedRun.run_id}
                     isArchived={isArchived}
+                    nodeName={selectedRun.node_defs?.find((d) => d.id === selectedNodeId)?.name}
                   />
                 )}
                 {!selectedNode && selectedNodeId !== "__start" && isArchived && selectedRun && (

@@ -37,6 +37,7 @@ export interface EdgeInfo {
 
 export interface NodeDefInfo {
   id: string;
+  name?: string | null;
   node_type: NodeType;
   view_x: number | null;
   view_y: number | null;
@@ -120,6 +121,7 @@ export interface VariableDef {
 
 export interface NodeDef {
   id: string;
+  name?: string | null;
   type: NodeType;
   prompt_file?: string | null;
   inputs: PortDef[];

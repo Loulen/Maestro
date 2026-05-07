@@ -50,8 +50,11 @@ pub struct ViewPosition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDef {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(rename = "type")]
     pub node_type: NodeType,
+    #[serde(default)]
     pub prompt_file: Option<String>,
     #[serde(default)]
     pub inputs: Vec<Port>,
@@ -60,6 +63,12 @@ pub struct NodeDef {
     #[serde(default)]
     pub interactive: bool,
     pub view: Option<ViewPosition>,
+}
+
+impl NodeDef {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,10 +307,19 @@ pub fn parse_pipeline(yaml: &str) -> Result<ParseResult, ParseError> {
     }
 
     for node in &pipeline.nodes {
-        if node.prompt_file.is_none() {
+        if node.name.is_none() {
             diagnostics.push(Diagnostic {
                 severity: Severity::Warning,
-                message: format!("node '{}': missing prompt_file", node.id),
+                message: format!("node '{}': missing 'name' — run the migrator", node.id),
+            });
+        }
+        if node.prompt_file.is_some() {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                message: format!(
+                    "node '{}': 'prompt_file' is deprecated — prompt path is derived from id",
+                    node.id
+                ),
             });
         }
     }
@@ -361,6 +379,18 @@ pub fn load_prompt_file(pipeline_dir: &Path, prompt_file: &str) -> Result<String
     std::fs::read_to_string(path)
 }
 
+pub fn canonical_prompt_path(pipeline_path: &Path, node_id: &str) -> std::path::PathBuf {
+    let dir = pipeline_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let stem = pipeline_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pipeline");
+    dir.join(format!("{stem}.prompts"))
+        .join(format!("{node_id}.md"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,9 +400,9 @@ mod tests {
 name: test-pipeline
 version: "1.0"
 nodes:
-  - id: planner
+  - id: ab12cd34
+    name: planner
     type: doc-only
-    prompt_file: prompts/planner.md
     inputs:
       - name: task
     outputs:
@@ -387,9 +417,10 @@ nodes:
         assert_eq!(result.pipeline.nodes.len(), 1);
 
         let node = &result.pipeline.nodes[0];
-        assert_eq!(node.id, "planner");
+        assert_eq!(node.id, "ab12cd34");
+        assert_eq!(node.name.as_deref(), Some("planner"));
         assert_eq!(node.node_type, NodeType::DocOnly);
-        assert_eq!(node.prompt_file.as_deref(), Some("prompts/planner.md"));
+        assert!(node.prompt_file.is_none());
         assert_eq!(node.inputs.len(), 1);
         assert_eq!(node.inputs[0].name, "task");
         assert_eq!(node.outputs.len(), 1);
@@ -399,11 +430,11 @@ nodes:
     }
 
     #[test]
-    fn warns_on_missing_prompt_file() {
+    fn warns_on_missing_node_name() {
         let yaml = r#"
-name: no-prompt
+name: no-name
 nodes:
-  - id: worker
+  - id: ab12cd34
     type: doc-only
     inputs:
       - name: in
@@ -411,11 +442,31 @@ nodes:
       - name: out
 "#;
         let result = parse_pipeline(yaml).unwrap();
-        assert_eq!(result.diagnostics.len(), 1);
-        assert_eq!(result.diagnostics[0].severity, Severity::Warning);
-        assert!(result.diagnostics[0]
-            .message
-            .contains("missing prompt_file"));
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("missing 'name'")));
+    }
+
+    #[test]
+    fn warns_on_deprecated_prompt_file() {
+        let yaml = r#"
+name: old-style
+nodes:
+  - id: ab12cd34
+    name: worker
+    type: doc-only
+    prompt_file: prompts/worker.md
+    inputs:
+      - name: in
+    outputs:
+      - name: out
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("deprecated")));
     }
 
     #[test]
@@ -448,9 +499,9 @@ nodes: []
         let yaml = r#"
 name: bad-type
 nodes:
-  - id: x
+  - id: ab12cd34
+    name: x
     type: transformer
-    prompt_file: x.md
     inputs: []
     outputs: []
 "#;
@@ -467,8 +518,8 @@ nodes:
         let yaml = r#"
 name: no-type
 nodes:
-  - id: x
-    prompt_file: x.md
+  - id: ab12cd34
+    name: x
     inputs: []
     outputs: []
 "#;
@@ -481,7 +532,7 @@ nodes:
     }
 
     #[test]
-    fn errors_on_missing_name() {
+    fn errors_on_missing_pipeline_name() {
         let yaml = r#"
 version: "1.0"
 nodes: []
@@ -495,17 +546,17 @@ nodes: []
         let yaml = r#"
 name: interactive-pipe
 nodes:
-  - id: griller
+  - id: ab000001
+    name: griller
     type: doc-only
-    prompt_file: prompts/griller.md
     interactive: true
     inputs:
       - name: task
     outputs:
       - name: brief
-  - id: worker
+  - id: ab000002
+    name: worker
     type: code-mutating
-    prompt_file: prompts/worker.md
     inputs:
       - name: brief
     outputs:
@@ -602,23 +653,23 @@ variables:
   max_iter: 5
   threshold: 0.8
 nodes:
-  - id: planner
+  - id: ab000001
+    name: planner
     type: doc-only
-    prompt_file: prompts/planner.md
     inputs:
       - name: task
     outputs:
       - name: plan
-  - id: implementer
+  - id: ab000002
+    name: implementer
     type: code-mutating
-    prompt_file: prompts/implementer.md
     inputs:
       - name: plan
     outputs:
       - name: summary
 edges:
-  - source: { node: planner, port: plan }
-    target: { node: implementer, port: plan }
+  - source: { node: ab000001, port: plan }
+    target: { node: ab000002, port: plan }
 "#;
         let result = parse_pipeline(yaml).unwrap();
         assert_eq!(result.pipeline.nodes.len(), 2);
@@ -632,13 +683,13 @@ edges:
         let yaml = r#"
 name: bad-edge
 nodes:
-  - id: planner
+  - id: ab000001
+    name: planner
     type: doc-only
-    prompt_file: p.md
     outputs:
       - name: plan
 edges:
-  - source: { node: planner, port: plan }
+  - source: { node: ab000001, port: plan }
     target: { node: ghost, port: plan }
 "#;
         let result = parse_pipeline(yaml).unwrap();
@@ -661,19 +712,19 @@ edges:
         let yaml = r#"
 name: bad-port
 nodes:
-  - id: planner
+  - id: ab000001
+    name: planner
     type: doc-only
-    prompt_file: p.md
     outputs:
       - name: plan
-  - id: implementer
+  - id: ab000002
+    name: implementer
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: plan
 edges:
-  - source: { node: planner, port: plaan }
-    target: { node: implementer, port: plaan }
+  - source: { node: ab000001, port: plaan }
+    target: { node: ab000002, port: plaan }
 "#;
         let result = parse_pipeline(yaml).unwrap();
         let warnings: Vec<&str> = result
@@ -694,36 +745,31 @@ edges:
         let yaml = r#"
 name: cycle
 nodes:
-  - id: implementer
+  - id: ab000001
+    name: implementer
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: review
     outputs:
       - name: code
-  - id: reviewer
+  - id: ab000002
+    name: reviewer
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: code
     outputs:
       - name: review
 edges:
-  - source: { node: implementer, port: code }
-    target: { node: reviewer, port: code }
-  - source: { node: reviewer, port: review }
-    target: { node: implementer, port: review }
+  - source: { node: ab000001, port: code }
+    target: { node: ab000002, port: code }
+  - source: { node: ab000002, port: review }
+    target: { node: ab000001, port: review }
 "#;
         let result = parse_pipeline(yaml).unwrap();
-        let non_prompt_warnings: Vec<&str> = result
-            .diagnostics
-            .iter()
-            .filter(|d| !d.message.contains("prompt_file"))
-            .map(|d| d.message.as_str())
-            .collect();
         assert!(
-            non_prompt_warnings.is_empty(),
-            "cycle should not produce warnings, got: {non_prompt_warnings:?}"
+            result.diagnostics.is_empty(),
+            "cycle should not produce warnings, got: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
@@ -732,9 +778,9 @@ edges:
         let yaml = r#"
 name: with-view
 nodes:
-  - id: planner
+  - id: ab12cd34
+    name: planner
     type: doc-only
-    prompt_file: p.md
     view: { x: 100, y: 200 }
     outputs:
       - name: plan
@@ -751,21 +797,21 @@ nodes:
         let yaml = r#"
 name: conditional
 nodes:
-  - id: reviewer
+  - id: ab000001
+    name: reviewer
     type: doc-only
-    prompt_file: p.md
     outputs:
       - name: review
-  - id: implementer
+  - id: ab000002
+    name: implementer
     type: code-mutating
-    prompt_file: p.md
     inputs:
       - name: review
     outputs:
       - name: code
 edges:
-  - source: { node: reviewer, port: review }
-    target: { node: implementer, port: review }
+  - source: { node: ab000001, port: review }
+    target: { node: ab000002, port: review }
     when:
       iter: { lt: 5 }
 "#;
@@ -782,13 +828,13 @@ edges:
         let yaml = r#"
 name: with-halt
 nodes:
-  - id: reviewer
+  - id: ab12cd34
+    name: reviewer
     type: doc-only
-    prompt_file: p.md
     outputs:
       - name: review
 edges:
-  - source: { node: reviewer, port: review }
+  - source: { node: ab12cd34, port: review }
     target: { halt: { message: "Blocked after {iter} iterations" } }
     when:
       iter: { gte: 5 }
@@ -807,13 +853,13 @@ edges:
         let yaml = r#"
 name: halt-no-msg
 nodes:
-  - id: worker
+  - id: ab12cd34
+    name: worker
     type: doc-only
-    prompt_file: p.md
     outputs:
       - name: out
 edges:
-  - source: { node: worker, port: out }
+  - source: { node: ab12cd34, port: out }
     target: { halt: {} }
 "#;
         let result = parse_pipeline(yaml).unwrap();
@@ -826,25 +872,20 @@ edges:
         let yaml = r#"
 name: halt-no-warning
 nodes:
-  - id: reviewer
+  - id: ab12cd34
+    name: reviewer
     type: doc-only
-    prompt_file: p.md
     outputs:
       - name: review
 edges:
-  - source: { node: reviewer, port: review }
+  - source: { node: ab12cd34, port: review }
     target: { halt: { message: "stopped" } }
 "#;
         let result = parse_pipeline(yaml).unwrap();
-        let non_prompt_warnings: Vec<&str> = result
-            .diagnostics
-            .iter()
-            .filter(|d| !d.message.contains("prompt_file"))
-            .map(|d| d.message.as_str())
-            .collect();
         assert!(
-            non_prompt_warnings.is_empty(),
-            "halt target should not produce validation warnings, got: {non_prompt_warnings:?}"
+            result.diagnostics.is_empty(),
+            "halt target should not produce validation warnings, got: {:?}",
+            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
@@ -853,36 +894,36 @@ edges:
         let yaml = r#"
 name: multi-port
 nodes:
-  - id: planner
+  - id: ab000001
+    name: planner
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: task
     outputs:
       - name: plan
       - name: task_list
-  - id: implementer
+  - id: ab000002
+    name: implementer
     type: code-mutating
-    prompt_file: p.md
     inputs:
       - name: plan
       - name: task_list
     outputs:
       - name: summary
-  - id: reviewer
+  - id: ab000003
+    name: reviewer
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: summary
     outputs:
       - name: review
 edges:
-  - source: { node: planner, port: plan }
-    target: { node: implementer, port: plan }
-  - source: { node: planner, port: task_list }
-    target: { node: implementer, port: task_list }
-  - source: { node: implementer, port: summary }
-    target: { node: reviewer, port: summary }
+  - source: { node: ab000001, port: plan }
+    target: { node: ab000002, port: plan }
+  - source: { node: ab000001, port: task_list }
+    target: { node: ab000002, port: task_list }
+  - source: { node: ab000002, port: summary }
+    target: { node: ab000003, port: summary }
 "#;
         let result = parse_pipeline(yaml).unwrap();
         assert_eq!(result.pipeline.nodes.len(), 3);
@@ -897,9 +938,9 @@ edges:
         let yaml = r#"
 name: with-schema
 nodes:
-  - id: reviewer
+  - id: ab12cd34
+    name: reviewer
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: code
     outputs:
@@ -930,5 +971,25 @@ nodes:
         let result = parse_pipeline(VALID_MINIMAL).unwrap();
         let port = &result.pipeline.nodes[0].outputs[0];
         assert!(port.frontmatter.is_none());
+    }
+
+    #[test]
+    fn canonical_prompt_path_for_template() {
+        let pp = std::path::Path::new("/pipelines/review-loop.yaml");
+        let path = canonical_prompt_path(pp, "ab12cd34");
+        assert_eq!(
+            path.to_str().unwrap(),
+            "/pipelines/review-loop.prompts/ab12cd34.md"
+        );
+    }
+
+    #[test]
+    fn canonical_prompt_path_for_run() {
+        let pp = std::path::Path::new("/runs/run-1/pipeline.yaml");
+        let path = canonical_prompt_path(pp, "ab12cd34");
+        assert_eq!(
+            path.to_str().unwrap(),
+            "/runs/run-1/pipeline.prompts/ab12cd34.md"
+        );
     }
 }

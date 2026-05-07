@@ -20,9 +20,9 @@
   name: run-minimal-scenario
   version: "1.0"
   nodes:
-    - id: only
+    - id: xCsiuWj7
+      name: only
       type: doc-only
-      prompt_file: run-minimal-scenario.prompts/only.md
       inputs:
         - name: in
       outputs:
@@ -31,7 +31,7 @@
   edges: []
   ```
 
-  And `.maestro/pipelines/run-minimal-scenario.prompts/only.md`:
+  And `.maestro/pipelines/run-minimal-scenario.prompts/xCsiuWj7.md`:
 
   ```
   Reply with exactly the line `MAESTRO_RUN_MINIMAL_OK` and then call the

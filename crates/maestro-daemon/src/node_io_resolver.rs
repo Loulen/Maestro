@@ -235,6 +235,7 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "planner".into(),
+                    name: Some("planner".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![Port {
@@ -252,6 +253,7 @@ mod tests {
                 },
                 NodeDef {
                     id: "implementer".into(),
+                    name: Some("implementer".into()),
                     node_type: NodeType::CodeMutating,
                     prompt_file: None,
                     inputs: vec![Port {
@@ -373,6 +375,7 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "reviewer".into(),
+                    name: Some("reviewer".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![],
@@ -386,6 +389,7 @@ mod tests {
                 },
                 NodeDef {
                     id: "implementer".into(),
+                    name: Some("implementer".into()),
                     node_type: NodeType::CodeMutating,
                     prompt_file: None,
                     inputs: vec![Port {
@@ -454,6 +458,7 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "a".into(),
+                    name: Some("a".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![],
@@ -467,6 +472,7 @@ mod tests {
                 },
                 NodeDef {
                     id: "b".into(),
+                    name: Some("b".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![],
@@ -480,6 +486,7 @@ mod tests {
                 },
                 NodeDef {
                     id: "merger".into(),
+                    name: Some("merger".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![Port {

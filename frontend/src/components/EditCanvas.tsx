@@ -17,10 +17,12 @@ import "@xyflow/react/dist/style.css";
 import { Plus } from "lucide-react";
 import type { NodeDef, NodeType, PipelineDef } from "../types";
 import { useEditStore } from "../stores/editStore";
+import { generateNodeId } from "../lib/nanoid";
 import { PREDICATE_LABELS } from "../predicates";
 
 interface EditNodeData {
   label: string;
+  nodeId: string;
   nodeType: NodeType;
   inputCount: number;
   outputCount: number;
@@ -76,6 +78,9 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
           {typeLabel}
         </span>
       </div>
+      <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "9px" }}>
+        {data.nodeId}
+      </div>
       {data.outputCount > 0 && (
         <Handle
           type="source"
@@ -113,7 +118,8 @@ function deriveEditNodes(pipeline: PipelineDef): Node[] {
       y: n.view?.y ?? 80 + i * 140,
     },
     data: {
-      label: n.id,
+      label: n.name ?? n.id,
+      nodeId: n.id,
       nodeType: n.type,
       inputCount: n.inputs.length,
       outputCount: n.outputs.length,
@@ -276,17 +282,13 @@ function EditCanvasInner() {
   }
 
   const handleAddNode = (type: NodeType) => {
-    const existingIds = pipeline.nodes.map((n) => n.id);
-    let id = type === "code-mutating" ? "implementer" : "node";
-    let counter = 1;
-    while (existingIds.includes(id)) {
-      id = `${type === "code-mutating" ? "implementer" : "node"}-${++counter}`;
-    }
+    const id = generateNodeId();
+    const name = type === "code-mutating" ? "implementer" : "node";
 
     const newNode: NodeDef = {
       id,
+      name,
       type,
-      prompt_file: `${activeTabId}.prompts/${id}.md`,
       inputs: [{ name: "in", repeated: false }],
       outputs: [{ name: "out", repeated: false }],
       interactive: false,

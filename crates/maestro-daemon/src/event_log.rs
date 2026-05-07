@@ -17,6 +17,8 @@ pub struct EdgeInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDefInfo {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub node_type: String,
     pub view_x: Option<f64>,
     pub view_y: Option<f64>,

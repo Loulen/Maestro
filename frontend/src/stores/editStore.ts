@@ -6,6 +6,7 @@ import type {
   EdgeDef,
 } from "../types";
 import { fetchPipeline, fetchPipelines, savePipeline, fetchRunPipeline, saveRunPipeline } from "../api";
+import { generateNodeId } from "../lib/nanoid";
 
 export type SelectionKind = "node" | "edge" | "none";
 
@@ -77,9 +78,9 @@ function serializePipeline(p: PipelineDef): string {
   obj.nodes = p.nodes.map((n) => {
     const node: Record<string, unknown> = {
       id: n.id,
+      name: n.name ?? n.id,
       type: n.type,
     };
-    if (n.prompt_file) node.prompt_file = n.prompt_file;
     if (n.interactive) node.interactive = true;
     if (n.inputs.length > 0)
       node.inputs = n.inputs.map((port) => {
@@ -341,14 +342,12 @@ export const useEditStore = create<EditState>((set, get) => ({
     set((s) => mutateAndSave(s, get, (tab) => {
       const src = tab.pipeline.nodes.find((n) => n.id === nodeId);
       if (!src) return;
-      let newId = `${nodeId}-copy`;
-      let counter = 1;
-      while (tab.pipeline.nodes.some((n) => n.id === newId)) {
-        newId = `${nodeId}-copy-${++counter}`;
-      }
+      const newId = generateNodeId();
+      const srcName = src.name ?? src.id;
       const copy: NodeDef = {
         ...src,
         id: newId,
+        name: `${srcName} copy`,
         inputs: src.inputs.map((p) => ({ ...p })),
         outputs: src.outputs.map((p) => ({ ...p })),
         view: src.view ? { x: src.view.x + 40, y: src.view.y + 40 } : { x: 200, y: 200 },

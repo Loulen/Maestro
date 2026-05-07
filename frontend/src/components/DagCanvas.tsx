@@ -63,6 +63,7 @@ const TYPE_COLORS: Record<NodeType, string> = {
 
 interface PipelineNodeData {
   label: string;
+  nodeId: string;
   status: NodeStatus;
   nodeType: NodeType;
   inputCount: number;
@@ -112,8 +113,9 @@ function PipelineNode({ data }: NodeProps<Node<PipelineNodeData>>) {
           {typeLabel}
         </span>
       </div>
-      <div className="mt-0.5 text-fg-4" style={{ fontSize: "10px" }}>
-        {data.status}
+      <div className="mt-0.5 flex items-center gap-2 text-fg-4" style={{ fontSize: "10px" }}>
+        <span>{data.status}</span>
+        <span className="font-mono" style={{ fontSize: "9px" }}>{data.nodeId}</span>
       </div>
       {data.outputCount > 0 && (
         <Handle
@@ -234,7 +236,8 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
             y: def.view_y ?? 80 + i * 140,
           },
           data: {
-            label: def.id,
+            label: def.name ?? def.id,
+            nodeId: def.id,
             status,
             nodeType: def.node_type,
             inputCount: def.inputs.length,
@@ -250,6 +253,7 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
         position: { x: 200 + shiftX, y: 80 + i * 140 },
         data: {
           label: ns.node_id,
+          nodeId: ns.node_id,
           status: ns.status,
           nodeType: "doc-only" as NodeType,
           inputCount: 1,

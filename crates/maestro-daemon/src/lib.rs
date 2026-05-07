@@ -4,6 +4,7 @@ mod event_log;
 mod frontmatter_parser;
 mod node_io_resolver;
 mod pipeline;
+pub mod pipeline_migrator;
 mod pipeline_watcher;
 mod prompt_augmenter;
 mod scheduler;
@@ -593,10 +594,13 @@ async fn get_pipeline(
     let prompts_dir = path.parent().unwrap_or(std::path::Path::new("."));
     let mut prompts: HashMap<String, String> = HashMap::new();
     for node in &parse_result.pipeline.nodes {
-        if let Some(ref pf) = node.prompt_file {
-            if let Ok(content) = pipeline::load_prompt_file(prompts_dir, pf) {
-                prompts.insert(node.id.clone(), content);
-            }
+        let content = if let Some(ref pf) = node.prompt_file {
+            pipeline::load_prompt_file(prompts_dir, pf).ok()
+        } else {
+            std::fs::read_to_string(pipeline::canonical_prompt_path(&path, &node.id)).ok()
+        };
+        if let Some(c) = content {
+            prompts.insert(node.id.clone(), c);
         }
     }
 
@@ -645,9 +649,8 @@ async fn save_pipeline(
             .into_response();
     }
 
-    let prompts_dir = path.parent().unwrap_or(std::path::Path::new("."));
     for (node_id, content) in &req.prompts {
-        let prompt_path = prompts_dir.join(format!("{pipeline_id}.prompts/{node_id}.md"));
+        let prompt_path = pipeline::canonical_prompt_path(&path, node_id);
         if let Some(parent) = prompt_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -744,15 +747,18 @@ async fn spawn_node(
     iter: i64,
 ) {
     let run_id = spawn_ctx.run_id;
-    let prompt_dir = spawn_ctx
-        .pipeline_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
-    let role_prompt = node
-        .prompt_file
-        .as_ref()
-        .and_then(|pf| pipeline::load_prompt_file(prompt_dir, pf).ok())
-        .unwrap_or_default();
+    let canonical_path = pipeline::canonical_prompt_path(spawn_ctx.pipeline_path, &node.id);
+    let role_prompt = if let Some(ref pf) = node.prompt_file {
+        let prompt_dir = spawn_ctx
+            .pipeline_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        pipeline::load_prompt_file(prompt_dir, pf)
+            .or_else(|_| std::fs::read_to_string(&canonical_path))
+            .unwrap_or_default()
+    } else {
+        std::fs::read_to_string(&canonical_path).unwrap_or_default()
+    };
 
     let aug_ctx = prompt_augmenter::AugmentContext {
         pipeline: spawn_ctx.pipeline,
@@ -2397,7 +2403,7 @@ fn run_scoped_prompts_dir(repo_root: &std::path::Path, run_id: &str) -> PathBuf 
 fn copy_pipeline_to_run(
     repo_root: &std::path::Path,
     pipeline_path: &std::path::Path,
-    pipeline_name: &str,
+    _pipeline_name: &str,
     run_id: &str,
 ) -> Result<()> {
     let dest_yaml = run_scoped_pipeline_path(repo_root, run_id);
@@ -2406,10 +2412,14 @@ fn copy_pipeline_to_run(
     }
     std::fs::copy(pipeline_path, &dest_yaml).context("copy pipeline yaml")?;
 
+    let stem = pipeline_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pipeline");
     let src_prompts = pipeline_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(format!("{pipeline_name}.prompts"));
+        .join(format!("{stem}.prompts"));
     if src_prompts.is_dir() {
         let dest_prompts = run_scoped_prompts_dir(repo_root, run_id);
         std::fs::create_dir_all(&dest_prompts).context("create prompts dir")?;
@@ -2446,6 +2456,7 @@ fn augment_run_state_from_disk(run_state: &mut event_log::RunState, repo_root: &
 fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
     event_log::NodeDefInfo {
         id: n.id.clone(),
+        name: n.name.clone(),
         node_type: match n.node_type {
             pipeline::NodeType::DocOnly => "doc-only".into(),
             pipeline::NodeType::CodeMutating => "code-mutating".into(),

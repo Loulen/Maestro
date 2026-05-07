@@ -55,10 +55,24 @@ export default function NodeInspector() {
         {/* Identity */}
         <SectionHead title="Identity" />
         <Field label="ID">
+          <span
+            className="block w-full cursor-pointer select-all rounded border border-line bg-bg-3 px-2 py-1 font-mono text-fg-3"
+            style={{ fontSize: "10px" }}
+            title="Click to copy"
+            onClick={() => navigator.clipboard.writeText(node.id)}
+          >
+            {node.id}
+          </span>
+        </Field>
+        <Field label="Name">
           <input
-            value={node.id}
-            onChange={(e) => handleField("id", e.target.value)}
+            value={node.name ?? ""}
+            onChange={(e) => handleField("name", e.target.value || null)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") (e.target as HTMLInputElement).blur();
+            }}
             className="w-full rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg outline-none focus:border-acc"
+            placeholder={node.id}
           />
         </Field>
 
@@ -103,9 +117,6 @@ export default function NodeInspector() {
 
         {/* Prompt */}
         <SectionHead title="Prompt" />
-        <div className="text-fg-4" style={{ fontSize: "10px" }}>
-          {node.prompt_file ?? "no prompt file"}
-        </div>
         <textarea
           value={promptContent}
           onChange={(e) => updatePrompt(node.id, e.target.value)}

@@ -215,6 +215,7 @@ mod tests {
             variables: HashMap::new(),
             nodes: vec![NodeDef {
                 id: "planner".into(),
+                name: Some("planner".into()),
                 node_type: NodeType::DocOnly,
                 prompt_file: Some("prompts/planner.md".into()),
                 inputs: vec![Port {
@@ -328,6 +329,7 @@ mod tests {
         let mut pipeline = sample_pipeline();
         pipeline.nodes.push(NodeDef {
             id: "implementer".into(),
+            name: Some("implementer".into()),
             node_type: NodeType::CodeMutating,
             prompt_file: Some("prompts/impl.md".into()),
             inputs: vec![Port {
@@ -420,6 +422,7 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "planner".into(),
+                    name: Some("planner".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![],
@@ -433,6 +436,7 @@ mod tests {
                 },
                 NodeDef {
                     id: "researcher".into(),
+                    name: Some("researcher".into()),
                     node_type: NodeType::DocOnly,
                     prompt_file: None,
                     inputs: vec![],
@@ -446,6 +450,7 @@ mod tests {
                 },
                 NodeDef {
                     id: "implementer".into(),
+                    name: Some("implementer".into()),
                     node_type: NodeType::CodeMutating,
                     prompt_file: None,
                     inputs: vec![
@@ -529,6 +534,7 @@ mod tests {
             variables: HashMap::new(),
             nodes: vec![NodeDef {
                 id: "reviewer".into(),
+                name: Some("reviewer".into()),
                 node_type: NodeType::DocOnly,
                 prompt_file: Some("prompts/reviewer.md".into()),
                 inputs: vec![Port {
