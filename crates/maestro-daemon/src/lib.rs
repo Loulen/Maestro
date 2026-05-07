@@ -591,15 +591,9 @@ async fn get_pipeline(
         "user"
     };
 
-    let prompts_dir = path.parent().unwrap_or(std::path::Path::new("."));
     let mut prompts: HashMap<String, String> = HashMap::new();
     for node in &parse_result.pipeline.nodes {
-        let content = if let Some(ref pf) = node.prompt_file {
-            pipeline::load_prompt_file(prompts_dir, pf).ok()
-        } else {
-            std::fs::read_to_string(pipeline::canonical_prompt_path(&path, &node.id)).ok()
-        };
-        if let Some(c) = content {
+        if let Ok(c) = std::fs::read_to_string(pipeline::canonical_prompt_path(&path, &node.id)) {
             prompts.insert(node.id.clone(), c);
         }
     }
@@ -748,17 +742,7 @@ async fn spawn_node(
 ) {
     let run_id = spawn_ctx.run_id;
     let canonical_path = pipeline::canonical_prompt_path(spawn_ctx.pipeline_path, &node.id);
-    let role_prompt = if let Some(ref pf) = node.prompt_file {
-        let prompt_dir = spawn_ctx
-            .pipeline_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."));
-        pipeline::load_prompt_file(prompt_dir, pf)
-            .or_else(|_| std::fs::read_to_string(&canonical_path))
-            .unwrap_or_default()
-    } else {
-        std::fs::read_to_string(&canonical_path).unwrap_or_default()
-    };
+    let role_prompt = std::fs::read_to_string(&canonical_path).unwrap_or_default();
 
     let aug_ctx = prompt_augmenter::AugmentContext {
         pipeline: spawn_ctx.pipeline,
@@ -2456,7 +2440,7 @@ fn augment_run_state_from_disk(run_state: &mut event_log::RunState, repo_root: &
 fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
     event_log::NodeDefInfo {
         id: n.id.clone(),
-        name: n.name.clone(),
+        name: Some(n.name.clone()),
         node_type: match n.node_type {
             pipeline::NodeType::DocOnly => "doc-only".into(),
             pipeline::NodeType::CodeMutating => "code-mutating".into(),
@@ -3642,7 +3626,7 @@ mod tests {
         let pipelines_dir = dir.join(".maestro").join("pipelines");
         std::fs::create_dir_all(&pipelines_dir).unwrap();
         let yaml = format!(
-            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    type: doc-only\n    prompt_file: prompts/worker.md\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n"
+            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n"
         );
         std::fs::write(pipelines_dir.join(format!("{name}.yaml")), yaml).unwrap();
     }
@@ -3872,6 +3856,72 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_pipeline_writes_prompts_under_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "prompt-save");
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let yaml = "name: prompt-save\nversion: \"1.0\"\nnodes:\n  - id: ab12cd34\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: result\n";
+        let body = serde_json::json!({
+            "yaml": yaml,
+            "prompts": { "ab12cd34": "You are a worker agent." }
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/pipelines/prompt-save")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let prompt_path = tmp
+            .path()
+            .join(".maestro/pipelines/prompt-save.prompts/ab12cd34.md");
+        assert!(prompt_path.exists(), "canonical prompt file must exist");
+        let content = std::fs::read_to_string(&prompt_path).unwrap();
+        assert_eq!(content, "You are a worker agent.");
+    }
+
+    #[tokio::test]
+    async fn get_pipeline_reads_prompts_from_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "prompt-read");
+
+        let prompts_dir = tmp.path().join(".maestro/pipelines/prompt-read.prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("worker.md"), "Role prompt here.").unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines/prompt-read")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["prompts"]["worker"], "Role prompt here.");
     }
 
     #[tokio::test]
@@ -4351,15 +4401,15 @@ mod tests {
 name: io-test-pipe
 nodes:
   - id: planner
+    name: planner
     type: doc-only
-    prompt_file: p.md
     inputs:
       - name: task
     outputs:
       - name: plan
   - id: implementer
+    name: implementer
     type: code-mutating
-    prompt_file: p.md
     inputs:
       - name: plan
     outputs:

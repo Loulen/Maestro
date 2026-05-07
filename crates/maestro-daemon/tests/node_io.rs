@@ -13,6 +13,7 @@ const PIPELINE_YAML: &str = r#"name: io-test
 version: "1.0"
 nodes:
   - id: planner
+    name: planner
     type: doc-only
     prompt_file: io-test.prompts/planner.md
     inputs:
@@ -20,6 +21,7 @@ nodes:
     outputs:
       - name: plan
   - id: implementer
+    name: implementer
     type: code-mutating
     prompt_file: io-test.prompts/implementer.md
     inputs:

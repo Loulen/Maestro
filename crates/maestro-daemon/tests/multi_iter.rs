@@ -18,6 +18,7 @@ const PIPELINE_YAML: &str = r#"name: multi-iter-test
 version: "1.0"
 nodes:
   - id: reviewer
+    name: reviewer
     type: doc-only
     prompt_file: multi-iter-test.prompts/reviewer.md
     inputs:

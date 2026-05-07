@@ -177,9 +177,8 @@ mod tests {
     fn make_node(id: &str, inputs: &[&str], outputs: &[&str]) -> NodeDef {
         NodeDef {
             id: id.into(),
-            name: Some(id.into()),
+            name: id.into(),
             node_type: NodeType::DocOnly,
-            prompt_file: None,
             inputs: inputs
                 .iter()
                 .map(|n| Port {

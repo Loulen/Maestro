@@ -123,7 +123,6 @@ export interface NodeDef {
   id: string;
   name?: string | null;
   type: NodeType;
-  prompt_file?: string | null;
   inputs: PortDef[];
   outputs: PortDef[];
   interactive: boolean;

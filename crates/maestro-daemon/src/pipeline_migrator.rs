@@ -65,9 +65,7 @@ pub fn migrate_pipeline_yaml(
         });
     }
 
-    let pipeline_dir = pipeline_path
-        .parent()
-        .unwrap_or(Path::new("."));
+    let pipeline_dir = pipeline_path.parent().unwrap_or(Path::new("."));
 
     let nodes = doc
         .get_mut("nodes")
@@ -81,12 +79,16 @@ pub fn migrate_pipeline_yaml(
         let mapping = node.as_mapping_mut().ok_or("node is not a mapping")?;
 
         let old_id = mapping
-            .get(&serde_yaml::Value::String("id".into()))
+            .get(serde_yaml::Value::String("id".into()))
             .and_then(|v| v.as_str())
             .ok_or("node missing 'id'")?
             .to_string();
 
-        if looks_like_nanoid(&old_id) && mapping.get(&serde_yaml::Value::String("name".into())).is_some() {
+        if looks_like_nanoid(&old_id)
+            && mapping
+                .get(serde_yaml::Value::String("name".into()))
+                .is_some()
+        {
             continue;
         }
 
@@ -98,7 +100,10 @@ pub fn migrate_pipeline_yaml(
             serde_yaml::Value::String(new_id.clone()),
         );
 
-        if mapping.get(&serde_yaml::Value::String("name".into())).is_none() {
+        if mapping
+            .get(serde_yaml::Value::String("name".into()))
+            .is_none()
+        {
             mapping.insert(
                 serde_yaml::Value::String("name".into()),
                 serde_yaml::Value::String(old_id.clone()),
@@ -106,7 +111,7 @@ pub fn migrate_pipeline_yaml(
         }
 
         if let Some(pf) = mapping
-            .remove(&serde_yaml::Value::String("prompt_file".into()))
+            .remove(serde_yaml::Value::String("prompt_file".into()))
             .and_then(|v| v.as_str().map(String::from))
         {
             let old_path = pipeline_dir.join(&pf);
@@ -120,9 +125,7 @@ pub fn migrate_pipeline_yaml(
         }
     }
 
-    let edges = doc
-        .get_mut("edges")
-        .and_then(|e| e.as_sequence_mut());
+    let edges = doc.get_mut("edges").and_then(|e| e.as_sequence_mut());
 
     if let Some(edges) = edges {
         for edge in edges.iter_mut() {
@@ -146,10 +149,7 @@ fn rewrite_edge_endpoint(
     key: &str,
     id_map: &HashMap<String, String>,
 ) {
-    if let Some(ep) = edge
-        .get_mut(key)
-        .and_then(|v| v.as_mapping_mut())
-    {
+    if let Some(ep) = edge.get_mut(key).and_then(|v| v.as_mapping_mut()) {
         let node_key = serde_yaml::Value::String("node".into());
         if let Some(old) = ep.get(&node_key).and_then(|v| v.as_str()).map(String::from) {
             if let Some(new_id) = id_map.get(&old) {
@@ -162,7 +162,11 @@ fn rewrite_edge_endpoint(
 fn rewrite_edge_target(edge: &mut serde_yaml::Value, id_map: &HashMap<String, String>) {
     if let Some(target) = edge.get_mut("target").and_then(|v| v.as_mapping_mut()) {
         let node_key = serde_yaml::Value::String("node".into());
-        if let Some(old) = target.get(&node_key).and_then(|v| v.as_str()).map(String::from) {
+        if let Some(old) = target
+            .get(&node_key)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+        {
             if let Some(new_id) = id_map.get(&old) {
                 target.insert(node_key, serde_yaml::Value::String(new_id.clone()));
             }
@@ -273,8 +277,7 @@ nodes:
     view: { x: 100, y: 160 }
 edges: []
 "#;
-        let result =
-            migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
+        let result = migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
         assert!(!result.migrated);
     }
 
@@ -308,18 +311,13 @@ edges:
     when:
       iter: { lt: 3 }
 "#;
-        let result = migrate_pipeline_yaml(
-            yaml,
-            Path::new("/pipelines/review-loop.yaml"),
-        )
-        .unwrap();
+        let result = migrate_pipeline_yaml(yaml, Path::new("/pipelines/review-loop.yaml")).unwrap();
         assert!(result.migrated);
 
         let new_impl_id = deterministic_id("implementer");
         let new_rev_id = deterministic_id("reviewer");
 
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&result.yaml_text).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result.yaml_text).unwrap();
 
         let nodes = parsed["nodes"].as_sequence().unwrap();
         assert_eq!(nodes[0]["id"].as_str().unwrap(), new_impl_id);
@@ -353,15 +351,10 @@ edges:
     target:
       halt: { message: "done" }
 "#;
-        let result = migrate_pipeline_yaml(
-            yaml,
-            Path::new("/pipelines/test.yaml"),
-        )
-        .unwrap();
+        let result = migrate_pipeline_yaml(yaml, Path::new("/pipelines/test.yaml")).unwrap();
         assert!(result.migrated);
 
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&result.yaml_text).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result.yaml_text).unwrap();
 
         let new_id = deterministic_id("worker");
         let edges = parsed["edges"].as_sequence().unwrap();
@@ -382,11 +375,7 @@ nodes:
     outputs: []
 edges: []
 "#;
-        let result = migrate_pipeline_yaml(
-            yaml,
-            Path::new("/pipelines/demo.yaml"),
-        )
-        .unwrap();
+        let result = migrate_pipeline_yaml(yaml, Path::new("/pipelines/demo.yaml")).unwrap();
         assert!(result.migrated);
         assert_eq!(result.prompt_moves.len(), 1);
 
@@ -404,9 +393,7 @@ edges: []
         std::fs::create_dir_all(&old_prompt_dir).unwrap();
         std::fs::write(old_prompt_dir.join("mynode.md"), "hello prompt").unwrap();
 
-        let yaml = format!(
-            "name: test\nversion: '1.0'\nnodes:\n  - id: mynode\n    type: doc-only\n    prompt_file: old_prompts/mynode.md\n    inputs: []\n    outputs: []\nedges: []\n"
-        );
+        let yaml = "name: test\nversion: '1.0'\nnodes:\n  - id: mynode\n    type: doc-only\n    prompt_file: old_prompts/mynode.md\n    inputs: []\n    outputs: []\nedges: []\n".to_string();
         std::fs::write(&yaml_path, &yaml).unwrap();
 
         let migrated = migrate_pipeline_file(&yaml_path).unwrap();

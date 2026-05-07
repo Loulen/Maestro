@@ -235,9 +235,8 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "planner".into(),
-                    name: Some("planner".into()),
+                    name: "planner".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![Port {
                         name: "task".into(),
                         repeated: false,
@@ -253,9 +252,8 @@ mod tests {
                 },
                 NodeDef {
                     id: "implementer".into(),
-                    name: Some("implementer".into()),
+                    name: "implementer".into(),
                     node_type: NodeType::CodeMutating,
-                    prompt_file: None,
                     inputs: vec![Port {
                         name: "plan".into(),
                         repeated: false,
@@ -375,9 +373,8 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "reviewer".into(),
-                    name: Some("reviewer".into()),
+                    name: "reviewer".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![],
                     outputs: vec![Port {
                         name: "review".into(),
@@ -389,9 +386,8 @@ mod tests {
                 },
                 NodeDef {
                     id: "implementer".into(),
-                    name: Some("implementer".into()),
+                    name: "implementer".into(),
                     node_type: NodeType::CodeMutating,
-                    prompt_file: None,
                     inputs: vec![Port {
                         name: "reviews".into(),
                         repeated: true,
@@ -458,9 +454,8 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "a".into(),
-                    name: Some("a".into()),
+                    name: "a".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![],
                     outputs: vec![Port {
                         name: "out".into(),
@@ -472,9 +467,8 @@ mod tests {
                 },
                 NodeDef {
                     id: "b".into(),
-                    name: Some("b".into()),
+                    name: "b".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![],
                     outputs: vec![Port {
                         name: "out".into(),
@@ -486,9 +480,8 @@ mod tests {
                 },
                 NodeDef {
                     id: "merger".into(),
-                    name: Some("merger".into()),
+                    name: "merger".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![Port {
                         name: "docs".into(),
                         repeated: false,

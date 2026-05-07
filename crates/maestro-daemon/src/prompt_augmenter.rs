@@ -215,9 +215,8 @@ mod tests {
             variables: HashMap::new(),
             nodes: vec![NodeDef {
                 id: "planner".into(),
-                name: Some("planner".into()),
+                name: "planner".into(),
                 node_type: NodeType::DocOnly,
-                prompt_file: Some("prompts/planner.md".into()),
                 inputs: vec![Port {
                     name: "task".into(),
                     repeated: false,
@@ -329,9 +328,8 @@ mod tests {
         let mut pipeline = sample_pipeline();
         pipeline.nodes.push(NodeDef {
             id: "implementer".into(),
-            name: Some("implementer".into()),
+            name: "implementer".into(),
             node_type: NodeType::CodeMutating,
-            prompt_file: Some("prompts/impl.md".into()),
             inputs: vec![Port {
                 name: "plan".into(),
                 repeated: false,
@@ -422,9 +420,8 @@ mod tests {
             nodes: vec![
                 NodeDef {
                     id: "planner".into(),
-                    name: Some("planner".into()),
+                    name: "planner".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![],
                     outputs: vec![Port {
                         name: "plan".into(),
@@ -436,9 +433,8 @@ mod tests {
                 },
                 NodeDef {
                     id: "researcher".into(),
-                    name: Some("researcher".into()),
+                    name: "researcher".into(),
                     node_type: NodeType::DocOnly,
-                    prompt_file: None,
                     inputs: vec![],
                     outputs: vec![Port {
                         name: "context".into(),
@@ -450,9 +446,8 @@ mod tests {
                 },
                 NodeDef {
                     id: "implementer".into(),
-                    name: Some("implementer".into()),
+                    name: "implementer".into(),
                     node_type: NodeType::CodeMutating,
-                    prompt_file: None,
                     inputs: vec![
                         Port {
                             name: "plan".into(),
@@ -534,9 +529,8 @@ mod tests {
             variables: HashMap::new(),
             nodes: vec![NodeDef {
                 id: "reviewer".into(),
-                name: Some("reviewer".into()),
+                name: "reviewer".into(),
                 node_type: NodeType::DocOnly,
-                prompt_file: Some("prompts/reviewer.md".into()),
                 inputs: vec![Port {
                     name: "code".into(),
                     repeated: false,

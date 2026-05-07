@@ -14,6 +14,7 @@ const PIPELINE_YAML: &str = r#"name: prompt-test
 version: "1.0"
 nodes:
   - id: worker
+    name: worker
     type: doc-only
     prompt_file: prompt-test.prompts/worker.md
     inputs:

@@ -13,6 +13,7 @@ const PIPELINE_YAML: &str = r#"name: start-node-test
 version: "1.0"
 nodes:
   - id: only
+    name: only
     type: doc-only
     prompt_file: start-node-test.prompts/only.md
     inputs:

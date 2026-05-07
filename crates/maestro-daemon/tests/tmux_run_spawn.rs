@@ -20,6 +20,7 @@ const PIPELINE_YAML: &str = r#"name: minimal-tmux
 version: "1.0"
 nodes:
   - id: solo
+    name: solo
     type: doc-only
     inputs:
       - name: in

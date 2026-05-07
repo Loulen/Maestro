@@ -17,6 +17,7 @@ const PIPELINE_YAML: &str = r#"name: run-edit-test
 version: "1.0"
 nodes:
   - id: planner
+    name: planner
     type: doc-only
     prompt_file: run-edit-test.prompts/planner.md
     inputs:
@@ -296,6 +297,7 @@ async fn adding_node_to_run_pipeline_triggers_scheduler_spawn() {
 version: "1.0"
 nodes:
   - id: planner
+    name: planner
     type: doc-only
     prompt_file: run-edit-test.prompts/planner.md
     inputs:
@@ -304,6 +306,7 @@ nodes:
       - name: plan
     view: { x: 100, y: 100 }
   - id: implementer
+    name: implementer
     type: doc-only
     inputs:
       - name: plan
@@ -352,6 +355,7 @@ async fn get_run_returns_augmented_node_defs() {
 version: "1.0"
 nodes:
   - id: planner
+    name: planner
     type: doc-only
     prompt_file: run-edit-test.prompts/planner.md
     inputs:
@@ -360,6 +364,7 @@ nodes:
       - name: plan
     view: { x: 100, y: 100 }
   - id: implementer
+    name: implementer
     type: code-mutating
     inputs:
       - name: plan

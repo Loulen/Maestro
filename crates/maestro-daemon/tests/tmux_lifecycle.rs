@@ -18,6 +18,7 @@ const PIPELINE_YAML: &str = r#"name: lifecycle-test
 version: "1.0"
 nodes:
   - id: worker
+    name: worker
     type: doc-only
     inputs:
       - name: in

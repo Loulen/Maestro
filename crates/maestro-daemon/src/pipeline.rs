@@ -50,12 +50,9 @@ pub struct ViewPosition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDef {
     pub id: String,
-    #[serde(default)]
-    pub name: Option<String>,
+    pub name: String,
     #[serde(rename = "type")]
     pub node_type: NodeType,
-    #[serde(default)]
-    pub prompt_file: Option<String>,
     #[serde(default)]
     pub inputs: Vec<Port>,
     #[serde(default)]
@@ -63,12 +60,6 @@ pub struct NodeDef {
     #[serde(default)]
     pub interactive: bool,
     pub view: Option<ViewPosition>,
-}
-
-impl NodeDef {
-    pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,24 +297,6 @@ pub fn parse_pipeline(yaml: &str) -> Result<ParseResult, ParseError> {
         }
     }
 
-    for node in &pipeline.nodes {
-        if node.name.is_none() {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                message: format!("node '{}': missing 'name' — run the migrator", node.id),
-            });
-        }
-        if node.prompt_file.is_some() {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                message: format!(
-                    "node '{}': 'prompt_file' is deprecated — prompt path is derived from id",
-                    node.id
-                ),
-            });
-        }
-    }
-
     let node_ids: std::collections::HashSet<&str> =
         pipeline.nodes.iter().map(|n| n.id.as_str()).collect();
 
@@ -374,15 +347,8 @@ pub fn parse_pipeline(yaml: &str) -> Result<ParseResult, ParseError> {
     })
 }
 
-pub fn load_prompt_file(pipeline_dir: &Path, prompt_file: &str) -> Result<String, std::io::Error> {
-    let path = pipeline_dir.join(prompt_file);
-    std::fs::read_to_string(path)
-}
-
 pub fn canonical_prompt_path(pipeline_path: &Path, node_id: &str) -> std::path::PathBuf {
-    let dir = pipeline_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
+    let dir = pipeline_path.parent().unwrap_or(std::path::Path::new("."));
     let stem = pipeline_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -418,9 +384,8 @@ nodes:
 
         let node = &result.pipeline.nodes[0];
         assert_eq!(node.id, "ab12cd34");
-        assert_eq!(node.name.as_deref(), Some("planner"));
+        assert_eq!(node.name, "planner");
         assert_eq!(node.node_type, NodeType::DocOnly);
-        assert!(node.prompt_file.is_none());
         assert_eq!(node.inputs.len(), 1);
         assert_eq!(node.inputs[0].name, "task");
         assert_eq!(node.outputs.len(), 1);
@@ -430,7 +395,7 @@ nodes:
     }
 
     #[test]
-    fn warns_on_missing_node_name() {
+    fn fails_on_missing_node_name() {
         let yaml = r#"
 name: no-name
 nodes:
@@ -441,15 +406,12 @@ nodes:
     outputs:
       - name: out
 "#;
-        let result = parse_pipeline(yaml).unwrap();
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("missing 'name'")));
+        let err = parse_pipeline(yaml).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidYaml(_)));
     }
 
     #[test]
-    fn warns_on_deprecated_prompt_file() {
+    fn ignores_deprecated_prompt_file_field() {
         let yaml = r#"
 name: old-style
 nodes:
@@ -463,10 +425,7 @@ nodes:
       - name: out
 "#;
         let result = parse_pipeline(yaml).unwrap();
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("deprecated")));
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
@@ -769,7 +728,11 @@ edges:
         assert!(
             result.diagnostics.is_empty(),
             "cycle should not produce warnings, got: {:?}",
-            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+            result
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -885,7 +848,11 @@ edges:
         assert!(
             result.diagnostics.is_empty(),
             "halt target should not produce validation warnings, got: {:?}",
-            result.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+            result
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
         );
     }
 

@@ -16,6 +16,7 @@ const INITIAL_YAML: &str = r#"name: editable
 version: "1.0"
 nodes:
   - id: worker
+    name: worker
     type: doc-only
     prompt_file: prompts/worker.md
     inputs:
@@ -28,6 +29,7 @@ const UPDATED_YAML: &str = r#"name: editable
 version: "1.0"
 nodes:
   - id: worker
+    name: worker
     type: doc-only
     prompt_file: prompts/worker.md
     inputs:

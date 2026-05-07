@@ -1,3 +1,4 @@
+import { useState, useRef } from "react";
 import { useEditStore } from "../stores/editStore";
 import type { NodeDef, NodeType, PortDef } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
@@ -65,14 +66,11 @@ export default function NodeInspector() {
           </span>
         </Field>
         <Field label="Name">
-          <input
+          <NameInput
+            key={node.id}
             value={node.name ?? ""}
-            onChange={(e) => handleField("name", e.target.value || null)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") (e.target as HTMLInputElement).blur();
-            }}
-            className="w-full rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg outline-none focus:border-acc"
             placeholder={node.id}
+            onCommit={(v) => handleField("name", v || null)}
           />
         </Field>
 
@@ -148,6 +146,47 @@ export default function NodeInspector() {
         ))}
       </div>
     </aside>
+  );
+}
+
+function NameInput({
+  value,
+  placeholder,
+  onCommit,
+}: {
+  value: string;
+  placeholder: string;
+  onCommit: (v: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const escaping = useRef(false);
+
+  return (
+    <input
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        if (escaping.current) {
+          escaping.current = false;
+          setDraft(value);
+        } else {
+          onCommit(draft);
+        }
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onCommit(draft);
+          (e.target as HTMLInputElement).blur();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          escaping.current = true;
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+      className="w-full rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg outline-none focus:border-acc"
+      placeholder={placeholder}
+    />
   );
 }
 
