@@ -65,10 +65,22 @@ test("selecting a running node shows initial prompt with ## Inputs", async ({
   // Wait for the run to appear in the list and click it
   await page.getByText(run_id.slice(0, 8)).first().click({ timeout: 5_000 });
 
+  // Assert the canvas rendered with non-zero dimensions
+  const reactFlow = page.locator(".react-flow");
+  await expect(reactFlow).toBeVisible({ timeout: 5_000 });
+  const flowBox = await reactFlow.boundingBox();
+  expect(flowBox).toBeTruthy();
+  expect(flowBox!.height).toBeGreaterThan(0);
+  expect(flowBox!.width).toBeGreaterThan(0);
+
   // Wait for the DAG to render then click the worker node
   await page.waitForTimeout(500);
   const workerNode = page.getByText("worker", { exact: true }).first();
   await expect(workerNode).toBeVisible({ timeout: 3_000 });
+  const workerBox = await workerNode.boundingBox();
+  expect(workerBox).toBeTruthy();
+  expect(workerBox!.height).toBeGreaterThan(0);
+  expect(workerBox!.width).toBeGreaterThan(0);
   await workerNode.click();
 
   // The prompt block should contain ## Inputs text

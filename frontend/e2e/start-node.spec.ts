@@ -84,10 +84,22 @@ test("clicking start node shows StartInspector with header and input text", asyn
   // Wait for the run to appear in the list and click it
   await page.getByText(rid.slice(0, 8)).first().click({ timeout: 5_000 });
 
+  // Assert the canvas rendered with non-zero dimensions
+  const reactFlow = page.locator(".react-flow");
+  await expect(reactFlow).toBeVisible({ timeout: 5_000 });
+  const flowBox = await reactFlow.boundingBox();
+  expect(flowBox).toBeTruthy();
+  expect(flowBox!.height).toBeGreaterThan(0);
+  expect(flowBox!.width).toBeGreaterThan(0);
+
   // Wait for the start node to appear and click it
   await page.waitForTimeout(500);
   const startNode = page.locator(".start-node").first();
   await expect(startNode).toBeVisible({ timeout: 3_000 });
+  const startBox = await startNode.boundingBox();
+  expect(startBox).toBeTruthy();
+  expect(startBox!.height).toBeGreaterThan(0);
+  expect(startBox!.width).toBeGreaterThan(0);
   await startNode.click();
 
   // StartInspector should appear

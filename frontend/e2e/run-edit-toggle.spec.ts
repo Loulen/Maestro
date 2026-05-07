@@ -52,8 +52,21 @@ test("edit-this-run toggle swaps to editor and back", async ({ page, request }) 
   await expect(runEntry).toBeVisible({ timeout: 5_000 });
   await runEntry.click();
 
+  // Assert the canvas rendered with non-zero dimensions
+  const reactFlow = page.locator(".react-flow");
+  await expect(reactFlow).toBeVisible({ timeout: 5_000 });
+  const flowBox = await reactFlow.boundingBox();
+  expect(flowBox).toBeTruthy();
+  expect(flowBox!.height).toBeGreaterThan(0);
+  expect(flowBox!.width).toBeGreaterThan(0);
+
   // The run overlay should show the pipeline name
-  await expect(page.getByText(PIPELINE_NAME).first()).toBeVisible();
+  const pipelineLabel = page.getByText(PIPELINE_NAME).first();
+  await expect(pipelineLabel).toBeVisible();
+  const overlayBox = await pipelineLabel.boundingBox();
+  expect(overlayBox).toBeTruthy();
+  expect(overlayBox!.height).toBeGreaterThan(0);
+  expect(overlayBox!.width).toBeGreaterThan(0);
 
   // Click "Edit this run"
   const editButton = page.getByRole("button", { name: "Edit this run" });

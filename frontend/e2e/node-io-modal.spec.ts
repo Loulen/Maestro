@@ -109,10 +109,22 @@ test("clicking open on output port opens modal with markdown + frontmatter", asy
   // Wait for the run to appear in the list and click it
   await page.getByText(rid.slice(0, 8)).first().click({ timeout: 5_000 });
 
+  // Assert the canvas rendered with non-zero dimensions
+  const reactFlow = page.locator(".react-flow");
+  await expect(reactFlow).toBeVisible({ timeout: 5_000 });
+  const flowBox = await reactFlow.boundingBox();
+  expect(flowBox).toBeTruthy();
+  expect(flowBox!.height).toBeGreaterThan(0);
+  expect(flowBox!.width).toBeGreaterThan(0);
+
   // Click the reviewer node
   await page.waitForTimeout(500);
   const reviewerNode = page.getByText("reviewer", { exact: true }).first();
   await expect(reviewerNode).toBeVisible({ timeout: 3_000 });
+  const reviewerBox = await reviewerNode.boundingBox();
+  expect(reviewerBox).toBeTruthy();
+  expect(reviewerBox!.height).toBeGreaterThan(0);
+  expect(reviewerBox!.width).toBeGreaterThan(0);
   await reviewerNode.click();
 
   // Wait for Outputs section to appear with the port row
