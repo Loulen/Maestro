@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, Sparkles, X } from "lucide-react";
 import type { PipelineListEntry } from "../types";
 import { createRun, fetchPipelines } from "../api";
+import { useEditStore } from "../stores/editStore";
 
 interface Props {
   open: boolean;
@@ -63,6 +64,8 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
     [],
   );
 
+  const flushPendingSaves = useEditStore((s) => s.flushPendingSaves);
+
   const handleOverrideChange = useCallback((key: string, value: string) => {
     setOverrides((prev) => ({ ...prev, [key]: value }));
   }, []);
@@ -81,6 +84,7 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
     }
 
     try {
+      await flushPendingSaves();
       const resp = await createRun({
         pipeline: currentPipeline.name,
         input: input.trim(),
@@ -95,7 +99,7 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
     } finally {
       setSubmitting(false);
     }
-  }, [currentPipeline, input, overrides, onCreated, onClose]);
+  }, [currentPipeline, input, overrides, onCreated, onClose, flushPendingSaves]);
 
   const repoPipelines = useMemo(
     () => pipelines.filter((p) => p.scope === "repo"),

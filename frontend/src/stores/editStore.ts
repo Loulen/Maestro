@@ -30,6 +30,7 @@ interface EditState {
   openTabs: OpenPipeline[];
   activeTabId: string | null;
   selection: Selection;
+  lastSavedAt: Record<string, number>;
 
   loadPipelines: () => Promise<void>;
   openPipeline: (id: string) => Promise<void>;
@@ -58,6 +59,7 @@ interface EditState {
 
   // Persistence
   save: (id: string) => Promise<void>;
+  flushPendingSaves: () => Promise<void>;
 
   // Hot-reload
   reloadPipeline: (id: string) => Promise<void>;
@@ -197,26 +199,6 @@ function mutateActiveTab(
   return { openTabs: tabs };
 }
 
-const saveTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-
-function scheduleSave(id: string, get: () => EditState) {
-  if (saveTimers[id]) clearTimeout(saveTimers[id]);
-  saveTimers[id] = setTimeout(() => {
-    get().save(id);
-    delete saveTimers[id];
-  }, 1500);
-}
-
-function mutateAndSave(
-  state: EditState,
-  get: () => EditState,
-  fn: (tab: OpenPipeline) => void,
-): Partial<EditState> {
-  const result = mutateActiveTab(state, fn);
-  if (result.openTabs && state.activeTabId) scheduleSave(state.activeTabId, get);
-  return result;
-}
-
 function edgeReferencesNode(edge: EdgeDef, nodeId: string): boolean {
   if (edge.source.node === nodeId) return true;
   return "node" in edge.target && (edge.target as { node: string }).node === nodeId;
@@ -227,6 +209,7 @@ export const useEditStore = create<EditState>((set, get) => ({
   openTabs: [],
   activeTabId: null,
   selection: { kind: "none", id: null },
+  lastSavedAt: {},
 
   loadPipelines: async () => {
     try {
@@ -315,13 +298,13 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   addNode: (node: NodeDef) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       tab.pipeline.nodes = [...tab.pipeline.nodes, node];
     }));
   },
 
   updateNode: (nodeId: string, updates: Partial<NodeDef>) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       tab.pipeline.nodes = tab.pipeline.nodes.map((n) =>
         n.id === nodeId ? { ...n, ...updates } : n,
       );
@@ -330,7 +313,7 @@ export const useEditStore = create<EditState>((set, get) => ({
 
   deleteNode: (nodeId: string) => {
     set((s) => ({
-      ...mutateAndSave(s, get, (tab) => {
+      ...mutateActiveTab(s, (tab) => {
         tab.pipeline.nodes = tab.pipeline.nodes.filter((n) => n.id !== nodeId);
         tab.pipeline.edges = tab.pipeline.edges.filter((e) => !edgeReferencesNode(e, nodeId));
       }),
@@ -339,7 +322,7 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   duplicateNode: (nodeId: string) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       const src = tab.pipeline.nodes.find((n) => n.id === nodeId);
       if (!src) return;
       const newId = generateNodeId();
@@ -357,13 +340,13 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   addEdge: (edge: EdgeDef) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       tab.pipeline.edges = [...tab.pipeline.edges, edge];
     }));
   },
 
   updateEdge: (index: number, updates: Partial<EdgeDef>) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       tab.pipeline.edges = tab.pipeline.edges.map((e, i) =>
         i === index ? { ...e, ...updates } : e,
       );
@@ -372,7 +355,7 @@ export const useEditStore = create<EditState>((set, get) => ({
 
   deleteEdge: (index: number) => {
     set((s) => ({
-      ...mutateAndSave(s, get, (tab) => {
+      ...mutateActiveTab(s, (tab) => {
         tab.pipeline.edges = tab.pipeline.edges.filter((_, i) => i !== index);
       }),
       selection: { kind: "none" as const, id: null },
@@ -380,7 +363,7 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   updatePipelineMeta: (updates) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       if (updates.name !== undefined) tab.pipeline.name = updates.name;
       if (updates.version !== undefined) tab.pipeline.version = updates.version;
       if (updates.variables !== undefined) tab.pipeline.variables = updates.variables;
@@ -388,7 +371,7 @@ export const useEditStore = create<EditState>((set, get) => ({
   },
 
   updatePrompt: (nodeId: string, content: string) => {
-    set((s) => mutateAndSave(s, get, (tab) => {
+    set((s) => mutateActiveTab(s, (tab) => {
       tab.prompts = { ...tab.prompts, [nodeId]: content };
     }));
   },
@@ -407,10 +390,16 @@ export const useEditStore = create<EditState>((set, get) => ({
         openTabs: s.openTabs.map((t) =>
           t.id === id ? { ...t, dirty: false } : t,
         ),
+        lastSavedAt: { ...s.lastSavedAt, [id]: Date.now() },
       }));
     } catch {
       // ignore save errors
     }
+  },
+
+  flushPendingSaves: async () => {
+    const dirtyTabs = get().openTabs.filter((t) => t.dirty);
+    await Promise.all(dirtyTabs.map((t) => get().save(t.id)));
   },
 
   reloadPipeline: async (id: string) => {
