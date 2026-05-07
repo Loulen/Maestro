@@ -25,8 +25,10 @@
       type: doc-only
       inputs:
         - name: in
+          side: left
       outputs:
         - name: out
+          side: top
       view: { x: 100, y: 100 }
   edges: []
   ```

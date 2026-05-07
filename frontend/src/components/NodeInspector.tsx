@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { useEditStore } from "../stores/editStore";
-import type { NodeDef, NodeType, PortDef } from "../types";
+import type { NodeDef, NodeType, PortDef, PortSide } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
 
 export default function NodeInspector() {
@@ -22,15 +22,16 @@ export default function NodeInspector() {
     updateNode(node!.id, { [field]: value } as Partial<NodeDef>);
   }
 
-  function handleAddPort(side: "inputs" | "outputs") {
-    const ports = [...node![side]];
-    let name = side === "inputs" ? "in" : "out";
+  function handleAddPort(portSide: "inputs" | "outputs") {
+    const ports = [...node![portSide]];
+    let name = portSide === "inputs" ? "in" : "out";
     let counter = 1;
     while (ports.some((p) => p.name === name)) {
-      name = `${side === "inputs" ? "in" : "out"}-${++counter}`;
+      name = `${portSide === "inputs" ? "in" : "out"}-${++counter}`;
     }
-    ports.push({ name, repeated: false });
-    updateNode(node!.id, { [side]: ports });
+    const defaultSide: PortSide = portSide === "inputs" ? "left" : "right";
+    ports.push({ name, repeated: false, side: defaultSide });
+    updateNode(node!.id, { [portSide]: ports });
   }
 
   function handleUpdatePort(side: "inputs" | "outputs", index: number, updates: Partial<PortDef>) {
@@ -190,6 +191,8 @@ function NameInput({
   );
 }
 
+const SIDE_OPTIONS: PortSide[] = ["left", "right", "top", "bottom"];
+
 function PortRow({
   port,
   onUpdate,
@@ -208,6 +211,17 @@ function PortRow({
         className="min-w-0 flex-1 bg-transparent text-fg outline-none"
         style={{ fontSize: "11px" }}
       />
+      <select
+        value={port.side ?? "left"}
+        onChange={(e) => onUpdate({ side: e.target.value as PortSide })}
+        className="rounded border border-line-strong bg-bg-4 px-1 py-px text-fg-3 outline-none"
+        style={{ fontSize: "9px" }}
+        title="Handle side"
+      >
+        {SIDE_OPTIONS.map((s) => (
+          <option key={s} value={s}>{s}</option>
+        ))}
+      </select>
       <button
         onClick={() => onUpdate({ repeated: !port.repeated })}
         className={`rounded px-1 py-px transition-colors ${

@@ -14,9 +14,10 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Pencil, Trash2, Terminal } from "lucide-react";
-import type { NodeStatus, NodeType, RunState, RunStatus, StartNodeInfo } from "../types";
+import type { NodeStatus, NodeType, RunState, RunStatus, StartNodeInfo, PortBrief } from "../types";
 import { cleanupRun, attachManager } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
+import TriangleHandle from "./TriangleHandle";
 
 const STATUS_COLORS: Record<NodeStatus, string> = {
   pending: "border-st-pending",
@@ -66,8 +67,8 @@ interface PipelineNodeData {
   nodeId: string;
   status: NodeStatus;
   nodeType: NodeType;
-  inputCount: number;
-  outputCount: number;
+  inputs: PortBrief[];
+  outputs: PortBrief[];
   iter: number;
   [key: string]: unknown;
 }
@@ -84,13 +85,16 @@ function PipelineNode({ data }: NodeProps<Node<PipelineNodeData>>) {
       className={`rounded-md border-l-[3px] ${borderColor} ${bgColor} px-3 py-2`}
       style={{ minWidth: 160, fontSize: "12px" }}
     >
-      {data.inputCount > 0 && (
-        <Handle
-          type="target"
-          position={Position.Left}
-          className="!bg-fg-4 !border-line !w-2 !h-2"
+      {data.inputs.map((port, i) => (
+        <TriangleHandle
+          key={`in-${port.name}`}
+          id={port.name}
+          kind="input"
+          side={port.side}
+          index={i}
+          total={data.inputs.length}
         />
-      )}
+      ))}
       <div className="flex items-center gap-2">
         <span
           className={`h-2 w-2 shrink-0 rounded-full ${dotColor} ${
@@ -117,13 +121,16 @@ function PipelineNode({ data }: NodeProps<Node<PipelineNodeData>>) {
         <span>{data.status}</span>
         <span className="font-mono" style={{ fontSize: "9px" }}>{data.nodeId}</span>
       </div>
-      {data.outputCount > 0 && (
-        <Handle
-          type="source"
-          position={Position.Right}
-          className="!bg-fg-4 !border-line !w-2 !h-2"
+      {data.outputs.map((port, i) => (
+        <TriangleHandle
+          key={`out-${port.name}`}
+          id={port.name}
+          kind="output"
+          side={port.side}
+          index={i}
+          total={data.outputs.length}
         />
-      )}
+      ))}
     </div>
   );
 }
@@ -240,8 +247,8 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
             nodeId: def.id,
             status,
             nodeType: def.node_type,
-            inputCount: def.inputs.length,
-            outputCount: def.outputs.length,
+            inputs: def.inputs,
+            outputs: def.outputs,
             iter,
           },
           selected: def.id === selectedNodeId,
@@ -256,8 +263,8 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
           nodeId: ns.node_id,
           status: ns.status,
           nodeType: "doc-only" as NodeType,
-          inputCount: 1,
-          outputCount: 1,
+          inputs: [{ name: "in", side: "left" as const }],
+          outputs: [{ name: "out", side: "right" as const }],
           iter: ns.iter,
         },
         selected: ns.node_id === selectedNodeId,
@@ -309,8 +316,8 @@ function deriveStartEdges(startNode: StartNodeInfo): Edge[] {
     id: `start-e-${i}`,
     source: "__start",
     target: targetId,
-    sourceHandle: null,
-    targetHandle: null,
+    sourceHandle: null as string | null,
+    targetHandle: null as string | null,
     type: "default",
     animated: false,
     style: {
@@ -355,8 +362,8 @@ function deriveEdges(run: RunState): Edge[] {
       id: `e-${i}`,
       source: ei.source_node,
       target: targetId,
-      sourceHandle: null,
-      targetHandle: null,
+      sourceHandle: ei.source_port || null,
+      targetHandle: isHalt ? null : (ei.target_port || null),
       type: "default",
       animated: !isHalt && run.nodes[ei.source_node]?.status === "running",
       style: {

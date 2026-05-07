@@ -78,8 +78,8 @@ mod tests {
     fn make_node(id: &str, outputs: Vec<Port>) -> NodeDef {
         NodeDef {
             id: id.into(),
+            name: id.into(),
             node_type: NodeType::DocOnly,
-            prompt_file: None,
             inputs: Vec::new(),
             outputs,
             interactive: false,
@@ -91,6 +91,7 @@ mod tests {
         Port {
             name: name.into(),
             repeated: false,
+            side: None,
             frontmatter: None,
         }
     }
@@ -99,6 +100,7 @@ mod tests {
         Port {
             name: name.into(),
             repeated: true,
+            side: None,
             frontmatter: None,
         }
     }

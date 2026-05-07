@@ -2008,8 +2008,7 @@ async fn run_command(
                 .as_ref()
                 .map(|rs| rs.pipeline_name.as_str())
                 .unwrap_or("");
-            let pipeline_path =
-                resolve_run_pipeline_path(&state.repo_root, &run_id, pipeline_name);
+            let pipeline_path = resolve_run_pipeline_path(&state.repo_root, &run_id, pipeline_name);
             let artifacts_dir = state
                 .repo_root
                 .join(".maestro")
@@ -3033,6 +3032,16 @@ fn augment_run_state_from_disk(run_state: &mut event_log::RunState, repo_root: &
     run_state.edges = pipe.edges.iter().map(edge_info_from_pipeline).collect();
 }
 
+fn port_brief(p: &pipeline::Port, default_side: &str) -> event_log::PortBrief {
+    event_log::PortBrief {
+        name: p.name.clone(),
+        side: p
+            .side
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_side.into()),
+    }
+}
+
 fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
     event_log::NodeDefInfo {
         id: n.id.clone(),
@@ -3043,8 +3052,8 @@ fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
         },
         view_x: n.view.as_ref().map(|v| v.x),
         view_y: n.view.as_ref().map(|v| v.y),
-        inputs: n.inputs.iter().map(|p| p.name.clone()).collect(),
-        outputs: n.outputs.iter().map(|p| p.name.clone()).collect(),
+        inputs: n.inputs.iter().map(|p| port_brief(p, "left")).collect(),
+        outputs: n.outputs.iter().map(|p| port_brief(p, "right")).collect(),
     }
 }
 
@@ -3108,7 +3117,8 @@ fn check_output_validation(
 ) -> Option<Response> {
     let yaml = std::fs::read_to_string(pipeline_path).ok()?;
     let parse_result = pipeline::parse_pipeline(&yaml).ok()?;
-    let Err(missing) = outputs_validator::validate(&parse_result.pipeline, node_id, iter, artifacts_dir)
+    let Err(missing) =
+        outputs_validator::validate(&parse_result.pipeline, node_id, iter, artifacts_dir)
     else {
         return None;
     };
@@ -5585,7 +5595,7 @@ edges:
         let pipelines_dir = dir.join(".maestro").join("pipelines");
         std::fs::create_dir_all(&pipelines_dir).unwrap();
         let yaml = format!(
-            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: summary\n      - name: report\n    view: {{ x: 100, y: 100 }}\nedges: []\n"
+            "name: {name}\nversion: \"1.0\"\nnodes:\n  - id: worker\n    name: worker\n    type: doc-only\n    inputs:\n      - name: task\n    outputs:\n      - name: summary\n      - name: report\n    view: {{ x: 100, y: 100 }}\nedges: []\n"
         );
         std::fs::write(pipelines_dir.join(format!("{name}.yaml")), yaml).unwrap();
     }
@@ -5940,7 +5950,11 @@ edges:
     async fn inject_artifact_rejects_path_traversal() {
         let state = test_state().await;
 
-        for bad_path in ["../../etc/passwd", "/absolute/path.md", "ok/../../../escape"] {
+        for bad_path in [
+            "../../etc/passwd",
+            "/absolute/path.md",
+            "ok/../../../escape",
+        ] {
             let app = build_router(state.clone());
             let resp = app
                 .oneshot(

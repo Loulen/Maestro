@@ -88,6 +88,7 @@ function serializePipeline(p: PipelineDef): string {
       node.inputs = n.inputs.map((port) => {
         const p: Record<string, unknown> = { name: port.name };
         if (port.repeated) p.repeated = true;
+        if (port.side) p.side = port.side;
         if (port.frontmatter) p.frontmatter = port.frontmatter;
         return p;
       });
@@ -95,6 +96,7 @@ function serializePipeline(p: PipelineDef): string {
       node.outputs = n.outputs.map((port) => {
         const p: Record<string, unknown> = { name: port.name };
         if (port.repeated) p.repeated = true;
+        if (port.side) p.side = port.side;
         if (port.frontmatter) p.frontmatter = port.frontmatter;
         return p;
       });

@@ -35,14 +35,19 @@ export interface EdgeInfo {
   when_clause?: Record<string, unknown> | null;
 }
 
+export interface PortBrief {
+  name: string;
+  side: PortSide;
+}
+
 export interface NodeDefInfo {
   id: string;
   name?: string | null;
   node_type: NodeType;
   view_x: number | null;
   view_y: number | null;
-  inputs: string[];
-  outputs: string[];
+  inputs: PortBrief[];
+  outputs: PortBrief[];
 }
 
 export interface StartNodeInfo {
@@ -103,9 +108,12 @@ export interface PipelineListEntry {
   variables: Record<string, PipelineVariableInfo>;
 }
 
+export type PortSide = "left" | "right" | "top" | "bottom";
+
 export interface PortDef {
   name: string;
   repeated: boolean;
+  side?: PortSide;
   frontmatter?: Record<string, FrontmatterFieldDecl> | null;
 }
 

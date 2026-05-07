@@ -26,6 +26,13 @@ fn looks_like_nanoid(id: &str) -> bool {
     id.len() == NANOID_LEN && id.bytes().all(|b| NANOID_ALPHABET.contains(&b))
 }
 
+fn port_missing_side(ports: &[serde_yaml::Value]) -> bool {
+    ports.iter().any(|p| {
+        p.as_mapping()
+            .is_some_and(|m| !m.contains_key(serde_yaml::Value::String("side".into())))
+    })
+}
+
 fn needs_migration(yaml_value: &serde_yaml::Value) -> bool {
     let nodes = match yaml_value.get("nodes").and_then(|n| n.as_sequence()) {
         Some(seq) => seq,
@@ -37,6 +44,16 @@ fn needs_migration(yaml_value: &serde_yaml::Value) -> bool {
         }
         if let Some(id) = node.get("id").and_then(|v| v.as_str()) {
             if !looks_like_nanoid(id) {
+                return true;
+            }
+        }
+        if let Some(inputs) = node.get("inputs").and_then(|v| v.as_sequence()) {
+            if port_missing_side(inputs) {
+                return true;
+            }
+        }
+        if let Some(outputs) = node.get("outputs").and_then(|v| v.as_sequence()) {
+            if port_missing_side(outputs) {
                 return true;
             }
         }
@@ -134,6 +151,14 @@ pub fn migrate_pipeline_yaml(
         }
     }
 
+    let nodes_for_side = doc.get_mut("nodes").and_then(|n| n.as_sequence_mut());
+    if let Some(nodes_for_side) = nodes_for_side {
+        for node in nodes_for_side.iter_mut() {
+            backfill_port_sides(node, "inputs", "left");
+            backfill_port_sides(node, "outputs", "right");
+        }
+    }
+
     let yaml_text =
         serde_yaml::to_string(&doc).map_err(|e| format!("YAML serialize error: {e}"))?;
 
@@ -142,6 +167,24 @@ pub fn migrate_pipeline_yaml(
         yaml_text,
         prompt_moves,
     })
+}
+
+fn backfill_port_sides(node: &mut serde_yaml::Value, key: &str, default_side: &str) {
+    let ports = match node.get_mut(key).and_then(|v| v.as_sequence_mut()) {
+        Some(seq) => seq,
+        None => return,
+    };
+    let side_key = serde_yaml::Value::String("side".into());
+    for port in ports.iter_mut() {
+        if let Some(m) = port.as_mapping_mut() {
+            if !m.contains_key(&side_key) {
+                m.insert(
+                    side_key.clone(),
+                    serde_yaml::Value::String(default_side.into()),
+                );
+            }
+        }
+    }
 }
 
 fn rewrite_edge_endpoint(
@@ -257,8 +300,10 @@ nodes:
     type: code-mutating
     inputs:
       - name: review
+        side: left
     outputs:
       - name: code
+        side: right
     view: { x: 100, y: 160 }
 edges: []
 "#;
@@ -368,6 +413,58 @@ edges: []
         let expected_dst = format!("/pipelines/demo.prompts/{new_id}.md");
         assert_eq!(result.prompt_moves[0].0, "/pipelines/old/path/agent.md");
         assert_eq!(result.prompt_moves[0].1, expected_dst);
+    }
+
+    #[test]
+    fn backfills_port_side_defaults() {
+        let yaml = r#"
+name: test
+version: "1.0"
+nodes:
+  - id: aBcD1234
+    name: worker
+    type: doc-only
+    inputs:
+      - name: task
+      - name: context
+    outputs:
+      - name: plan
+      - name: summary
+edges: []
+"#;
+        let result = migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
+        assert!(result.migrated);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result.yaml_text).unwrap();
+        let nodes = parsed["nodes"].as_sequence().unwrap();
+        let inputs = nodes[0]["inputs"].as_sequence().unwrap();
+        let outputs = nodes[0]["outputs"].as_sequence().unwrap();
+
+        assert_eq!(inputs[0]["side"].as_str().unwrap(), "left");
+        assert_eq!(inputs[1]["side"].as_str().unwrap(), "left");
+        assert_eq!(outputs[0]["side"].as_str().unwrap(), "right");
+        assert_eq!(outputs[1]["side"].as_str().unwrap(), "right");
+    }
+
+    #[test]
+    fn preserves_existing_port_side() {
+        let yaml = r#"
+name: test
+version: "1.0"
+nodes:
+  - id: aBcD1234
+    name: worker
+    type: doc-only
+    inputs:
+      - name: task
+        side: bottom
+    outputs:
+      - name: plan
+        side: top
+edges: []
+"#;
+        let result = migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
+        assert!(!result.migrated);
     }
 
     #[test]
