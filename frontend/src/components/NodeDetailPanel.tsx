@@ -6,6 +6,7 @@ import {
   AlertCircle,
   ChevronDown,
 } from "lucide-react";
+import { usePinToBottom } from "../hooks/usePinToBottom";
 import Convert from "ansi-to-html";
 import type { IterationInfo, NodeState, NodeStatus } from "../types";
 import {
@@ -84,9 +85,8 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
     iter: number;
   } | null>(null);
   const terminalRef = useRef<HTMLPreElement>(null);
+  const latestHtmlRef = useRef<string>("");
 
-  // Use the user's explicit selection if it matches the current node,
-  // otherwise default to the latest iter.
   const selectedIter =
     userSelectedIter?.nodeId === node.node_id
       ? userSelectedIter.iter
@@ -104,16 +104,25 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
   const isStaleIter = selectedIter !== node.iter;
   const hasMultipleIters = (node.iterations?.length ?? 0) > 1;
 
+  const { pinnedToBottom, pinnedRef, handleScroll, scrollToBottom } =
+    usePinToBottom(terminalRef, node.node_id, selectedIter);
+
   useEffect(() => {
+    latestHtmlRef.current = "";
+
     if (isStaleIter) {
-      // For stale iters, fetch once — no live polling
       let cancelled = false;
       fetchPane(runId, node.node_id, selectedIter)
         .then((resp) => {
-          if (!cancelled) setTerminalHtml(ansiConverter.toHtml(resp.content));
+          if (cancelled) return;
+          const html = ansiConverter.toHtml(resp.content);
+          latestHtmlRef.current = html;
+          if (pinnedRef.current) setTerminalHtml(html);
         })
         .catch(() => {});
-      return () => { cancelled = true; };
+      return () => {
+        cancelled = true;
+      };
     }
 
     if (interval === null) return;
@@ -123,9 +132,10 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
     async function poll() {
       try {
         const resp = await fetchPane(runId, node.node_id, selectedIter);
-        if (!cancelled) {
-          setTerminalHtml(ansiConverter.toHtml(resp.content));
-        }
+        if (cancelled) return;
+        const html = ansiConverter.toHtml(resp.content);
+        latestHtmlRef.current = html;
+        if (pinnedRef.current) setTerminalHtml(html);
       } catch {
         // ignore fetch errors during polling
       }
@@ -137,7 +147,7 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
       cancelled = true;
       clearInterval(timer);
     };
-  }, [interval, node.node_id, selectedIter, runId, isStaleIter]);
+  }, [interval, node.node_id, selectedIter, runId, isStaleIter, pinnedRef]);
 
   const shouldFetchPrompt = node.status !== "pending" || isStaleIter;
 
@@ -159,7 +169,6 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
     };
   }, [runId, node.node_id, selectedIter, shouldFetchPrompt]);
 
-  // Fetch IO at the same cadence as terminal polling
   useEffect(() => {
     if (isStaleIter) {
       let cancelled = false;
@@ -171,7 +180,9 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
           }
         })
         .catch(() => {});
-      return () => { cancelled = true; };
+      return () => {
+        cancelled = true;
+      };
     }
 
     if (interval === null) return;
@@ -198,12 +209,21 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
     };
   }, [interval, node.node_id, selectedIter, runId, isStaleIter]);
 
-  // Auto-scroll terminal to bottom on content change
   useEffect(() => {
-    if (terminalRef.current) {
+    if (pinnedToBottom && terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
-  }, [terminalHtml]);
+  }, [terminalHtml, pinnedToBottom]);
+
+  useEffect(() => {
+    if (
+      pinnedToBottom &&
+      latestHtmlRef.current &&
+      latestHtmlRef.current !== terminalHtml
+    ) {
+      setTerminalHtml(latestHtmlRef.current);
+    }
+  }, [pinnedToBottom, terminalHtml]);
 
   const handleOpenTerminal = useCallback(async () => {
     try {
@@ -258,8 +278,12 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
           ) : (
             <span>iter {node.iter}</span>
           )}
-          {node.started_at && <span> · started {formatTime(node.started_at)}</span>}
-          {node.completed_at && <span> · ended {formatTime(node.completed_at)}</span>}
+          {node.started_at && (
+            <span> · started {formatTime(node.started_at)}</span>
+          )}
+          {node.completed_at && (
+            <span> · ended {formatTime(node.completed_at)}</span>
+          )}
         </div>
       </div>
 
@@ -300,22 +324,37 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
               <Terminal size={12} />
               Terminal Preview
             </div>
-            {terminalHtml ? (
-              <pre
-                ref={terminalRef}
-                className="terminal-pane flex-1 overflow-auto bg-bg-0 p-2 font-mono text-fg-2"
-                style={{ fontSize: "10.5px", lineHeight: "1.5" }}
-                dangerouslySetInnerHTML={{ __html: terminalHtml }}
-              />
-            ) : (
-              <pre
-                ref={terminalRef}
-                className="terminal-pane flex-1 overflow-auto bg-bg-0 p-2 font-mono text-fg-2"
-                style={{ fontSize: "10.5px", lineHeight: "1.5" }}
-              >
-                <span className="text-fg-4">{terminalPlaceholder(node)}</span>
-              </pre>
-            )}
+            <div className="relative min-h-0 flex-1">
+              {terminalHtml ? (
+                <pre
+                  ref={terminalRef}
+                  className="terminal-pane absolute inset-0 overflow-auto bg-bg-0 p-2 font-mono text-fg-2"
+                  style={{ fontSize: "10.5px", lineHeight: "1.5" }}
+                  onScroll={handleScroll}
+                  dangerouslySetInnerHTML={{ __html: terminalHtml }}
+                />
+              ) : (
+                <pre
+                  ref={terminalRef}
+                  className="terminal-pane absolute inset-0 overflow-auto bg-bg-0 p-2 font-mono text-fg-2"
+                  style={{ fontSize: "10.5px", lineHeight: "1.5" }}
+                  onScroll={handleScroll}
+                >
+                  <span className="text-fg-4">
+                    {terminalPlaceholder(node)}
+                  </span>
+                </pre>
+              )}
+              {!pinnedToBottom && (
+                <button
+                  onClick={scrollToBottom}
+                  className="pin-bottom-chevron absolute bottom-2 right-2 flex h-6 w-6 items-center justify-center rounded border border-line-strong bg-bg-3 text-fg-3 hover:bg-bg-4 hover:text-fg"
+                  aria-label="Scroll to bottom"
+                >
+                  <ChevronDown size={14} />
+                </button>
+              )}
+            </div>
           </div>
         </ResizablePanel>
 
@@ -474,7 +513,10 @@ function IterSelector({
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOTS[it.status]}`}
             />
             <span className="font-mono">iter {it.iter}</span>
-            <span className="ml-auto font-mono text-fg-4" style={{ fontSize: "10px" }}>
+            <span
+              className="ml-auto font-mono text-fg-4"
+              style={{ fontSize: "10px" }}
+            >
               {it.started_at ? formatTime(it.started_at) : ""}
               {it.completed_at ? ` – ${formatTime(it.completed_at)}` : ""}
             </span>
@@ -505,10 +547,7 @@ function IOSection({
         style={{ fontSize: "11px" }}
       >
         {title}
-        <span
-          className="font-mono text-fg-4"
-          style={{ fontSize: "10px" }}
-        >
+        <span className="font-mono text-fg-4" style={{ fontSize: "10px" }}>
           {ports.length}
         </span>
       </div>
@@ -552,10 +591,7 @@ function PortRow({
     displayPath = `${port.files.length} files`;
   }
 
-  const totalSize = port.files.reduce(
-    (sum, f) => sum + (f.size ?? 0),
-    0,
-  );
+  const totalSize = port.files.reduce((sum, f) => sum + (f.size ?? 0), 0);
 
   const frontmatter =
     showFrontmatter && firstFile?.frontmatter
@@ -571,9 +607,7 @@ function PortRow({
       }}
     >
       {/* Status dot */}
-      <div
-        className={`h-2 w-2 rounded-full ${dotClass}`}
-      />
+      <div className={`h-2 w-2 rounded-full ${dotClass}`} />
 
       {/* Name + path */}
       <div className="min-w-0">
@@ -601,10 +635,7 @@ function PortRow({
       {/* Meta + open link */}
       <div className="flex items-center gap-2">
         {anyExists && totalSize > 0 && (
-          <span
-            className="font-mono text-fg-4"
-            style={{ fontSize: "10px" }}
-          >
+          <span className="font-mono text-fg-4" style={{ fontSize: "10px" }}>
             {formatSize(totalSize)}
           </span>
         )}

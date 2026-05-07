@@ -118,6 +118,26 @@ If the node has already completed by the time the agent reaches this step,
 skip it — the validation path is already covered by the Layer 3b e2e test
 `failed-node.spec.ts`.
 
+### Step 6a — Pin-to-bottom + chevron resume (refs #34)
+
+While the node is still **running** (before `maestro complete` fires):
+
+1. Scroll **up** in the terminal preview `<pre>` pane. Assert:
+   - The terminal content **freezes** — subsequent poll responses are not
+     rendered (the `<pre>` innerHTML does not change even though polling
+     continues in the background).
+   - A small floating **chevron `↓`** button (`.pin-bottom-chevron`) appears
+     at the bottom-right of the terminal preview.
+2. Click the chevron button. Assert:
+   - The `<pre>` scrolls to the bottom.
+   - The chevron disappears.
+   - Rendering **resumes** — the next poll response is rendered into the
+     terminal preview.
+3. Scroll up again, then manually scroll back to the bottom (within 8 px of
+   `scrollHeight - clientHeight`). Assert:
+   - The chevron disappears without clicking it.
+   - Rendering resumes.
+
 6. Wait up to ~30 s for claude to reply with `MAESTRO_RUN_MINIMAL_OK` and call
    `maestro complete`. Re-capture the pane and assert the literal string
    `MAESTRO_RUN_MINIMAL_OK` is present.
