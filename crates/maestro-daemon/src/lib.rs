@@ -1040,7 +1040,7 @@ async fn create_run(
     }
 
     // Copy pipeline YAML + prompts to run-scoped location
-    if let Err(e) = copy_pipeline_to_run(&state.repo_root, &pipeline_path, &req.pipeline, &run_id) {
+    if let Err(e) = copy_pipeline_to_run(&state.repo_root, &pipeline_path, &run_id) {
         error!("failed to copy pipeline to run dir: {e}");
     }
 
@@ -2387,7 +2387,6 @@ fn run_scoped_prompts_dir(repo_root: &std::path::Path, run_id: &str) -> PathBuf 
 fn copy_pipeline_to_run(
     repo_root: &std::path::Path,
     pipeline_path: &std::path::Path,
-    _pipeline_name: &str,
     run_id: &str,
 ) -> Result<()> {
     let dest_yaml = run_scoped_pipeline_path(repo_root, run_id);

@@ -130,7 +130,7 @@ pub fn migrate_pipeline_yaml(
     if let Some(edges) = edges {
         for edge in edges.iter_mut() {
             rewrite_edge_endpoint(edge, "source", &id_map);
-            rewrite_edge_target(edge, &id_map);
+            rewrite_edge_endpoint(edge, "target", &id_map);
         }
     }
 
@@ -154,21 +154,6 @@ fn rewrite_edge_endpoint(
         if let Some(old) = ep.get(&node_key).and_then(|v| v.as_str()).map(String::from) {
             if let Some(new_id) = id_map.get(&old) {
                 ep.insert(node_key, serde_yaml::Value::String(new_id.clone()));
-            }
-        }
-    }
-}
-
-fn rewrite_edge_target(edge: &mut serde_yaml::Value, id_map: &HashMap<String, String>) {
-    if let Some(target) = edge.get_mut("target").and_then(|v| v.as_mapping_mut()) {
-        let node_key = serde_yaml::Value::String("node".into());
-        if let Some(old) = target
-            .get(&node_key)
-            .and_then(|v| v.as_str())
-            .map(String::from)
-        {
-            if let Some(new_id) = id_map.get(&old) {
-                target.insert(node_key, serde_yaml::Value::String(new_id.clone()));
             }
         }
     }
