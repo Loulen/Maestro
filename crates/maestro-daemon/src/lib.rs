@@ -1710,7 +1710,6 @@ async fn node_done(
 
             let _lock = state.merge_lock.lock().await;
             match commit_and_merge_sub_worktree(
-                &state.repo_root,
                 &sub_wt_dir,
                 &worktree_dir,
                 &sub_branch,
@@ -2622,7 +2621,6 @@ enum MergeResult {
 }
 
 fn commit_and_merge_sub_worktree(
-    repo_root: &std::path::Path,
     sub_worktree_dir: &std::path::Path,
     pipeline_worktree_dir: &std::path::Path,
     sub_branch: &str,
@@ -2670,16 +2668,9 @@ fn commit_and_merge_sub_worktree(
         return Ok(MergeResult::Conflict(stderr.to_string()));
     }
 
-    let _ = std::process::Command::new("git")
-        .args(["worktree", "remove", "--force"])
-        .arg(sub_worktree_dir)
-        .current_dir(repo_root)
-        .output();
-
-    let _ = std::process::Command::new("git")
-        .args(["branch", "-d", sub_branch])
-        .current_dir(repo_root)
-        .output();
+    // Sub-worktree and branch are intentionally kept alive (refs #32).
+    // They survive until cleanup_run removes them, allowing prompt/artifact
+    // inspection and tmux re-attach for completed iterations.
 
     info!("Merged sub-worktree {sub_branch} into pipeline branch");
     Ok(MergeResult::Success)
@@ -3215,6 +3206,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_run_removes_surviving_sub_worktrees_and_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        let run_id = "cleanup-sub-wt";
+        let state = test_state_with_dir(repo).await;
+
+        seed_run_with_node(&state, run_id, "impl-1", "code-mutating").await;
+        for ev in [
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::NodeCompleted,
+                node_id: Some("impl-1".into()),
+                iter: Some(1),
+                payload: None,
+            },
+            event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::RunCompleted,
+                node_id: None,
+                iter: None,
+                payload: None,
+            },
+        ] {
+            append_event(&state, &ev).await.unwrap();
+        }
+
+        // Create real worktrees on disk (simulating what the daemon would do)
+        let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
+        let pipeline_branch = format!("maestro/run-{run_id}");
+        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+
+        let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
+        let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
+        create_sub_worktree(repo, &sub_wt_dir, &sub_branch, &pipeline_branch).unwrap();
+
+        std::fs::write(sub_wt_dir.join("foo.rs"), "fn main() {}\n").unwrap();
+        let result =
+            commit_and_merge_sub_worktree(&sub_wt_dir, &wt_dir, &sub_branch, "impl-1", 1).unwrap();
+        assert!(matches!(result, MergeResult::Success));
+
+        // Sub-worktree must exist before cleanup (refs #32)
+        assert!(sub_wt_dir.exists());
+
+        // Run cleanup_run via the HTTP endpoint
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind": "cleanup_run"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Sub-worktree directory removed
+        assert!(
+            !sub_wt_dir.exists(),
+            "cleanup_run must remove sub-worktree directory"
+        );
+
+        // Pipeline worktree directory removed
+        assert!(
+            !wt_dir.exists(),
+            "cleanup_run must remove pipeline worktree directory"
+        );
+
+        // Sub-branch removed
+        let branch_check = std::process::Command::new("git")
+            .args(["branch", "--list", &sub_branch])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let branches = String::from_utf8_lossy(&branch_check.stdout);
+        assert!(
+            !branches.contains(&sub_branch),
+            "cleanup_run must remove sub-branch; got: {branches}"
+        );
+
+        // Pipeline branch removed
+        let branch_check = std::process::Command::new("git")
+            .args(["branch", "--list", &pipeline_branch])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let branches = String::from_utf8_lossy(&branch_check.stdout);
+        assert!(
+            !branches.contains(&pipeline_branch),
+            "cleanup_run must remove pipeline branch; got: {branches}"
+        );
+
+        // Events are preserved
+        let events = load_events(&state.db, run_id).await.unwrap();
+        assert!(!events.is_empty());
+        let run_state = event_log::project(&events).unwrap();
+        assert_eq!(run_state.status, event_log::RunStatus::Archived);
+    }
+
+    #[tokio::test]
     async fn mark_node_done_command_completes_awaiting_node() {
         let state = test_state().await;
 
@@ -3539,12 +3638,51 @@ mod tests {
         std::fs::write(sub_wt_dir.join("foo.rs"), "fn main() {}\n").unwrap();
 
         let result =
-            commit_and_merge_sub_worktree(repo, &sub_wt_dir, &wt_dir, &sub_branch, "impl-1", 1)
-                .unwrap();
+            commit_and_merge_sub_worktree(&sub_wt_dir, &wt_dir, &sub_branch, "impl-1", 1).unwrap();
         assert!(matches!(result, MergeResult::Success));
 
         // Verify the file is present in the pipeline worktree
         assert!(wt_dir.join("foo.rs").exists());
+    }
+
+    #[test]
+    fn cm_sub_worktree_survives_after_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        let run_id = "test-cm-survive";
+        let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
+        let pipeline_branch = format!("maestro/run-{run_id}");
+        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+
+        let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
+        let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
+        create_sub_worktree(repo, &sub_wt_dir, &sub_branch, &pipeline_branch).unwrap();
+
+        std::fs::write(sub_wt_dir.join("foo.rs"), "fn main() {}\n").unwrap();
+
+        let result =
+            commit_and_merge_sub_worktree(&sub_wt_dir, &wt_dir, &sub_branch, "impl-1", 1).unwrap();
+        assert!(matches!(result, MergeResult::Success));
+
+        // Sub-worktree directory must still exist after merge (refs #32)
+        assert!(
+            sub_wt_dir.exists(),
+            "sub-worktree directory must survive merge for inspection"
+        );
+
+        // Sub-worktree branch must still exist after merge
+        let branch_check = std::process::Command::new("git")
+            .args(["branch", "--list", &sub_branch])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let branches = String::from_utf8_lossy(&branch_check.stdout);
+        assert!(
+            branches.contains(&sub_branch),
+            "sub-branch must survive merge; got: {branches}"
+        );
     }
 
     #[test]
@@ -3573,14 +3711,12 @@ mod tests {
 
         // Merge first succeeds
         let r1 =
-            commit_and_merge_sub_worktree(repo, &sub_wt_1, &wt_dir, &sub_branch_1, "impl-1", 1)
-                .unwrap();
+            commit_and_merge_sub_worktree(&sub_wt_1, &wt_dir, &sub_branch_1, "impl-1", 1).unwrap();
         assert!(matches!(r1, MergeResult::Success));
 
         // Merge second → conflict
         let r2 =
-            commit_and_merge_sub_worktree(repo, &sub_wt_2, &wt_dir, &sub_branch_2, "impl-2", 1)
-                .unwrap();
+            commit_and_merge_sub_worktree(&sub_wt_2, &wt_dir, &sub_branch_2, "impl-2", 1).unwrap();
         assert!(matches!(r2, MergeResult::Conflict(_)));
     }
 
@@ -4454,6 +4590,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn prompt_endpoint_returns_200_for_completed_cm_node_iter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        let run_id = "prompt-cm-survive";
+        let state = test_state_with_dir(repo).await;
+        seed_run_with_node(&state, run_id, "impl-1", "code-mutating").await;
+
+        // Create real worktrees
+        let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
+        let pipeline_branch = format!("maestro/run-{run_id}");
+        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+
+        let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
+        let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
+        create_sub_worktree(repo, &sub_wt_dir, &sub_branch, &pipeline_branch).unwrap();
+
+        // Write prompt file in the sub-worktree (as the daemon does at spawn)
+        let prompt_dir = sub_wt_dir.join(".maestro").join("prompts");
+        std::fs::create_dir_all(&prompt_dir).unwrap();
+        std::fs::write(
+            prompt_dir.join("impl-1-iter-1.md"),
+            "## Inputs\n\n## Outputs\n\nYou are an implementer.\n",
+        )
+        .unwrap();
+
+        // Merge sub-worktree (simulating node completion)
+        std::fs::write(sub_wt_dir.join("foo.rs"), "fn main() {}\n").unwrap();
+        let result =
+            commit_and_merge_sub_worktree(&sub_wt_dir, &wt_dir, &sub_branch, "impl-1", 1).unwrap();
+        assert!(matches!(result, MergeResult::Success));
+
+        // Prompt endpoint must return 200 for the completed iter
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/impl-1/prompt?iter=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "prompt endpoint must return 200 for completed code-mutating node iter"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!text.is_empty(), "prompt body must be non-empty");
+        assert!(text.contains("## Inputs"));
     }
 
     // ---- Layer 2 contract tests: /io endpoint ----

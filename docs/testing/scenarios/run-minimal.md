@@ -143,6 +143,23 @@ While the node is still **running** (before `maestro complete` fires):
    `MAESTRO_RUN_MINIMAL_OK` is present.
 7. Refresh the run view in the UI; the node `only` should now read
    **`completed`**.
+
+### Step 7b — Prompt endpoint accessible after completion (refs #32)
+
+After the node completes (step 7), assert that the prompt endpoint still
+returns the full augmented prompt:
+
+```bash
+curl -sf "http://127.0.0.1:5172/runs/<run_id>/nodes/only/prompt?iter=1"
+```
+
+- HTTP status must be **200**.
+- Response body must be **non-empty** and contain `## Inputs` and `## Outputs`
+  headings from the deterministic preamble.
+
+This verifies that sub-worktrees (for `code-mutating` nodes) and prompt files
+survive node completion — they are only removed by `cleanup_run`.
+
 8. Confirm the artifact file exists:
 
    ```bash
