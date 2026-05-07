@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { trianglePoints } from "./TriangleHandle";
+import { trianglePoints } from "./trianglePoints";
 import type { PortSide } from "../types";
 
 const SIDES: PortSide[] = ["left", "right", "top", "bottom"];

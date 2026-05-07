@@ -1,5 +1,6 @@
 import { Handle, Position } from "@xyflow/react";
 import type { PortSide } from "../types";
+import { trianglePoints } from "./trianglePoints";
 
 const SIDE_TO_POSITION: Record<PortSide, Position> = {
   left: Position.Left,
@@ -7,20 +8,6 @@ const SIDE_TO_POSITION: Record<PortSide, Position> = {
   top: Position.Top,
   bottom: Position.Bottom,
 };
-
-function trianglePoints(kind: "input" | "output", side: PortSide): string {
-  const inward = kind === "input";
-  switch (side) {
-    case "left":
-      return inward ? "2,5 2,11 10,8" : "10,5 10,11 2,8";
-    case "right":
-      return inward ? "10,5 10,11 2,8" : "2,5 2,11 10,8";
-    case "top":
-      return inward ? "5,2 11,2 8,10" : "5,10 11,10 8,2";
-    case "bottom":
-      return inward ? "5,10 11,10 8,2" : "5,2 11,2 8,10";
-  }
-}
 
 interface TriangleHandleProps {
   id: string;
@@ -85,4 +72,3 @@ export default function TriangleHandle({
   );
 }
 
-export { trianglePoints };
