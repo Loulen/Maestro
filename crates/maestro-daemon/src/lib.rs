@@ -741,19 +741,16 @@ async fn delete_pipeline(
         return (StatusCode::NOT_FOUND, "pipeline not found").into_response();
     }
 
-    // Check for active runs referencing this pipeline
     if let Ok(run_ids) = load_all_run_ids(&state.db).await {
         let mut active_count: usize = 0;
         for run_id in &run_ids {
-            if let Ok(events) = load_events(&state.db, run_id).await {
-                if let Some(run_state) = event_log::project(&events) {
-                    if run_state.pipeline_name == pipeline_id
-                        && run_state.status != event_log::RunStatus::Completed
-                        && run_state.status != event_log::RunStatus::Archived
-                    {
-                        active_count += 1;
-                    }
-                }
+            let Ok(events) = load_events(&state.db, run_id).await else { continue };
+            let Some(run_state) = event_log::project(&events) else { continue };
+            if run_state.pipeline_name == pipeline_id
+                && run_state.status != event_log::RunStatus::Completed
+                && run_state.status != event_log::RunStatus::Archived
+            {
+                active_count += 1;
             }
         }
         if active_count > 0 {
@@ -767,7 +764,6 @@ async fn delete_pipeline(
         }
     }
 
-    // Remove the prompts directory
     let prompts_dir = path.with_extension("prompts");
     if prompts_dir.is_dir() {
         if let Err(e) = std::fs::remove_dir_all(&prompts_dir) {
@@ -775,7 +771,6 @@ async fn delete_pipeline(
         }
     }
 
-    // Remove the YAML file
     if let Err(e) = std::fs::remove_file(&path) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
