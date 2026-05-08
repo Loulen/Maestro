@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { fetchLibrary, saveToLibrary, deleteFromLibrary } from "../api";
+import { fetchLibrary } from "../api";
 import type { LibraryEntry } from "../api";
-import type { NodeDef, NodeType, PortDef } from "../types";
+import type { NodeDef, PortDef } from "../types";
 
 export type LibrarySyncState = "outline" | "synced" | "diverged";
 
@@ -59,7 +59,7 @@ export function computeSyncState(
   if (!entry) return "outline";
 
   if (
-    entry.type === (node.type as NodeType) &&
+    entry.type === node.type &&
     entry.interactive === node.interactive &&
     entry.prompt === prompt &&
     portsMatch(node.inputs, entry.inputs) &&
@@ -81,26 +81,3 @@ export function useLibraryState(
   }, [node, prompt, entries]);
 }
 
-export function useSaveToLibrary(
-  pipelineId: string | null,
-  onDone: () => void,
-) {
-  return useCallback(
-    async (nodeId: string) => {
-      if (!pipelineId) return;
-      await saveToLibrary(nodeId, pipelineId);
-      onDone();
-    },
-    [pipelineId, onDone],
-  );
-}
-
-export function useDeleteFromLibrary(onDone: () => void) {
-  return useCallback(
-    async (name: string) => {
-      await deleteFromLibrary(name);
-      onDone();
-    },
-    [onDone],
-  );
-}

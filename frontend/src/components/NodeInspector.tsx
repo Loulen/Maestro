@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Star } from "lucide-react";
 import { useEditStore } from "../stores/editStore";
 import type { NodeDef, NodeType, PortDef, PortSide } from "../types";
@@ -292,16 +292,16 @@ function StarButton({
   const [popoverOpen, setPopoverOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
 
-  const handleClickOutside = useCallback((e: MouseEvent) => {
-    if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-      setPopoverOpen(false);
-    }
-  }, []);
-
   useEffect(() => {
+    if (!popoverOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setPopoverOpen(false);
+      }
+    }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [handleClickOutside]);
+  }, [popoverOpen]);
 
   async function handleStarClick() {
     if (syncState === "outline") {
