@@ -452,7 +452,31 @@ function deriveEdges(run: RunState): Edge[] {
     };
   });
 
-  return [...startEdges, ...pipelineEdges];
+  const mergeResolverEdges: Edge[] = [];
+  if (run.merge_resolver) {
+    mergeResolverEdges.push({
+      id: "e-merge-resolver",
+      source: run.merge_resolver.conflicting_node_id,
+      target: "__merge_resolver__",
+      sourceHandle: null as string | null,
+      targetHandle: null as string | null,
+      type: "default",
+      animated: run.merge_resolver.status === "running",
+      style: {
+        stroke: "var(--color-st-blocked, #f97316)",
+        strokeWidth: 1.5,
+        strokeDasharray: "6 3",
+      },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color: "var(--color-st-blocked, #f97316)",
+        width: 16,
+        height: 16,
+      },
+    });
+  }
+
+  return [...startEdges, ...pipelineEdges, ...mergeResolverEdges];
 }
 
 function DagCanvasInner({

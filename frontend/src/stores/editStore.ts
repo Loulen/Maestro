@@ -52,7 +52,7 @@ interface EditState {
   deleteEdge: (index: number) => void;
 
   // Pipeline-level mutations
-  updatePipelineMeta: (updates: Partial<Pick<PipelineDef, "name" | "version" | "variables">>) => void;
+  updatePipelineMeta: (updates: Partial<Pick<PipelineDef, "name" | "version" | "variables" | "auto_merge_resolver">>) => void;
 
   // Prompt mutations
   updatePrompt: (nodeId: string, content: string) => void;
@@ -370,6 +370,7 @@ export const useEditStore = create<EditState>((set, get) => ({
       if (updates.name !== undefined) tab.pipeline.name = updates.name;
       if (updates.version !== undefined) tab.pipeline.version = updates.version;
       if (updates.variables !== undefined) tab.pipeline.variables = updates.variables;
+      if (updates.auto_merge_resolver !== undefined) tab.pipeline.auto_merge_resolver = updates.auto_merge_resolver;
     }));
   },
 
