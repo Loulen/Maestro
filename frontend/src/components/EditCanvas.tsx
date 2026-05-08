@@ -16,7 +16,6 @@ import { Plus } from "lucide-react";
 import type { NodeDef, NodeType, PipelineDef, PortBrief } from "../types";
 import { useEditStore } from "../stores/editStore";
 import { generateNodeId } from "../lib/nanoid";
-import { formatWhenClause } from "../predicates";
 import { TYPE_LABELS, TYPE_COLORS } from "../nodeStyles";
 import TriangleHandle from "./TriangleHandle";
 
@@ -114,12 +113,7 @@ function deriveEditEdges(pipeline: PipelineDef): Edge[] {
 
   return pipeline.edges.map((e, i) => {
     const isEndEdge = endNodeId != null && e.target.node === endNodeId;
-    const isConditional = e.when != null;
-    const isDashed = isEndEdge || isConditional;
-
-    const condLabel = isConditional
-      ? formatWhenClause(e.when as Record<string, unknown>)
-      : undefined;
+    const isDashed = isEndEdge;
 
     const strokeColor = isDashed
       ? "var(--color-st-blocked, #f97316)"
@@ -146,20 +140,6 @@ function deriveEditEdges(pipeline: PipelineDef): Edge[] {
         width: 16,
         height: 16,
       },
-      label: condLabel,
-      labelStyle: {
-        fill: isDashed
-          ? "var(--color-st-blocked, #fdba74)"
-          : "var(--color-fg-4)",
-        fontSize: 10,
-      },
-      labelBgStyle: {
-        fill: isDashed
-          ? "rgba(249,115,22,0.10)"
-          : "var(--color-bg-2)",
-        fillOpacity: 0.9,
-      },
-      labelBgPadding: [4, 2] as [number, number],
     };
   });
 }

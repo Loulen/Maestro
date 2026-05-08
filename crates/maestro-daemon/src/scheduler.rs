@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::condition::{self, EvalContext};
+use crate::condition;
 use crate::event_log::{NodeStatus, RunState};
 use crate::pipeline::{NodeType, PipelineDef};
 
@@ -21,10 +21,10 @@ pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> 
             continue;
         }
 
-        let unconditional_upstream: HashSet<&str> = pipeline
+        let upstream: HashSet<&str> = pipeline
             .edges
             .iter()
-            .filter(|e| e.target.node == node.id && e.when.is_none())
+            .filter(|e| e.target.node == node.id)
             .map(|e| e.source.node.as_str())
             .filter(|src| {
                 !pipeline
@@ -34,10 +34,10 @@ pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> 
             })
             .collect();
 
-        if unconditional_upstream.is_empty() {
+        if upstream.is_empty() {
             ready.push(node.id.clone());
         } else {
-            let all_completed = unconditional_upstream.iter().all(|src| {
+            let all_completed = upstream.iter().all(|src| {
                 run_state
                     .nodes
                     .get(*src)
@@ -88,21 +88,8 @@ pub fn evaluate_outgoing_edges_with_context(
         .find(|n| n.node_type == NodeType::End)
         .map(|n| n.id.as_str());
 
-    let ctx = EvalContext::new(source_iter)
-        .with_variables(resolved_vars.clone())
-        .with_fields(frontmatter_fields.clone());
-
     for edge in &pipeline.edges {
         if edge.source.node != completed_node_id {
-            continue;
-        }
-
-        let fires = match &edge.when {
-            None => true,
-            Some(when) => condition::evaluate_with_iter(when, &ctx),
-        };
-
-        if !fires {
             continue;
         }
 
@@ -121,15 +108,10 @@ pub fn evaluate_outgoing_edges_with_context(
             );
             actions.push(SchedulerAction::Halt { message: rendered });
         } else {
-            let target_all_unconditional_upstream_completed =
-                check_all_unconditional_upstream_completed(
-                    pipeline,
-                    run_state,
-                    target_id,
-                    completed_node_id,
-                );
+            let all_upstream_done =
+                check_all_upstream_completed(pipeline, run_state, target_id, completed_node_id);
 
-            if target_all_unconditional_upstream_completed {
+            if all_upstream_done {
                 let next_iter = run_state
                     .nodes
                     .get(target_id.as_str())
@@ -147,20 +129,20 @@ pub fn evaluate_outgoing_edges_with_context(
     actions
 }
 
-fn check_all_unconditional_upstream_completed(
+fn check_all_upstream_completed(
     pipeline: &PipelineDef,
     run_state: &RunState,
     target_node_id: &str,
     just_completed_node_id: &str,
 ) -> bool {
-    let unconditional_upstream: HashSet<&str> = pipeline
+    let upstream: HashSet<&str> = pipeline
         .edges
         .iter()
-        .filter(|e| e.target.node == target_node_id && e.when.is_none())
+        .filter(|e| e.target.node == target_node_id)
         .map(|e| e.source.node.as_str())
         .collect();
 
-    unconditional_upstream.iter().all(|src| {
+    upstream.iter().all(|src| {
         if *src == just_completed_node_id {
             return true;
         }
@@ -191,6 +173,7 @@ mod tests {
                     repeated: false,
                     side: None,
                     frontmatter: None,
+                    when: None,
                 })
                 .collect(),
             outputs: outputs
@@ -200,10 +183,12 @@ mod tests {
                     repeated: false,
                     side: None,
                     frontmatter: None,
+                    when: None,
                 })
                 .collect(),
             interactive: false,
             view: None,
+            max_iter: None,
         }
     }
 
@@ -217,10 +202,12 @@ mod tests {
                 repeated: false,
                 side: None,
                 frontmatter: None,
+                when: None,
             }],
             outputs: vec![],
             interactive: false,
             view: None,
+            max_iter: None,
         }
     }
 
@@ -234,38 +221,11 @@ mod tests {
                 node: tgt_node.into(),
                 port: tgt_port.into(),
             },
-            when: None,
             reason: None,
         }
     }
 
-    fn make_conditional_edge(
-        src_node: &str,
-        src_port: &str,
-        tgt_node: &str,
-        tgt_port: &str,
-        when: serde_yaml::Value,
-    ) -> EdgeDef {
-        EdgeDef {
-            source: EdgeEndpoint {
-                node: src_node.into(),
-                port: src_port.into(),
-            },
-            target: EdgeEndpoint {
-                node: tgt_node.into(),
-                port: tgt_port.into(),
-            },
-            when: Some(when),
-            reason: None,
-        }
-    }
-
-    fn make_end_edge(
-        src_node: &str,
-        src_port: &str,
-        reason: &str,
-        when: serde_yaml::Value,
-    ) -> EdgeDef {
+    fn make_end_edge(src_node: &str, src_port: &str, reason: &str) -> EdgeDef {
         EdgeDef {
             source: EdgeEndpoint {
                 node: src_node.into(),
@@ -275,7 +235,6 @@ mod tests {
                 node: "end".into(),
                 port: "result".into(),
             },
-            when: Some(when),
             reason: Some(reason.into()),
         }
     }
@@ -320,11 +279,7 @@ mod tests {
         }
     }
 
-    fn yaml(s: &str) -> serde_yaml::Value {
-        serde_yaml::from_str(s).unwrap()
-    }
-
-    // --- ready_nodes (existing) ---
+    // --- ready_nodes ---
 
     #[test]
     fn linear_chain_first_node_ready() {
@@ -538,71 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn conditional_edge_fires_when_true() {
-        // reviewer → implementer when iter < 3
-        let pipeline = PipelineDef {
-            name: "cycle".into(),
-            version: None,
-            variables: HashMap::new(),
-            nodes: vec![
-                make_node("implementer", &["review"], &["code"]),
-                make_node("reviewer", &["code"], &["review"]),
-            ],
-            edges: vec![make_conditional_edge(
-                "reviewer",
-                "review",
-                "implementer",
-                "review",
-                yaml("iter: { lt: 3 }"),
-            )],
-            auto_merge_resolver: true,
-        };
-
-        let mut state = empty_run_state();
-        state
-            .nodes
-            .insert("reviewer".into(), completed_node_iter("reviewer", 1));
-
-        let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
-        assert_eq!(
-            actions,
-            vec![SchedulerAction::Spawn {
-                node_id: "implementer".into(),
-                iter: 1,
-            }]
-        );
-    }
-
-    #[test]
-    fn conditional_edge_does_not_fire_when_false() {
-        let pipeline = PipelineDef {
-            name: "cycle".into(),
-            version: None,
-            variables: HashMap::new(),
-            nodes: vec![
-                make_node("implementer", &["review"], &["code"]),
-                make_node("reviewer", &["code"], &["review"]),
-            ],
-            edges: vec![make_conditional_edge(
-                "reviewer",
-                "review",
-                "implementer",
-                "review",
-                yaml("iter: { lt: 3 }"),
-            )],
-            auto_merge_resolver: true,
-        };
-
-        let mut state = empty_run_state();
-        state
-            .nodes
-            .insert("reviewer".into(), completed_node_iter("reviewer", 3));
-
-        let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
-        assert!(actions.is_empty());
-    }
-
-    #[test]
     fn end_edge_produces_halt_action() {
         let pipeline = PipelineDef {
             name: "halt-test".into(),
@@ -616,7 +506,6 @@ mod tests {
                 "reviewer",
                 "review",
                 "Blocked after {iter} iterations on {node-id}",
-                yaml("iter: { gte: 3 }"),
             )],
             auto_merge_resolver: true,
         };
@@ -636,37 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn end_edge_does_not_fire_when_condition_false() {
-        let pipeline = PipelineDef {
-            name: "halt-test".into(),
-            version: None,
-            variables: HashMap::new(),
-            nodes: vec![
-                make_node("reviewer", &["code"], &["review"]),
-                make_end_node(),
-            ],
-            edges: vec![make_end_edge(
-                "reviewer",
-                "review",
-                "Blocked",
-                yaml("iter: { gte: 3 }"),
-            )],
-            auto_merge_resolver: true,
-        };
-
-        let mut state = empty_run_state();
-        state
-            .nodes
-            .insert("reviewer".into(), completed_node_iter("reviewer", 1));
-
-        let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
-        assert!(actions.is_empty());
-    }
-
-    #[test]
-    fn cycle_back_edge_increments_iter() {
-        // reviewer completes at iter 2 → back-edge fires →
-        // implementer already at iter 2, so next spawn is iter 3
+    fn back_edge_increments_iter() {
         let pipeline = PipelineDef {
             name: "cycle".into(),
             version: None,
@@ -675,13 +534,7 @@ mod tests {
                 make_node("implementer", &["review"], &["code"]),
                 make_node("reviewer", &["code"], &["review"]),
             ],
-            edges: vec![make_conditional_edge(
-                "reviewer",
-                "review",
-                "implementer",
-                "review",
-                yaml("iter: { lt: 5 }"),
-            )],
+            edges: vec![make_edge("reviewer", "review", "implementer", "review")],
             auto_merge_resolver: true,
         };
 
@@ -737,106 +590,30 @@ mod tests {
     }
 
     #[test]
-    fn two_node_cycle_with_end_edge_full_scenario() {
-        // implementer → reviewer (unconditional)
-        // reviewer → implementer (when iter < 3)  — back-edge
-        // reviewer → end (when iter >= 3, reason)
+    fn end_edge_always_fires() {
         let pipeline = PipelineDef {
-            name: "review-loop".into(),
+            name: "halt-test".into(),
             version: None,
             variables: HashMap::new(),
             nodes: vec![
-                make_node("implementer", &["review"], &["code"]),
                 make_node("reviewer", &["code"], &["review"]),
                 make_end_node(),
             ],
-            edges: vec![
-                make_edge("implementer", "code", "reviewer", "code"),
-                make_conditional_edge(
-                    "reviewer",
-                    "review",
-                    "implementer",
-                    "review",
-                    yaml("iter: { lt: 3 }"),
-                ),
-                make_end_edge(
-                    "reviewer",
-                    "review",
-                    "Halted after {iter} iterations",
-                    yaml("iter: { gte: 3 }"),
-                ),
-            ],
+            edges: vec![make_end_edge("reviewer", "review", "Run halted")],
             auto_merge_resolver: true,
         };
 
-        // Iter 1: reviewer done → back-edge fires, halt doesn't
         let mut state = empty_run_state();
         state
             .nodes
-            .insert("reviewer".into(), completed_node_iter("reviewer", 1));
+            .insert("reviewer".into(), completed_node("reviewer"));
 
         let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
-        assert_eq!(actions.len(), 1);
-        assert!(
-            matches!(&actions[0], SchedulerAction::Spawn { node_id, iter: 1 } if node_id == "implementer")
-        );
-
-        // Iter 2: reviewer done → back-edge fires, halt doesn't
-        state
-            .nodes
-            .insert("reviewer".into(), completed_node_iter("reviewer", 2));
-        state
-            .nodes
-            .insert("implementer".into(), completed_node_iter("implementer", 1));
-
-        let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
-        assert_eq!(actions.len(), 1);
-        assert!(
-            matches!(&actions[0], SchedulerAction::Spawn { node_id, .. } if node_id == "implementer")
-        );
-
-        // Iter 3: reviewer done → back-edge doesn't fire, halt fires
-        state
-            .nodes
-            .insert("reviewer".into(), completed_node_iter("reviewer", 3));
-
-        let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
-        assert_eq!(actions.len(), 1);
         assert_eq!(
-            actions[0],
-            SchedulerAction::Halt {
-                message: "Halted after 3 iterations".into(),
-            }
+            actions,
+            vec![SchedulerAction::Halt {
+                message: "Run halted".into(),
+            }]
         );
-    }
-
-    #[test]
-    fn entry_node_with_conditional_back_edge_is_initially_ready() {
-        let pipeline = PipelineDef {
-            name: "cycle".into(),
-            version: None,
-            variables: HashMap::new(),
-            nodes: vec![
-                make_node("implementer", &["review"], &["code"]),
-                make_node("reviewer", &["code"], &["review"]),
-            ],
-            edges: vec![
-                make_edge("implementer", "code", "reviewer", "code"),
-                make_conditional_edge(
-                    "reviewer",
-                    "review",
-                    "implementer",
-                    "review",
-                    yaml("iter: { lt: 3 }"),
-                ),
-            ],
-            auto_merge_resolver: true,
-        };
-
-        // Conditional back-edges don't count as upstream dependencies,
-        // so implementer is an entry node despite having an incoming conditional edge.
-        let state = empty_run_state();
-        let ready = ready_nodes(&pipeline, &state);
-        assert_eq!(ready, vec!["implementer"]);
     }
 }
