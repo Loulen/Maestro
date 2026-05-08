@@ -3,6 +3,7 @@ import { Pencil } from "lucide-react";
 import { useDaemonSocket } from "./hooks/useDaemonSocket";
 import type { ConnectionStatus } from "./hooks/useDaemonSocket";
 import { useResizableLayout } from "./hooks/useResizableLayout";
+import { useLibrary } from "./hooks/useLibrary";
 import { fetchRuns, fetchRun } from "./api";
 import type { RunListEntry, RunState, EditScope } from "./types";
 import RunsListPanel from "./components/RunsListPanel";
@@ -17,6 +18,7 @@ import EdgeInspector from "./components/EdgeInspector";
 import PipelineInspector from "./components/PipelineInspector";
 import StartInspector from "./components/StartInspector";
 import EndInspector from "./components/EndInspector";
+import LibraryDropdown from "./components/LibraryDropdown";
 import { useEditStore } from "./stores/editStore";
 import {
   ResizablePanelGroup,
@@ -77,6 +79,7 @@ function useSelectedRun() {
 
 export default function App() {
   const { status, subscribe } = useDaemonSocket();
+  const { entries: libraryEntries, refresh: refreshLibrary } = useLibrary();
   const { runs, refresh: refreshRuns } = useRuns();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const { run: selectedRun, select: selectRun, refresh: refreshRun } = useSelectedRun();
@@ -183,10 +186,19 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-bg-1 text-fg">
-      <TopBar editMode={editMode} onToggleEditMode={() => {
-        if (editScope === "run") exitRunEdit();
-        setEditMode(!editMode);
-      }} />
+      <TopBar
+        editMode={editMode}
+        onToggleEditMode={() => {
+          if (editScope === "run") exitRunEdit();
+          setEditMode(!editMode);
+        }}
+        libraryEntries={libraryEntries}
+        onLibraryDelete={async (name) => {
+          const { deleteFromLibrary: delLib } = await import("./api");
+          await delLib(name);
+          refreshLibrary();
+        }}
+      />
       <main className="min-h-0 flex-1">
         <ResizablePanelGroup
           orientation="horizontal"
@@ -232,7 +244,12 @@ export default function App() {
           <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
             {editMode || editScope === "run" ? (
               <>
-                {selection.kind === "node" && <NodeInspector />}
+                {selection.kind === "node" && (
+                  <NodeInspector
+                    libraryEntries={libraryEntries}
+                    onLibraryChanged={refreshLibrary}
+                  />
+                )}
                 {selection.kind === "edge" && <EdgeInspector />}
                 {selection.kind === "none" && editScope === "run" && selectedRun && (
                   <RunEditSidebar
@@ -290,9 +307,13 @@ export default function App() {
 function TopBar({
   editMode,
   onToggleEditMode,
+  libraryEntries,
+  onLibraryDelete,
 }: {
   editMode: boolean;
   onToggleEditMode: () => void;
+  libraryEntries: import("./api").LibraryEntry[];
+  onLibraryDelete: (name: string) => void;
 }) {
   return (
     <header
@@ -330,6 +351,12 @@ function TopBar({
       </nav>
 
       <div className="ml-auto flex items-center gap-1">
+        {editMode && (
+          <LibraryDropdown
+            entries={libraryEntries}
+            onDelete={onLibraryDelete}
+          />
+        )}
         <button
           onClick={onToggleEditMode}
           className={`grid h-7 w-7 place-items-center rounded-md border transition-colors ${

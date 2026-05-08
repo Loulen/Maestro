@@ -28,7 +28,7 @@ pub enum NodeType {
     Loop,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrontmatterFieldDecl {
     #[serde(rename = "type")]
     pub field_type: String,
@@ -56,7 +56,7 @@ impl std::fmt::Display for PortSide {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Port {
     pub name: String,
     #[serde(default)]

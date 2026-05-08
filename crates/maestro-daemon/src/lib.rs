@@ -3,6 +3,7 @@ mod blackboard;
 mod condition;
 mod event_log;
 mod frontmatter_parser;
+pub mod library_store;
 mod node_io_resolver;
 mod outputs_validator;
 mod pipeline;
@@ -367,6 +368,16 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/commands", post(run_command))
         .route("/sessions/{session_id}/attach", post(session_attach))
         .route("/sessions/{run_id}/manager/attach", post(manager_attach))
+        .route("/library", get(list_library))
+        .route("/library", post(save_to_library))
+        .route(
+            "/library/{name}",
+            axum::routing::delete(delete_from_library),
+        )
+        .route(
+            "/library/{name}/instantiate",
+            post(instantiate_from_library),
+        )
         .fallback(static_handler)
         .with_state(state)
 }
@@ -732,6 +743,95 @@ async fn create_pipeline(
         })),
     )
         .into_response()
+}
+
+// --- Library API handlers ---
+
+async fn list_library() -> Response {
+    Json(library_store::list()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SaveToLibraryRequest {
+    source_node_id: String,
+    pipeline_id: String,
+}
+
+async fn save_to_library(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveToLibraryRequest>,
+) -> Response {
+    let path = resolve_pipeline_path(&state.repo_root, &req.pipeline_id);
+    let yaml = match std::fs::read_to_string(&path) {
+        Ok(y) => y,
+        Err(_) => return (StatusCode::NOT_FOUND, "pipeline not found").into_response(),
+    };
+    let parsed = match pipeline::parse_pipeline(&yaml) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("parse error: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let node = match parsed
+        .pipeline
+        .nodes
+        .iter()
+        .find(|n| n.id == req.source_node_id)
+    {
+        Some(n) => n,
+        None => return (StatusCode::NOT_FOUND, "node not found in pipeline").into_response(),
+    };
+
+    let prompt = std::fs::read_to_string(pipeline::canonical_prompt_path(&path, &node.id))
+        .unwrap_or_default();
+
+    let entry = library_store::entry_from_node(node, &prompt);
+    if let Err(e) = library_store::save(&entry) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
+    (StatusCode::CREATED, Json(&entry)).into_response()
+}
+
+async fn delete_from_library(AxumPath(name): AxumPath<String>) -> Response {
+    match library_store::delete(&name) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "entry not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+async fn instantiate_from_library(AxumPath(name): AxumPath<String>) -> Response {
+    match library_store::get(&name) {
+        Some(entry) => {
+            let prompt = entry.prompt.clone();
+            Json(serde_json::json!({
+                "spec": {
+                    "name": entry.name,
+                    "type": entry.node_type,
+                    "inputs": entry.inputs,
+                    "outputs": entry.outputs,
+                    "interactive": entry.interactive,
+                },
+                "prompt": prompt,
+            }))
+            .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "entry not found").into_response(),
+    }
 }
 
 // --- API handlers ---
@@ -6703,5 +6803,194 @@ mod tests {
             content.contains("<<<<<<<"),
             "conflict markers should remain in the file"
         );
+    }
+
+    // --- Library HTTP integration tests ---
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn library_full_flow() {
+        use std::sync::Mutex as StdMutex;
+        static LIB_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+        let _guard = LIB_TEST_LOCK.lock().unwrap();
+
+        let tmp = std::env::temp_dir().join(format!("maestro-lib-http-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+
+        // Set up repo with a pipeline that has a named node
+        let repo = tmp.join("repo");
+        let pipe_dir = repo.join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        let yaml = r#"name: test-pipe
+nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+  - id: n1
+    name: Reviewer
+    type: doc-only
+    inputs:
+      - name: code
+    outputs:
+      - name: review
+edges: []
+"#;
+        std::fs::write(pipe_dir.join("test-pipe.yaml"), yaml).unwrap();
+        let prompts_dir = pipe_dir.join("test-pipe.prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("n1.md"), "You are a reviewer.").unwrap();
+
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_db(&db).await.unwrap();
+        let (event_tx, _) = broadcast::channel(64);
+        let (pipeline_tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            db,
+            event_tx,
+            pipeline_tx,
+            repo_root: repo.clone(),
+            port: 0,
+            merge_lock: tokio::sync::Mutex::new(()),
+            recent_writes: Arc::new(Mutex::new(HashMap::new())),
+        });
+        let app = build_router(state);
+
+        // GET /library — empty initially
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/library")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.as_array().unwrap().len(), 0);
+
+        // POST /library — save node from pipeline
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/library")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "source_node_id": "n1",
+                            "pipeline_id": "test-pipe"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let entry: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry["name"], "Reviewer");
+        assert_eq!(entry["prompt"], "You are a reviewer.");
+
+        // GET /library — now has one entry
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/library")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body.as_array().unwrap().len(), 1);
+
+        // POST /library/Reviewer/instantiate
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/library/Reviewer/instantiate")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let inst: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inst["spec"]["name"], "Reviewer");
+        assert_eq!(inst["prompt"], "You are a reviewer.");
+
+        // DELETE /library/Reviewer
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/library/Reviewer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // DELETE again → 404
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/library/Reviewer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Cleanup
+        if let Some(p) = prev_home {
+            std::env::set_var("HOME", p);
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
