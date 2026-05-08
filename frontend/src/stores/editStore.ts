@@ -103,6 +103,7 @@ function serializePipeline(p: PipelineDef): string {
     if (n.view) node.view = n.view;
     return node;
   });
+  if (p.auto_merge_resolver !== undefined) obj.auto_merge_resolver = p.auto_merge_resolver;
   obj.edges = p.edges.map((e) => {
     const edge: Record<string, unknown> = {
       source: e.source,

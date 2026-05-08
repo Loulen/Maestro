@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
       variables: {},
       nodes: [],
       edges: [],
+      auto_merge_resolver: true,
     },
     prompts: {},
   }),
@@ -24,6 +25,7 @@ vi.mock("../api", () => ({
       variables: {},
       nodes: [],
       edges: [],
+      auto_merge_resolver: true,
     },
     prompts: {},
   }),
@@ -37,7 +39,7 @@ function makePipeline(
   nodes: NodeDef[] = [],
   edges: EdgeDef[] = [],
 ): PipelineDef {
-  return { name: "test", version: "1.0", variables: {}, nodes, edges };
+  return { name: "test", version: "1.0", variables: {}, nodes, edges, auto_merge_resolver: true };
 }
 
 function makeNode(overrides: Partial<NodeDef> = {}): NodeDef {
@@ -82,6 +84,7 @@ function seedTab(id = "test-pipeline", dirty = true) {
           variables: {},
           nodes: [],
           edges: [],
+          auto_merge_resolver: true,
         },
         prompts: {},
         dirty,
@@ -219,7 +222,7 @@ describe("editStore.flushPendingSaves", () => {
         {
           id: "a",
           scope: "repo",
-          pipeline: { name: "a", version: "1.0", variables: {}, nodes: [], edges: [] },
+          pipeline: { name: "a", version: "1.0", variables: {}, nodes: [], edges: [], auto_merge_resolver: true },
           prompts: {},
           dirty: true,
           externalDirty: false,
@@ -227,7 +230,7 @@ describe("editStore.flushPendingSaves", () => {
         {
           id: "b",
           scope: "repo",
-          pipeline: { name: "b", version: "1.0", variables: {}, nodes: [], edges: [] },
+          pipeline: { name: "b", version: "1.0", variables: {}, nodes: [], edges: [], auto_merge_resolver: true },
           prompts: {},
           dirty: true,
           externalDirty: false,
@@ -235,7 +238,7 @@ describe("editStore.flushPendingSaves", () => {
         {
           id: "c",
           scope: "repo",
-          pipeline: { name: "c", version: "1.0", variables: {}, nodes: [], edges: [] },
+          pipeline: { name: "c", version: "1.0", variables: {}, nodes: [], edges: [], auto_merge_resolver: true },
           prompts: {},
           dirty: false,
           externalDirty: false,
@@ -265,7 +268,7 @@ describe("editStore.flushPendingSaves", () => {
         {
           id: "dirty-one",
           scope: "repo",
-          pipeline: { name: "d", version: "1.0", variables: {}, nodes: [], edges: [] },
+          pipeline: { name: "d", version: "1.0", variables: {}, nodes: [], edges: [], auto_merge_resolver: true },
           prompts: {},
           dirty: true,
           externalDirty: false,
@@ -273,7 +276,7 @@ describe("editStore.flushPendingSaves", () => {
         {
           id: "clean-one",
           scope: "repo",
-          pipeline: { name: "c", version: "1.0", variables: {}, nodes: [], edges: [] },
+          pipeline: { name: "c", version: "1.0", variables: {}, nodes: [], edges: [], auto_merge_resolver: true },
           prompts: {},
           dirty: false,
           externalDirty: false,

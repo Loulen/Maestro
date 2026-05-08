@@ -191,7 +191,42 @@ function StartNode(_props: NodeProps<Node<StartNodeData>>) {
   );
 }
 
-const nodeTypes = { pipeline: PipelineNode, halt: HaltNode, start: StartNode };
+interface MergeResolverNodeData {
+  status: NodeStatus;
+  conflictingNodeId: string;
+  [key: string]: unknown;
+}
+
+function MergeResolverNode({ data }: NodeProps<Node<MergeResolverNodeData>>) {
+  const dotColor = STATUS_DOTS[data.status];
+  const borderColor = STATUS_COLORS[data.status];
+  return (
+    <div
+      className={`rounded-md border-2 border-dashed ${borderColor} bg-bg-3 px-3 py-2`}
+      style={{ minWidth: 170, fontSize: "12px" }}
+    >
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="!bg-fg-4 !border-line !w-2 !h-2"
+      />
+      <div className="flex items-center gap-2">
+        <span
+          className={`h-2 w-2 shrink-0 rounded-full ${dotColor} ${
+            data.status === "running" ? "animate-pulse" : ""
+          }`}
+        />
+        <span className="font-medium text-fg">Merge Resolver</span>
+      </div>
+      <div className="mt-0.5 flex items-center gap-2 text-fg-4" style={{ fontSize: "10px" }}>
+        <span>{data.status}</span>
+        <span className="font-mono" style={{ fontSize: "9px" }}>conflict: {data.conflictingNodeId}</span>
+      </div>
+    </div>
+  );
+}
+
+const nodeTypes = { pipeline: PipelineNode, halt: HaltNode, start: StartNode, mergeResolver: MergeResolverNode };
 
 const OP_SYMBOLS: Record<string, string> = {
   eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=",
@@ -308,7 +343,25 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
     };
   });
 
-  return [...startNodes, ...nodes, ...haltNodes];
+  const mergeResolverNodes: Node[] = [];
+  if (run.merge_resolver) {
+    const mr = run.merge_resolver;
+    const conflictNode = nodes.find((n) => n.id === mr.conflicting_node_id);
+    const cx = conflictNode?.position?.x ?? 200;
+    const cy = conflictNode?.position?.y ?? 80;
+    mergeResolverNodes.push({
+      id: "__merge_resolver__",
+      type: "mergeResolver",
+      position: { x: cx + 280, y: cy + 60 },
+      data: {
+        status: mr.status,
+        conflictingNodeId: mr.conflicting_node_id,
+      },
+      selected: "__merge_resolver__" === selectedNodeId,
+    });
+  }
+
+  return [...startNodes, ...nodes, ...haltNodes, ...mergeResolverNodes];
 }
 
 function deriveStartEdges(startNode: StartNodeInfo): Edge[] {

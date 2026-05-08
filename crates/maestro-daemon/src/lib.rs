@@ -1747,6 +1747,210 @@ async fn artifact(
     }
 }
 
+async fn spawn_merge_resolver(
+    state: &AppState,
+    run_id: &str,
+    conflicting_node_id: &str,
+    conflicting_iter: i64,
+    worktree_dir: &std::path::Path,
+) -> Response {
+    let prompt = load_merge_resolver_prompt(&state.repo_root);
+    let session_name = tmux_session_manager::node_session_name(run_id, MERGE_RESOLVER_NODE_ID, 1);
+
+    let resolver_started = event_log::Event {
+        id: None,
+        run_id: run_id.to_string(),
+        ts: event_log::now_iso(),
+        kind: event_log::EventKind::MergeResolverStarted,
+        node_id: None,
+        iter: None,
+        payload: Some(serde_json::json!({
+            "conflicting_node_id": conflicting_node_id,
+            "iter": conflicting_iter,
+            "session_name": session_name,
+        })),
+    };
+    let _ = append_event(state, &resolver_started).await;
+
+    if let Err(e) = tmux_session_manager::spawn(
+        &session_name,
+        &prompt,
+        worktree_dir,
+        run_id,
+        MERGE_RESOLVER_NODE_ID,
+        1,
+        state.port,
+    ) {
+        error!("failed to spawn merge resolver tmux session: {e}");
+        let fail_event = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::MergeResolverFailed,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "reason": format!("failed to spawn resolver session: {e}")
+            })),
+        };
+        let _ = append_event(state, &fail_event).await;
+        let run_failed = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunFailed,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "reason": "merge resolver spawn failed"
+            })),
+        };
+        let _ = append_event(state, &run_failed).await;
+    }
+
+    info!("Spawned merge resolver for run {run_id} (conflict on {conflicting_node_id})");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "merge_resolver_spawned" })),
+    )
+        .into_response()
+}
+
+async fn handle_merge_resolver_done(
+    state: &AppState,
+    run_id: &str,
+    worktree_dir: &std::path::Path,
+    pre_run_state: &event_log::RunState,
+) -> Response {
+    let problems = match validate_merge_resolution(worktree_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("merge resolution validation error: {e}");
+            vec![format!("validation error: {e}")]
+        }
+    };
+
+    if !problems.is_empty() {
+        let reason = problems.join("; ");
+        let fail_event = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::MergeResolverFailed,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "reason": reason })),
+        };
+        let _ = append_event(state, &fail_event).await;
+
+        let run_failed = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunFailed,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "reason": format!("merge resolution failed: {reason}")
+            })),
+        };
+        let _ = append_event(state, &run_failed).await;
+
+        warn!("Merge resolver failed for run {run_id}: {reason}");
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "merge_resolution_failed", "reason": reason })),
+        )
+            .into_response();
+    }
+
+    let completed_event = event_log::Event {
+        id: None,
+        run_id: run_id.to_string(),
+        ts: event_log::now_iso(),
+        kind: event_log::EventKind::MergeResolverCompleted,
+        node_id: None,
+        iter: None,
+        payload: None,
+    };
+    let _ = append_event(state, &completed_event).await;
+
+    info!("Merge resolver completed for run {run_id}");
+
+    // Re-evaluate the run: the conflicting node's merge is resolved.
+    // Emit NodeCompleted for the original conflicting node and continue scheduling.
+    if let Some(ref mr) = pre_run_state.merge_resolver {
+        let original_node_id = &mr.conflicting_node_id;
+        let original_iter = mr.iter;
+
+        let node_completed = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::NodeCompleted,
+            node_id: Some(original_node_id.clone()),
+            iter: Some(original_iter),
+            payload: None,
+        };
+        if let Err(e) = append_event(state, &node_completed).await {
+            error!("failed to append node_completed for resolved node: {e}");
+        }
+
+        let events = match load_events(&state.db, run_id).await {
+            Ok(e) => e,
+            Err(e) => {
+                error!("failed to reload events: {e}");
+                return (StatusCode::OK, "ok").into_response();
+            }
+        };
+
+        if let Some(run_state) = event_log::project(&events) {
+            handle_node_completion(state, &run_state, run_id, original_node_id, &events).await;
+        }
+
+        spawn_ready_after_event(state, run_id).await;
+
+        // Check run completion (same logic as node_done)
+        let events = match load_events(&state.db, run_id).await {
+            Ok(e) => e,
+            Err(e) => {
+                error!("failed to reload events: {e}");
+                return (StatusCode::OK, "ok").into_response();
+            }
+        };
+        if let Some(run_state) = event_log::project(&events) {
+            if run_state.status == event_log::RunStatus::Running {
+                let expected_node_ids: Vec<String> = if !run_state.node_defs.is_empty() {
+                    run_state.node_defs.iter().map(|nd| nd.id.clone()).collect()
+                } else {
+                    run_state.nodes.keys().cloned().collect()
+                };
+                let all_done = !expected_node_ids.is_empty()
+                    && expected_node_ids.iter().all(|nid| {
+                        run_state
+                            .nodes
+                            .get(nid)
+                            .is_some_and(|ns| ns.status == event_log::NodeStatus::Completed)
+                    });
+                if all_done {
+                    let run_completed = event_log::Event {
+                        id: None,
+                        run_id: run_id.to_string(),
+                        ts: event_log::now_iso(),
+                        kind: event_log::EventKind::RunCompleted,
+                        node_id: None,
+                        iter: None,
+                        payload: None,
+                    };
+                    let _ = append_event(state, &run_completed).await;
+                }
+            }
+        }
+    }
+
+    (StatusCode::OK, "ok").into_response()
+}
+
 async fn node_done(
     State(state): State<Arc<AppState>>,
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
@@ -1778,21 +1982,44 @@ async fn node_done(
         .join(&run_id)
         .join("worktree");
 
+    if node_id == MERGE_RESOLVER_NODE_ID {
+        return handle_merge_resolver_done(&state, &run_id, &worktree_dir, &pre_run_state).await;
+    }
+
+    let auto_merge_resolver = {
+        let pipeline_path =
+            resolve_run_pipeline_path(&state.repo_root, &run_id, &pre_run_state.pipeline_name);
+        std::fs::read_to_string(&pipeline_path)
+            .ok()
+            .and_then(|yaml| pipeline::parse_pipeline(&yaml).ok())
+            .map(|pr| pr.pipeline.auto_merge_resolver)
+            .unwrap_or(true)
+    };
+
     match find_node_type(&pre_run_state, &node_id) {
         Some("code-mutating") => {
             let sub_wt_dir = sub_worktree_path(&state.repo_root, &run_id, &node_id, iter);
             let sub_branch = sub_worktree_branch(&run_id, &node_id, iter);
 
             let _lock = state.merge_lock.lock().await;
-            match commit_and_merge_sub_worktree(
+            let merge_result = match commit_and_merge_sub_worktree_inner(
                 &sub_wt_dir,
                 &worktree_dir,
                 &sub_branch,
                 &node_id,
                 iter,
+                auto_merge_resolver,
             ) {
-                Ok(MergeResult::Success) => {}
-                Ok(MergeResult::Conflict(detail)) => {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("failed to commit/merge sub-worktree for {node_id}: {e}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            };
+            match merge_result {
+                MergeResult::Success => {}
+                MergeResult::Conflict(detail) => {
                     let conflict_event = event_log::Event {
                         id: None,
                         run_id: run_id.clone(),
@@ -1820,15 +2047,30 @@ async fn node_done(
                     };
                     let _ = append_event(&state, &run_failed).await;
 
-                    warn!("Merge conflict for node {node_id} in run {run_id}");
+                    warn!("Merge conflict for node {node_id} in run {run_id} (auto_merge_resolver disabled)");
                     return (
                         StatusCode::OK,
                         Json(serde_json::json!({ "status": "merge_conflict" })),
                     )
                         .into_response();
                 }
-                Err(e) => {
-                    error!("failed to commit/merge sub-worktree for {node_id}: {e}");
+                MergeResult::ConflictPendingResolution(detail) => {
+                    let conflict_event = event_log::Event {
+                        id: None,
+                        run_id: run_id.clone(),
+                        ts: event_log::now_iso(),
+                        kind: event_log::EventKind::MergeConflictDetected,
+                        node_id: Some(node_id.clone()),
+                        iter: Some(iter),
+                        payload: Some(serde_json::json!({
+                            "reason": format!("conflict merging {node_id} into pipeline branch"),
+                            "detail": detail,
+                        })),
+                    };
+                    let _ = append_event(&state, &conflict_event).await;
+
+                    return spawn_merge_resolver(&state, &run_id, &node_id, iter, &worktree_dir)
+                        .await;
                 }
             }
         }
@@ -3227,14 +3469,34 @@ fn create_sub_worktree(
 enum MergeResult {
     Success,
     Conflict(String),
+    ConflictPendingResolution(String),
 }
 
+#[cfg(test)]
 fn commit_and_merge_sub_worktree(
     sub_worktree_dir: &std::path::Path,
     pipeline_worktree_dir: &std::path::Path,
     sub_branch: &str,
     node_id: &str,
     iter: i64,
+) -> Result<MergeResult> {
+    commit_and_merge_sub_worktree_inner(
+        sub_worktree_dir,
+        pipeline_worktree_dir,
+        sub_branch,
+        node_id,
+        iter,
+        false,
+    )
+}
+
+fn commit_and_merge_sub_worktree_inner(
+    sub_worktree_dir: &std::path::Path,
+    pipeline_worktree_dir: &std::path::Path,
+    sub_branch: &str,
+    node_id: &str,
+    iter: i64,
+    keep_conflict: bool,
 ) -> Result<MergeResult> {
     let _ = std::process::Command::new("git")
         .args(["add", "-A"])
@@ -3270,6 +3532,9 @@ fn commit_and_merge_sub_worktree(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if keep_conflict {
+            return Ok(MergeResult::ConflictPendingResolution(stderr.to_string()));
+        }
         let _ = std::process::Command::new("git")
             .args(["merge", "--abort"])
             .current_dir(pipeline_worktree_dir)
@@ -3294,6 +3559,43 @@ fn worktree_has_tracked_changes(worktree_dir: &std::path::Path) -> Result<bool> 
 
     let status = String::from_utf8_lossy(&output.stdout);
     Ok(status.lines().any(|line| !line.starts_with("??")))
+}
+
+/// Check that no conflict markers remain in any tracked file.
+fn has_conflict_markers(worktree_dir: &std::path::Path) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["grep", "-rlE", "^<{7} |^={7}$|^>{7} "])
+        .current_dir(worktree_dir)
+        .output()
+        .context("git grep failed")?;
+
+    Ok(output.status.success() && !output.stdout.is_empty())
+}
+
+/// Validate merge resolution: no conflict markers, clean working tree.
+fn validate_merge_resolution(worktree_dir: &std::path::Path) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
+
+    if has_conflict_markers(worktree_dir)? {
+        problems.push("conflict markers remain in tracked files".to_string());
+    }
+
+    if worktree_has_tracked_changes(worktree_dir)? {
+        problems.push("working tree is not clean (uncommitted changes)".to_string());
+    }
+
+    Ok(problems)
+}
+
+const MERGE_RESOLVER_NODE_ID: &str = "__merge_resolver__";
+
+const FALLBACK_MERGE_RESOLVER_PROMPT: &str = "\
+You are the Merge Resolver. A git merge conflict occurred. \
+Resolve all conflicts, remove all conflict markers, and commit the merge.";
+
+fn load_merge_resolver_prompt(repo_root: &std::path::Path) -> String {
+    let path = repo_root.join("prompts/builtin/merge-resolver.md");
+    std::fs::read_to_string(&path).unwrap_or_else(|_| FALLBACK_MERGE_RESOLVER_PROMPT.to_string())
 }
 
 fn create_worktree(
@@ -6156,6 +6458,7 @@ edges:
                 }),
                 when: Some(serde_yaml::from_str("iter: { lt: \"$max_iter_review\" }").unwrap()),
             }],
+            auto_merge_resolver: true,
         };
 
         let refs = extract_variable_refs_from_outgoing_edges(&pipeline, "reviewer");
@@ -6182,9 +6485,133 @@ edges:
                 }),
                 when: Some(serde_yaml::from_str("iter: { lt: 3 }").unwrap()),
             }],
+            auto_merge_resolver: true,
         };
 
         let refs = extract_variable_refs_from_outgoing_edges(&pipeline, "a");
         assert!(refs.is_empty());
+    }
+
+    // --- Merge resolver tests (issue #8) ---
+
+    #[test]
+    fn validate_merge_resolution_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        let problems = validate_merge_resolution(repo).unwrap();
+        assert!(
+            problems.is_empty(),
+            "clean repo should pass validation, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_merge_resolution_detects_conflict_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        std::fs::write(
+            repo.join("conflict.txt"),
+            "before\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\nafter\n",
+        )
+        .unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "conflict.txt"])
+            .current_dir(repo)
+            .output();
+
+        let problems = validate_merge_resolution(repo).unwrap();
+        assert!(
+            problems.iter().any(|p| p.contains("conflict markers")),
+            "should detect conflict markers, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_merge_resolution_detects_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        std::fs::write(repo.join("README.md"), "# modified\n").unwrap();
+
+        let problems = validate_merge_resolution(repo).unwrap();
+        assert!(
+            problems.iter().any(|p| p.contains("not clean")),
+            "should detect dirty worktree, got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_merge_resolver_prompt_loads_from_file() {
+        let prompt = load_merge_resolver_prompt(std::path::Path::new("."));
+        assert!(
+            prompt.contains("Merge Resolver"),
+            "prompt should contain 'Merge Resolver', got first 100 chars: {}",
+            &prompt[..prompt.len().min(100)]
+        );
+    }
+
+    #[test]
+    fn builtin_merge_resolver_prompt_falls_back_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prompt = load_merge_resolver_prompt(tmp.path());
+        assert_eq!(prompt, FALLBACK_MERGE_RESOLVER_PROMPT);
+    }
+
+    #[test]
+    fn merge_resolver_node_id_is_dunder() {
+        assert_eq!(MERGE_RESOLVER_NODE_ID, "__merge_resolver__");
+    }
+
+    #[test]
+    fn conflict_pending_resolution_keeps_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        let run_id = "test-pending";
+        let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
+        let pipeline_branch = format!("maestro/run-{run_id}");
+        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+
+        let sub_wt_1 = sub_worktree_path(repo, run_id, "impl-1", 1);
+        let sub_branch_1 = sub_worktree_branch(run_id, "impl-1", 1);
+        create_sub_worktree(repo, &sub_wt_1, &sub_branch_1, &pipeline_branch).unwrap();
+
+        let sub_wt_2 = sub_worktree_path(repo, run_id, "impl-2", 1);
+        let sub_branch_2 = sub_worktree_branch(run_id, "impl-2", 1);
+        create_sub_worktree(repo, &sub_wt_2, &sub_branch_2, &pipeline_branch).unwrap();
+
+        std::fs::write(sub_wt_1.join("shared.txt"), "from impl-1\n").unwrap();
+        std::fs::write(sub_wt_2.join("shared.txt"), "from impl-2\n").unwrap();
+
+        let r1 =
+            commit_and_merge_sub_worktree(&sub_wt_1, &wt_dir, &sub_branch_1, "impl-1", 1).unwrap();
+        assert!(matches!(r1, MergeResult::Success));
+
+        let r2 = commit_and_merge_sub_worktree_inner(
+            &sub_wt_2,
+            &wt_dir,
+            &sub_branch_2,
+            "impl-2",
+            1,
+            true,
+        )
+        .unwrap();
+        assert!(
+            matches!(r2, MergeResult::ConflictPendingResolution(_)),
+            "expected ConflictPendingResolution"
+        );
+
+        // Conflict markers should remain in worktree (merge NOT aborted)
+        let content = std::fs::read_to_string(wt_dir.join("shared.txt")).unwrap();
+        assert!(
+            content.contains("<<<<<<<"),
+            "conflict markers should remain in the file"
+        );
     }
 }

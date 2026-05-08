@@ -56,6 +56,16 @@ export interface StartNodeInfo {
   target_node_ids: string[];
 }
 
+export interface MergeResolverInfo {
+  status: NodeStatus;
+  conflicting_node_id: string;
+  iter: number;
+  session_name: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  failure_reason: string | null;
+}
+
 export interface RunState {
   run_id: string;
   status: RunStatus;
@@ -67,6 +77,7 @@ export interface RunState {
   edges: EdgeInfo[];
   node_defs: NodeDefInfo[];
   start_node: StartNodeInfo | null;
+  merge_resolver: MergeResolverInfo | null;
 }
 
 export interface DaemonEvent {
@@ -162,6 +173,7 @@ export interface PipelineDef {
   variables: Record<string, VariableDef>;
   nodes: NodeDef[];
   edges: EdgeDef[];
+  auto_merge_resolver?: boolean;
 }
 
 export interface PipelineDetail {

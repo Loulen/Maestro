@@ -315,6 +315,7 @@ mod tests {
                 make_edge("planner", "plan", "implementer", "plan"),
                 make_edge("implementer", "summary", "reviewer", "summary"),
             ],
+            auto_merge_resolver: true,
         };
 
         let state = empty_run_state();
@@ -337,6 +338,7 @@ mod tests {
                 make_edge("planner", "plan", "implementer", "plan"),
                 make_edge("implementer", "summary", "reviewer", "summary"),
             ],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -358,6 +360,7 @@ mod tests {
                 make_node("implementer", &["plan"], &["summary"]),
             ],
             edges: vec![make_edge("planner", "plan", "implementer", "plan")],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -383,6 +386,7 @@ mod tests {
                 make_edge("planner", "plan", "impl-a", "plan"),
                 make_edge("planner", "plan", "impl-b", "plan"),
             ],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -409,6 +413,7 @@ mod tests {
                 make_edge("impl-a", "summary", "merger", "summary-a"),
                 make_edge("impl-b", "summary", "merger", "summary-b"),
             ],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -444,6 +449,7 @@ mod tests {
                 make_edge("b", "out", "d", "in-b"),
                 make_edge("c", "out", "d", "in-c"),
             ],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -465,6 +471,7 @@ mod tests {
                 make_node("b", &["in"], &["out"]),
             ],
             edges: vec![make_edge("a", "out", "b", "in")],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -488,6 +495,7 @@ mod tests {
                 make_node("b", &["in"], &["out"]),
             ],
             edges: vec![make_edge("a", "out", "b", "in")],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -521,6 +529,7 @@ mod tests {
                 "review",
                 yaml("iter: { lt: 3 }"),
             )],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -555,6 +564,7 @@ mod tests {
                 "review",
                 yaml("iter: { lt: 3 }"),
             )],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -579,6 +589,7 @@ mod tests {
                 "Blocked after {iter} iterations on {node-id}",
                 yaml("iter: { gte: 3 }"),
             )],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -608,6 +619,7 @@ mod tests {
                 "Blocked",
                 yaml("iter: { gte: 3 }"),
             )],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -638,6 +650,7 @@ mod tests {
                 "review",
                 yaml("iter: { lt: 5 }"),
             )],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -673,6 +686,7 @@ mod tests {
                 make_edge("a", "out", "b", "in"),
                 make_edge("a", "out", "c", "in"),
             ],
+            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -719,6 +733,7 @@ mod tests {
                     yaml("iter: { gte: 3 }"),
                 ),
             ],
+            auto_merge_resolver: true,
         };
 
         // Iter 1: reviewer done → back-edge fires, halt doesn't
@@ -782,6 +797,7 @@ mod tests {
                     yaml("iter: { lt: 3 }"),
                 ),
             ],
+            auto_merge_resolver: true,
         };
 
         // Conditional back-edges don't count as upstream dependencies,
