@@ -230,3 +230,61 @@ export async function createPipeline(
   if (!resp.ok) throw new Error(`POST /pipelines failed: ${resp.status}`);
   return resp.json();
 }
+
+// --- Library API ---
+
+export interface LibraryEntry {
+  name: string;
+  type: string;
+  inputs: { name: string; repeated: boolean; side?: string }[];
+  outputs: { name: string; repeated: boolean; side?: string }[];
+  interactive: boolean;
+  max_iter?: number | null;
+  branches?: number | null;
+  prompt: string;
+}
+
+export async function fetchLibrary(): Promise<LibraryEntry[]> {
+  const resp = await fetch(`${BASE}/library`);
+  if (!resp.ok) throw new Error(`GET /library failed: ${resp.status}`);
+  return resp.json();
+}
+
+export async function saveToLibrary(
+  sourceNodeId: string,
+  pipelineId: string,
+): Promise<LibraryEntry> {
+  const resp = await fetch(`${BASE}/library`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_node_id: sourceNodeId, pipeline_id: pipelineId }),
+  });
+  if (!resp.ok) throw new Error(`POST /library failed: ${resp.status}`);
+  return resp.json();
+}
+
+export async function deleteFromLibrary(name: string): Promise<void> {
+  const resp = await fetch(`${BASE}/library/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error(`DELETE /library/${name} failed: ${resp.status}`);
+}
+
+export interface InstantiateResult {
+  spec: {
+    name: string;
+    type: string;
+    inputs: { name: string; repeated: boolean; side?: string }[];
+    outputs: { name: string; repeated: boolean; side?: string }[];
+    interactive: boolean;
+  };
+  prompt: string;
+}
+
+export async function instantiateFromLibrary(name: string): Promise<InstantiateResult> {
+  const resp = await fetch(`${BASE}/library/${encodeURIComponent(name)}/instantiate`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw new Error(`POST /library/${name}/instantiate failed: ${resp.status}`);
+  return resp.json();
+}

@@ -26,7 +26,7 @@ pub enum NodeType {
     End,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrontmatterFieldDecl {
     #[serde(rename = "type")]
     pub field_type: String,
@@ -54,7 +54,7 @@ impl std::fmt::Display for PortSide {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Port {
     pub name: String,
     #[serde(default)]
@@ -1256,23 +1256,27 @@ nodes:
 
     #[test]
     fn auto_merge_resolver_explicit_false() {
-        let yaml = r#"
+        let yaml = with_start_end(
+            r#"
 name: no-resolver
 auto_merge_resolver: false
 nodes: []
-"#;
-        let result = parse_pipeline(yaml).unwrap();
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
         assert!(!result.pipeline.auto_merge_resolver);
     }
 
     #[test]
     fn auto_merge_resolver_explicit_true() {
-        let yaml = r#"
+        let yaml = with_start_end(
+            r#"
 name: with-resolver
 auto_merge_resolver: true
 nodes: []
-"#;
-        let result = parse_pipeline(yaml).unwrap();
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
         assert!(result.pipeline.auto_merge_resolver);
     }
 }
