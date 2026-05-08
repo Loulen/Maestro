@@ -344,7 +344,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines/{pipeline_id}", get(get_pipeline))
         .route(
             "/pipelines/{pipeline_id}",
-            axum::routing::put(save_pipeline),
+            axum::routing::put(save_pipeline).delete(delete_pipeline),
         )
         .route("/pipelines", post(create_pipeline))
         .route("/runs", post(create_run))
@@ -730,6 +730,62 @@ async fn create_pipeline(
         })),
     )
         .into_response()
+}
+
+async fn delete_pipeline(
+    State(state): State<Arc<AppState>>,
+    AxumPath(pipeline_id): AxumPath<String>,
+) -> Response {
+    let path = resolve_pipeline_path(&state.repo_root, &pipeline_id);
+    if !path.exists() {
+        return (StatusCode::NOT_FOUND, "pipeline not found").into_response();
+    }
+
+    // Check for active runs referencing this pipeline
+    if let Ok(run_ids) = load_all_run_ids(&state.db).await {
+        let mut active_count: usize = 0;
+        for run_id in &run_ids {
+            if let Ok(events) = load_events(&state.db, run_id).await {
+                if let Some(run_state) = event_log::project(&events) {
+                    if run_state.pipeline_name == pipeline_id
+                        && run_state.status != event_log::RunStatus::Completed
+                        && run_state.status != event_log::RunStatus::Archived
+                    {
+                        active_count += 1;
+                    }
+                }
+            }
+        }
+        if active_count > 0 {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("Cannot delete: {active_count} active run(s)")
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Remove the prompts directory
+    let prompts_dir = path.with_extension("prompts");
+    if prompts_dir.is_dir() {
+        if let Err(e) = std::fs::remove_dir_all(&prompts_dir) {
+            warn!("failed to remove prompts dir for {pipeline_id}: {e}");
+        }
+    }
+
+    // Remove the YAML file
+    if let Err(e) = std::fs::remove_file(&path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("delete failed: {e}") })),
+        )
+            .into_response();
+    }
+
+    info!("Deleted pipeline {pipeline_id}");
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 // --- API handlers ---
@@ -5160,6 +5216,183 @@ mod tests {
         let entries = scan_pipeline_dir(&dir, "repo");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "real-pipe");
+    }
+
+    #[tokio::test]
+    async fn delete_pipeline_removes_yaml_and_prompts() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "doomed");
+
+        // Also create a prompts directory
+        let prompts_dir = tmp.path().join(".maestro/pipelines/doomed.prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(prompts_dir.join("worker.md"), "role prompt").unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/pipelines/doomed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let yaml_path = tmp.path().join(".maestro/pipelines/doomed.yaml");
+        assert!(!yaml_path.exists(), "YAML file should be deleted");
+        assert!(!prompts_dir.exists(), "prompts dir should be deleted");
+    }
+
+    #[tokio::test]
+    async fn delete_pipeline_returns_404_when_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/pipelines/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_pipeline_returns_409_when_active_runs_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "busy-pipe");
+
+        let state = test_state_with_dir(tmp.path()).await;
+
+        // Insert a run_started event referencing this pipeline
+        let run_started = event_log::Event {
+            id: None,
+            run_id: "run-001".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "busy-pipe" })),
+        };
+        append_event(&state, &run_started).await.unwrap();
+
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/pipelines/busy-pipe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val["error"].as_str().unwrap().contains("active run"));
+    }
+
+    #[tokio::test]
+    async fn delete_pipeline_succeeds_when_runs_completed() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "done-pipe");
+
+        let state = test_state_with_dir(tmp.path()).await;
+
+        // Insert run_started + run_completed events
+        let run_started = event_log::Event {
+            id: None,
+            run_id: "run-done".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "done-pipe" })),
+        };
+        append_event(&state, &run_started).await.unwrap();
+
+        let run_completed = event_log::Event {
+            id: None,
+            run_id: "run-done".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunCompleted,
+            node_id: None,
+            iter: None,
+            payload: None,
+        };
+        append_event(&state, &run_completed).await.unwrap();
+
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/pipelines/done-pipe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let yaml_path = tmp.path().join(".maestro/pipelines/done-pipe.yaml");
+        assert!(
+            !yaml_path.exists(),
+            "YAML file should be deleted after completed run"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_pipeline_then_get_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "vanish");
+
+        let state = test_state_with_dir(tmp.path()).await;
+
+        // Delete
+        let app = build_router(Arc::clone(&state));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/pipelines/vanish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // GET should now 404
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines/vanish")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
