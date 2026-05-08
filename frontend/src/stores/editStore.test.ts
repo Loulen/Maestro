@@ -294,6 +294,29 @@ describe("editStore.flushPendingSaves", () => {
   });
 });
 
+describe("updatePipelineMeta with auto_merge_resolver", () => {
+  it("toggles auto_merge_resolver to false", () => {
+    seedTabWithPipeline(makePipeline());
+
+    useEditStore.getState().updatePipelineMeta({ auto_merge_resolver: false });
+
+    const tab = useEditStore.getState().openTabs[0];
+    expect(tab.pipeline.auto_merge_resolver).toBe(false);
+    expect(tab.dirty).toBe(true);
+  });
+
+  it("toggles auto_merge_resolver back to true", () => {
+    const p = makePipeline();
+    p.auto_merge_resolver = false;
+    seedTabWithPipeline(p);
+
+    useEditStore.getState().updatePipelineMeta({ auto_merge_resolver: true });
+
+    const tab = useEditStore.getState().openTabs[0];
+    expect(tab.pipeline.auto_merge_resolver).toBe(true);
+  });
+});
+
 describe("mutations set dirty without auto-saving", () => {
   it("addNode sets dirty but does not trigger save", async () => {
     seedTab("p1", false);

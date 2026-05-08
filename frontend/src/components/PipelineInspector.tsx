@@ -86,6 +86,18 @@ export default function PipelineInspector() {
           />
         ))}
 
+        {/* Config */}
+        <SectionHead title="Config" />
+        <label className="flex items-center gap-2 text-fg-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={pipeline.auto_merge_resolver !== false}
+            onChange={(e) => updateMeta({ auto_merge_resolver: e.target.checked })}
+            className="accent-acc"
+          />
+          <span>Auto merge resolver</span>
+        </label>
+
         {/* Stats */}
         <SectionHead title="Stats" />
         <div className="flex gap-4 text-fg-4" style={{ fontSize: "10px" }}>

@@ -376,7 +376,7 @@ function deriveEdges(run: RunState): Edge[] {
   const endNodeId = nodeDefs.find((d) => d.node_type === "end")?.id;
   const startNodeId = nodeDefs.find((d) => d.node_type === "start")?.id;
 
-  return edgeInfos.map((ei, i) => {
+  const pipelineEdges = edgeInfos.map((ei, i) => {
     const isEndEdge = endNodeId != null && ei.target_node === endNodeId;
     const isStartEdge = startNodeId != null && ei.source_node === startNodeId;
     const isConditional = ei.when_clause != null;
@@ -430,6 +430,31 @@ function deriveEdges(run: RunState): Edge[] {
       labelBgPadding: [4, 2] as [number, number],
     };
   });
+
+  const mergeResolverEdges: Edge[] = run.merge_resolver
+    ? [{
+        id: "e-merge-resolver",
+        source: run.merge_resolver.conflicting_node_id,
+        target: "__merge_resolver__",
+        sourceHandle: null,
+        targetHandle: null,
+        type: "default",
+        animated: run.merge_resolver.status === "running",
+        style: {
+          stroke: "var(--color-st-blocked, #f97316)",
+          strokeWidth: 1.5,
+          strokeDasharray: "6 3",
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: "var(--color-st-blocked, #f97316)",
+          width: 16,
+          height: 16,
+        },
+      }]
+    : [];
+
+  return [...pipelineEdges, ...mergeResolverEdges];
 }
 
 function DagCanvasInner({
