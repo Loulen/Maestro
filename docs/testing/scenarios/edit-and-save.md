@@ -120,6 +120,7 @@ under the explicit Save model.
     "step 10: textarea reads MARKER_…_SAVE_TEST after reload",
     "step 11: alpha.md on disk equals MARKER_…_SAVE_TEST",
     "step 14: textarea still reads full value after 3 s wait (no broadcast wipe)",
+    "step 15: tab title still shows dirty indicator '•' (no silent auto-save)",
     "step 16: alpha.md on disk unchanged (no auto-save)"
   ],
   "anomalies": [
@@ -128,4 +129,4 @@ under the explicit Save model.
 }
 ```
 
-A single failed assertion => `verdict: "FAIL"`. Don't half-pass.
+A single failed assertion ⇒ `verdict: "FAIL"`. Don't half-pass.
