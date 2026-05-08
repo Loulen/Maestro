@@ -18,6 +18,7 @@ import { useEditStore } from "../stores/editStore";
 import { generateNodeId } from "../lib/nanoid";
 import { TYPE_LABELS, TYPE_COLORS } from "../nodeStyles";
 import TriangleHandle from "./TriangleHandle";
+import { SwitchEditNode } from "./SwitchNode";
 
 interface EditNodeData {
   label: string;
@@ -87,25 +88,47 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
   );
 }
 
-const nodeTypes = { edit: EditNode };
+const nodeTypes = { edit: EditNode, switch: SwitchEditNode };
 
 function deriveEditNodes(pipeline: PipelineDef): Node[] {
-  return pipeline.nodes.map((n, i) => ({
-    id: n.id,
-    type: "edit",
-    position: {
-      x: n.view?.x ?? 200,
-      y: n.view?.y ?? 80 + i * 140,
-    },
-    data: {
-      label: n.name ?? n.id,
-      nodeId: n.id,
-      nodeType: n.type,
-      inputs: n.inputs.map((p) => ({ name: p.name, side: p.side ?? "left" })),
-      outputs: n.outputs.map((p) => ({ name: p.name, side: p.side ?? "right" })),
-      interactive: n.interactive,
-    },
-  }));
+  return pipeline.nodes.map((n, i) => {
+    if (n.type === "switch") {
+      return {
+        id: n.id,
+        type: "switch",
+        position: {
+          x: n.view?.x ?? 200,
+          y: n.view?.y ?? 80 + i * 140,
+        },
+        data: {
+          label: n.name ?? n.id,
+          nodeId: n.id,
+          branches: n.outputs.map((p) => ({
+            name: p.name,
+            side: p.side ?? "right",
+            hasWhen: p.when != null,
+          })),
+          inputSide: n.inputs[0]?.side ?? "left",
+        },
+      };
+    }
+    return {
+      id: n.id,
+      type: "edit",
+      position: {
+        x: n.view?.x ?? 200,
+        y: n.view?.y ?? 80 + i * 140,
+      },
+      data: {
+        label: n.name ?? n.id,
+        nodeId: n.id,
+        nodeType: n.type,
+        inputs: n.inputs.map((p) => ({ name: p.name, side: p.side ?? "left" })),
+        outputs: n.outputs.map((p) => ({ name: p.name, side: p.side ?? "right" })),
+        interactive: n.interactive,
+      },
+    };
+  });
 }
 
 function deriveEditEdges(pipeline: PipelineDef): Edge[] {
@@ -252,14 +275,16 @@ function EditCanvasInner() {
 
   const handleAddNode = (type: NodeType) => {
     const id = generateNodeId();
-    const name = type === "code-mutating" ? "implementer" : "node";
+    const name = type === "code-mutating" ? "implementer" : type === "switch" ? "switch" : "node";
 
     const newNode: NodeDef = {
       id,
       name,
       type,
       inputs: [{ name: "in", repeated: false, side: "left" }],
-      outputs: [{ name: "out", repeated: false, side: "right" }],
+      outputs: type === "switch"
+        ? [{ name: "default", repeated: false, side: "right" }]
+        : [{ name: "out", repeated: false, side: "right" }],
       interactive: false,
       view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
     };
@@ -285,6 +310,12 @@ function EditCanvasInner() {
           className="cursor-pointer rounded border border-line-strong bg-bg-3 px-1.5 py-0.5 font-medium text-fg-3 transition-colors hover:text-fg"
         >
           doc
+        </button>
+        <button
+          onClick={() => handleAddNode("switch")}
+          className="cursor-pointer rounded border border-[var(--color-switch-tint,#a78bfa)] bg-[var(--color-switch-tint,#a78bfa)]/10 px-1.5 py-0.5 font-medium text-[var(--color-switch-tint,#a78bfa)] transition-colors hover:bg-[var(--color-switch-tint,#a78bfa)]/20"
+        >
+          switch
         </button>
       </div>
 

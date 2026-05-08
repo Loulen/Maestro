@@ -14,6 +14,7 @@ import PipelinesListPanel from "./components/PipelinesListPanel";
 import EditCanvas from "./components/EditCanvas";
 import TabBar from "./components/TabBar";
 import NodeInspector from "./components/NodeInspector";
+import SwitchInspector from "./components/SwitchInspector";
 import EdgeInspector from "./components/EdgeInspector";
 import PipelineInspector from "./components/PipelineInspector";
 import StartInspector from "./components/StartInspector";
@@ -94,6 +95,7 @@ export default function App() {
   const openRunPipeline = useEditStore((s) => s.openRunPipeline);
   const closeRunPipeline = useEditStore((s) => s.closeRunPipeline);
   const selection = useEditStore((s) => s.selection);
+  const openTabs = useEditStore((s) => s.openTabs);
   const editSave = useEditStore((s) => s.save);
   const editActiveTabId = useEditStore((s) => s.activeTabId);
 
@@ -243,8 +245,16 @@ export default function App() {
 
           <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
             {editMode || editScope === "run" ? (
-              <>
-                {selection.kind === "node" && (
+              (() => {
+                const editTab = openTabs.find((t) => t.id === editActiveTabId);
+                const editNodeType = editTab && selection.kind === "node" && selection.id
+                  ? editTab.pipeline.nodes.find((n) => n.id === selection.id)?.type ?? null
+                  : null;
+                return <>
+                {selection.kind === "node" && editNodeType === "switch" && (
+                  <SwitchInspector />
+                )}
+                {selection.kind === "node" && editNodeType !== "switch" && (
                   <NodeInspector
                     libraryEntries={libraryEntries}
                     onLibraryChanged={refreshLibrary}
@@ -258,7 +268,8 @@ export default function App() {
                   />
                 )}
                 {selection.kind === "none" && editScope !== "run" && <PipelineInspector />}
-              </>
+              </>;
+              })()
             ) : (
               <>
                 {selectedNodeType === "start" && selectedRun?.start_node && (

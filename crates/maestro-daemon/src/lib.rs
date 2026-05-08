@@ -12,6 +12,7 @@ mod pipeline_watcher;
 mod prompt_augmenter;
 mod scheduler;
 mod scheduler_dispatcher;
+mod switch_router;
 pub mod tmux_session_manager;
 #[allow(dead_code)]
 mod variable_resolver;
@@ -866,8 +867,12 @@ async fn delete_pipeline(
     if let Ok(run_ids) = load_all_run_ids(&state.db).await {
         let mut active_count: usize = 0;
         for run_id in &run_ids {
-            let Ok(events) = load_events(&state.db, run_id).await else { continue };
-            let Some(run_state) = event_log::project(&events) else { continue };
+            let Ok(events) = load_events(&state.db, run_id).await else {
+                continue;
+            };
+            let Some(run_state) = event_log::project(&events) else {
+                continue;
+            };
             if run_state.pipeline_name == pipeline_id
                 && run_state.status != event_log::RunStatus::Completed
                 && run_state.status != event_log::RunStatus::Archived
@@ -1083,9 +1088,23 @@ async fn handle_node_completion(
                 return;
             }
             scheduler::SchedulerAction::Complete => {
-                emit_run_event(state, run_id, event_log::EventKind::RunCompleted, None)
-                    .await;
+                emit_run_event(state, run_id, event_log::EventKind::RunCompleted, None).await;
                 return;
+            }
+            scheduler::SchedulerAction::SwitchRouted {
+                node_id,
+                chosen_branch,
+            } => {
+                emit_run_event(
+                    state,
+                    run_id,
+                    event_log::EventKind::SwitchRouted,
+                    Some(serde_json::json!({
+                        "node_id": node_id,
+                        "chosen_branch": chosen_branch,
+                    })),
+                )
+                .await;
             }
         }
     }
@@ -3009,9 +3028,23 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
                     return;
                 }
                 scheduler::SchedulerAction::Complete => {
-                    emit_run_event(state, run_id, event_log::EventKind::RunCompleted, None)
-                        .await;
+                    emit_run_event(state, run_id, event_log::EventKind::RunCompleted, None).await;
                     return;
+                }
+                scheduler::SchedulerAction::SwitchRouted {
+                    node_id,
+                    chosen_branch,
+                } => {
+                    emit_run_event(
+                        state,
+                        run_id,
+                        event_log::EventKind::SwitchRouted,
+                        Some(serde_json::json!({
+                            "node_id": node_id,
+                            "chosen_branch": chosen_branch,
+                        })),
+                    )
+                    .await;
                 }
             }
         }

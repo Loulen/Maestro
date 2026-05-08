@@ -3,6 +3,7 @@ import { Star } from "lucide-react";
 import { useEditStore } from "../stores/editStore";
 import type { NodeDef, NodeType, PortDef, PortSide } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
+import SidePicker from "./SidePicker";
 import type { LibraryEntry } from "../api";
 import { saveToLibrary, deleteFromLibrary, instantiateFromLibrary } from "../api";
 import { useLibraryState } from "../hooks/useLibrary";
@@ -212,8 +213,6 @@ function NameInput({
   );
 }
 
-const SIDE_OPTIONS: PortSide[] = ["left", "right", "top", "bottom"];
-
 function PortRow({
   port,
   onUpdate,
@@ -232,17 +231,10 @@ function PortRow({
         className="min-w-0 flex-1 bg-transparent text-fg outline-none"
         style={{ fontSize: "11px" }}
       />
-      <select
+      <SidePicker
         value={port.side ?? "left"}
-        onChange={(e) => onUpdate({ side: e.target.value as PortSide })}
-        className="rounded border border-line-strong bg-bg-4 px-1 py-px text-fg-3 outline-none"
-        style={{ fontSize: "9px" }}
-        title="Handle side"
-      >
-        {SIDE_OPTIONS.map((s) => (
-          <option key={s} value={s}>{s}</option>
-        ))}
-      </select>
+        onChange={(s) => onUpdate({ side: s })}
+      />
       <button
         onClick={() => onUpdate({ repeated: !port.repeated })}
         className={`cursor-pointer rounded px-1 py-px transition-colors ${

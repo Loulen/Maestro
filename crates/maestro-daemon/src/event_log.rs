@@ -44,6 +44,7 @@ pub enum EventKind {
     MergeResolverStarted,
     MergeResolverCompleted,
     MergeResolverFailed,
+    SwitchRouted,
     PipelineModified,
     RunCompleted,
     RunFailed,
@@ -347,6 +348,9 @@ pub fn project(events: &[Event]) -> Option<RunState> {
             }
             EventKind::MergeConflictDetected => {
                 // Informational — the run either spawns a resolver or fails
+            }
+            EventKind::SwitchRouted => {
+                // Informational — records which branch the switch chose
             }
             EventKind::MergeResolverStarted => {
                 if let Some(ref payload) = event.payload {

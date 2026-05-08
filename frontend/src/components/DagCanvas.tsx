@@ -20,6 +20,7 @@ import { formatWhenClause } from "../predicates";
 import { TYPE_LABELS, TYPE_COLORS } from "../nodeStyles";
 import CleanupConfirmModal from "./CleanupConfirmModal";
 import TriangleHandle from "./TriangleHandle";
+import { SwitchRunNode } from "./SwitchNode";
 
 const STATUS_COLORS: Record<NodeStatus, string> = {
   pending: "border-st-pending",
@@ -235,6 +236,7 @@ const nodeTypes = {
   end: EndNode,
   start: StartNode,
   mergeResolver: MergeResolverNode,
+  switchRun: SwitchRunNode,
 };
 
 const TERMINAL_STATUSES: RunStatus[] = ["completed", "failed", "halted"];
@@ -263,6 +265,45 @@ function deriveNodes(run: RunState, selectedNodeId: string | null): Node[] {
       const nodeState = run.nodes[def.id];
       const status: NodeStatus = nodeState?.status ?? "pending";
       const iter = nodeState?.iter ?? 1;
+
+      if (def.node_type === "switch") {
+        const edgeInfos = run.edges ?? [];
+        let activeBranch: string | null = null;
+        if (status === "completed") {
+          for (const ei of edgeInfos) {
+            if (ei.source_node === def.id) {
+              const targetState = run.nodes[ei.target_node];
+              if (targetState && targetState.status !== "pending") {
+                activeBranch = ei.source_port;
+                break;
+              }
+            }
+          }
+        }
+        return {
+          id: def.id,
+          type: "switchRun",
+          position: {
+            x: (def.view_x ?? 200) + START_NODE_OFFSET_X,
+            y: def.view_y ?? 80 + i * 140,
+          },
+          data: {
+            label: def.name ?? def.id,
+            nodeId: def.id,
+            status,
+            branches: def.outputs.map((p) => ({
+              name: p.name,
+              side: p.side ?? "right",
+              hasWhen: false,
+            })),
+            inputSide: def.inputs[0]?.side ?? "left",
+            activeBranch,
+            iter,
+          },
+          selected: def.id === selectedNodeId,
+        };
+      }
+
       return {
         id: def.id,
         type: "pipeline",

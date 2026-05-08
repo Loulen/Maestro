@@ -1,0 +1,191 @@
+import type { NodeProps, Node } from "@xyflow/react";
+import type { NodeStatus } from "../types";
+import { useEditStore } from "../stores/editStore";
+import TriangleHandle from "./TriangleHandle";
+
+interface SwitchBranch {
+  name: string;
+  side: string;
+  hasWhen: boolean;
+}
+
+interface SwitchEditData {
+  label: string;
+  nodeId: string;
+  branches: SwitchBranch[];
+  inputSide: string;
+  [key: string]: unknown;
+}
+
+export function SwitchEditNode({ data, id }: NodeProps<Node<SwitchEditData>>) {
+  const selection = useEditStore((s) => s.selection);
+  const isSelected = selection.kind === "node" && selection.id === id;
+
+  return (
+    <div
+      className={`rounded-md border-l-[3px] border-[var(--color-switch-tint,#a78bfa)] bg-bg-4 px-3 py-2 ${
+        isSelected ? "ring-1 ring-acc" : ""
+      }`}
+      style={{ minWidth: 140, fontSize: "12px" }}
+    >
+      <TriangleHandle
+        id="in"
+        kind="input"
+        side={data.inputSide as "left" | "right" | "top" | "bottom"}
+        index={0}
+        total={1}
+      />
+      <div className="flex items-center gap-2">
+        <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-switch-tint,#a78bfa)]" />
+        <span className="font-medium text-fg">{data.label}</span>
+        <span
+          className="ml-auto rounded border border-[var(--color-switch-tint,#a78bfa)] text-[var(--color-switch-tint,#a78bfa)] px-1 py-px"
+          style={{ fontSize: "9px", fontWeight: 500, lineHeight: "1.2" }}
+        >
+          switch
+        </span>
+      </div>
+      <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "9px" }}>
+        {data.nodeId}
+      </div>
+      <div className="mt-1 flex flex-col gap-0.5">
+        {data.branches.map((branch, i) => (
+          <div
+            key={branch.name}
+            className="flex items-center gap-1.5 rounded bg-bg-3 px-1.5 py-0.5"
+            style={{ fontSize: "10px" }}
+          >
+            <span className="text-fg-3">{branch.name}</span>
+            {!branch.hasWhen && branch.name === "default" && (
+              <span className="ml-auto rounded bg-fg-4/20 px-1 text-fg-4" style={{ fontSize: "8px" }}>
+                else
+              </span>
+            )}
+            <TriangleHandle
+              id={branch.name}
+              kind="output"
+              side={branch.side as "left" | "right" | "top" | "bottom"}
+              index={i}
+              total={data.branches.length}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface SwitchRunData {
+  label: string;
+  nodeId: string;
+  status: NodeStatus;
+  branches: SwitchBranch[];
+  inputSide: string;
+  activeBranch: string | null;
+  iter: number;
+  [key: string]: unknown;
+}
+
+const STATUS_COLORS: Record<NodeStatus, string> = {
+  pending: "border-st-pending",
+  running: "border-st-running",
+  awaiting_user: "border-st-await",
+  completed: "border-st-done",
+  failed: "border-st-failed",
+};
+
+const STATUS_BG: Record<NodeStatus, string> = {
+  pending: "bg-bg-3",
+  running: "bg-st-running-bg",
+  awaiting_user: "bg-st-await-bg",
+  completed: "bg-st-done-bg",
+  failed: "bg-st-failed-bg",
+};
+
+const STATUS_DOTS: Record<NodeStatus, string> = {
+  pending: "bg-st-pending",
+  running: "bg-st-running",
+  awaiting_user: "bg-st-await",
+  completed: "bg-st-done",
+  failed: "bg-st-failed",
+};
+
+export function SwitchRunNode({ data }: NodeProps<Node<SwitchRunData>>) {
+  const borderColor = STATUS_COLORS[data.status];
+  const bgColor = STATUS_BG[data.status];
+  const dotColor = STATUS_DOTS[data.status];
+
+  return (
+    <div
+      className={`rounded-md border-l-[3px] ${borderColor} ${bgColor} px-3 py-2`}
+      style={{ minWidth: 140, fontSize: "12px" }}
+    >
+      <TriangleHandle
+        id="in"
+        kind="input"
+        side={data.inputSide as "left" | "right" | "top" | "bottom"}
+        index={0}
+        total={1}
+      />
+      <div className="flex items-center gap-2">
+        <span
+          className={`h-2 w-2 shrink-0 rounded-full ${dotColor} ${
+            data.status === "running" ? "animate-pulse" : ""
+          }`}
+        />
+        <span className="font-medium text-fg">{data.label}</span>
+        {data.iter > 1 && (
+          <span className="rounded bg-bg-4 px-1 font-mono text-fg-4" style={{ fontSize: "9px" }}>
+            iter {data.iter}
+          </span>
+        )}
+        <span
+          className="ml-auto rounded border border-[var(--color-switch-tint,#a78bfa)] text-[var(--color-switch-tint,#a78bfa)] px-1 py-px"
+          style={{ fontSize: "9px", fontWeight: 500, lineHeight: "1.2" }}
+        >
+          switch
+        </span>
+      </div>
+      <div className="mt-0.5 flex items-center gap-2 text-fg-4" style={{ fontSize: "10px" }}>
+        <span>{data.status}</span>
+        <span className="font-mono" style={{ fontSize: "9px" }}>{data.nodeId}</span>
+      </div>
+      <div className="mt-1 flex flex-col gap-0.5">
+        {data.branches.map((branch, i) => {
+          const isActive = data.activeBranch === branch.name;
+          const isDimmed = data.activeBranch != null && !isActive;
+          return (
+            <div
+              key={branch.name}
+              data-testid={`branch-${branch.name}`}
+              className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 transition-opacity ${
+                isActive
+                  ? "bg-acc-bg ring-1 ring-acc/40"
+                  : isDimmed
+                    ? "bg-bg-3 opacity-40"
+                    : "bg-bg-3"
+              }`}
+              style={{ fontSize: "10px" }}
+            >
+              <span className={isActive ? "text-acc font-medium" : "text-fg-3"}>
+                {branch.name}
+              </span>
+              {!branch.hasWhen && branch.name === "default" && (
+                <span className="ml-auto rounded bg-fg-4/20 px-1 text-fg-4" style={{ fontSize: "8px" }}>
+                  else
+                </span>
+              )}
+              <TriangleHandle
+                id={branch.name}
+                kind="output"
+                side={branch.side as "left" | "right" | "top" | "bottom"}
+                index={i}
+                total={data.branches.length}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

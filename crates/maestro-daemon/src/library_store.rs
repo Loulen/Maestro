@@ -229,15 +229,18 @@ mod tests {
                 repeated: false,
                 side: Some(pipeline::PortSide::Left),
                 frontmatter: None,
+                when: None,
             }],
             outputs: vec![pipeline::Port {
                 name: "out".to_string(),
                 repeated: false,
                 side: Some(pipeline::PortSide::Right),
                 frontmatter: None,
+                when: None,
             }],
             interactive: false,
             view: None,
+            max_iter: None,
         }
     }
 
@@ -360,18 +363,21 @@ mod tests {
                     repeated: false,
                     side: Some(pipeline::PortSide::Left),
                     frontmatter: None,
+                    when: None,
                 },
                 pipeline::Port {
                     name: "reviews".to_string(),
                     repeated: true,
                     side: Some(pipeline::PortSide::Top),
                     frontmatter: None,
+                    when: None,
                 },
             ],
             outputs: vec![pipeline::Port {
                 name: "summary".to_string(),
                 repeated: false,
                 side: Some(pipeline::PortSide::Right),
+                when: None,
                 frontmatter: Some({
                     let mut m = HashMap::new();
                     m.insert(
