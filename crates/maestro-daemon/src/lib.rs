@@ -912,6 +912,21 @@ async fn handle_node_completion(
                 }
                 return;
             }
+            scheduler::SchedulerAction::Complete => {
+                let complete_event = event_log::Event {
+                    id: None,
+                    run_id: run_id.to_string(),
+                    ts: event_log::now_iso(),
+                    kind: event_log::EventKind::RunCompleted,
+                    node_id: None,
+                    iter: None,
+                    payload: None,
+                };
+                if let Err(e) = append_event(state, &complete_event).await {
+                    error!("failed to append run_completed: {e}");
+                }
+                return;
+            }
         }
     }
 }
@@ -2835,6 +2850,21 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
                     };
                     if let Err(e) = append_event(state, &halt_event).await {
                         error!("failed to append run_halted: {e}");
+                    }
+                    return;
+                }
+                scheduler::SchedulerAction::Complete => {
+                    let complete_event = event_log::Event {
+                        id: None,
+                        run_id: run_id.to_string(),
+                        ts: event_log::now_iso(),
+                        kind: event_log::EventKind::RunCompleted,
+                        node_id: None,
+                        iter: None,
+                        payload: None,
+                    };
+                    if let Err(e) = append_event(state, &complete_event).await {
+                        error!("failed to append run_completed: {e}");
                     }
                     return;
                 }

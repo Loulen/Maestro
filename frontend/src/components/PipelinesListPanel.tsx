@@ -37,7 +37,7 @@ export default function PipelinesListPanel() {
         <span>Pipelines</span>
         <button
           onClick={() => setShowNewModal(true)}
-          className="grid h-5 w-5 place-items-center rounded border border-line-strong bg-bg-3 text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg"
+          className="grid h-5 w-5 cursor-pointer place-items-center rounded border border-line-strong bg-bg-3 text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg"
           title="New pipeline"
         >
           <Plus size={12} />
@@ -52,7 +52,7 @@ export default function PipelinesListPanel() {
           <button
             key={chip}
             onClick={() => setFilter(chip)}
-            className={`rounded px-1.5 py-0.5 font-medium transition-colors ${
+            className={`cursor-pointer rounded px-1.5 py-0.5 font-medium transition-colors ${
               filter === chip
                 ? "bg-bg-4 text-fg"
                 : "text-fg-4 hover:text-fg-3"
@@ -103,7 +103,7 @@ function PipelineRow({
   return (
     <button
       onClick={onSelect}
-      className={`flex w-full items-center gap-2 border-b border-line-soft px-3 py-2 text-left transition-colors ${
+      className={`flex w-full cursor-pointer items-center gap-2 border-b border-line-soft px-3 py-2 text-left transition-colors ${
         isSelected ? "bg-bg-3 text-fg" : "text-fg-2 hover:bg-bg-3/50"
       }`}
       style={{ fontSize: "11.5px" }}

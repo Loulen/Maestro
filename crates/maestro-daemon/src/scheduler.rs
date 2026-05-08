@@ -8,6 +8,7 @@ use crate::pipeline::{NodeType, PipelineDef};
 pub enum SchedulerAction {
     Spawn { node_id: String, iter: i64 },
     Halt { message: String },
+    Complete,
 }
 
 pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> {
@@ -109,17 +110,20 @@ pub fn evaluate_outgoing_edges_with_context(
         let target_id = &edge.target.node;
 
         if end_node_id == Some(target_id.as_str()) {
-            let raw_msg = edge.reason.as_deref().unwrap_or("Run halted");
-            let rendered = condition::render_halt_message(
-                raw_msg,
-                &condition::HaltContext {
-                    iter: source_iter,
-                    node_id: completed_node_id.to_string(),
-                    variables: resolved_vars.clone(),
-                    fields: frontmatter_fields.clone(),
-                },
-            );
-            actions.push(SchedulerAction::Halt { message: rendered });
+            if let Some(raw_msg) = edge.reason.as_deref() {
+                let rendered = condition::render_halt_message(
+                    raw_msg,
+                    &condition::HaltContext {
+                        iter: source_iter,
+                        node_id: completed_node_id.to_string(),
+                        variables: resolved_vars.clone(),
+                        fields: frontmatter_fields.clone(),
+                    },
+                );
+                actions.push(SchedulerAction::Halt { message: rendered });
+            } else {
+                actions.push(SchedulerAction::Complete);
+            }
         } else {
             let target_all_unconditional_upstream_completed =
                 check_all_unconditional_upstream_completed(
@@ -661,6 +665,80 @@ mod tests {
 
         let actions = evaluate_outgoing_edges(&pipeline, &state, "reviewer");
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn end_edge_without_reason_produces_complete() {
+        let pipeline = PipelineDef {
+            name: "complete-test".into(),
+            version: None,
+            variables: HashMap::new(),
+            nodes: vec![
+                make_node("implementer", &["task"], &["summary"]),
+                make_end_node(),
+            ],
+            edges: vec![EdgeDef {
+                source: EdgeEndpoint {
+                    node: "implementer".into(),
+                    port: "summary".into(),
+                },
+                target: EdgeEndpoint {
+                    node: "end".into(),
+                    port: "result".into(),
+                },
+                when: None,
+                reason: None,
+            }],
+            auto_merge_resolver: true,
+        };
+
+        let mut state = empty_run_state();
+        state
+            .nodes
+            .insert("implementer".into(), completed_node("implementer"));
+
+        let actions = evaluate_outgoing_edges(&pipeline, &state, "implementer");
+        assert_eq!(actions, vec![SchedulerAction::Complete]);
+    }
+
+    #[test]
+    fn conditional_end_edge_without_reason_produces_complete() {
+        let pipeline = PipelineDef {
+            name: "cond-complete-test".into(),
+            version: None,
+            variables: HashMap::new(),
+            nodes: vec![
+                make_node("reviewer", &["code"], &["review"]),
+                make_end_node(),
+            ],
+            edges: vec![EdgeDef {
+                source: EdgeEndpoint {
+                    node: "reviewer".into(),
+                    port: "review".into(),
+                },
+                target: EdgeEndpoint {
+                    node: "end".into(),
+                    port: "result".into(),
+                },
+                when: Some(yaml("verdict: { in: [PASS, APPROVED] }")),
+                reason: None,
+            }],
+            auto_merge_resolver: true,
+        };
+
+        let mut state = empty_run_state();
+        state
+            .nodes
+            .insert("reviewer".into(), completed_node_iter("reviewer", 1));
+
+        let actions = evaluate_outgoing_edges_with_context(
+            &pipeline,
+            &state,
+            "reviewer",
+            &HashMap::new(),
+            &HashMap::from([("verdict".into(), serde_yaml::Value::String("PASS".into()))]),
+        );
+        assert_eq!(actions, vec![SchedulerAction::Complete]);
     }
 
     #[test]
