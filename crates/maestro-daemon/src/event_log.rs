@@ -326,16 +326,13 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                 }
             }
             EventKind::MergeResolverCompleted => {
-                if let Some(ref mr) = state.merge_resolver {
-                    let mut mr = mr.clone();
+                if let Some(ref mut mr) = state.merge_resolver {
                     mr.status = NodeStatus::Completed;
                     mr.completed_at = Some(event.ts.clone());
-                    state.merge_resolver = Some(mr);
                 }
             }
             EventKind::MergeResolverFailed => {
-                if let Some(ref mr) = state.merge_resolver {
-                    let mut mr = mr.clone();
+                if let Some(ref mut mr) = state.merge_resolver {
                     mr.status = NodeStatus::Failed;
                     mr.completed_at = Some(event.ts.clone());
                     if let Some(ref payload) = event.payload {
@@ -344,7 +341,6 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                             .and_then(|v| v.as_str())
                             .map(String::from);
                     }
-                    state.merge_resolver = Some(mr);
                 }
             }
             EventKind::PipelineModified => {

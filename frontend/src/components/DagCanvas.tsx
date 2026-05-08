@@ -226,7 +226,12 @@ function MergeResolverNode({ data }: NodeProps<Node<MergeResolverNodeData>>) {
   );
 }
 
-const nodeTypes = { pipeline: PipelineNode, halt: HaltNode, start: StartNode, mergeResolver: MergeResolverNode };
+const nodeTypes = {
+  pipeline: PipelineNode,
+  halt: HaltNode,
+  start: StartNode,
+  mergeResolver: MergeResolverNode,
+};
 
 const OP_SYMBOLS: Record<string, string> = {
   eq: "=", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=",

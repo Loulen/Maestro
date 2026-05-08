@@ -1806,6 +1806,12 @@ async fn spawn_merge_resolver(
             })),
         };
         let _ = append_event(state, &run_failed).await;
+
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "merge_resolver_failed" })),
+        )
+            .into_response();
     }
 
     info!("Spawned merge resolver for run {run_id} (conflict on {conflicting_node_id})");
