@@ -16,13 +16,11 @@ pub fn compute_body_subgraph(
     pipeline: &PipelineDef,
     loop_node_id: &str,
 ) -> Result<HashSet<String>, BodyResolutionError> {
-    let loop_node = pipeline
+    pipeline
         .nodes
         .iter()
         .find(|n| n.id == loop_node_id && n.node_type == NodeType::Loop)
         .ok_or_else(|| BodyResolutionError::LoopNotFound(loop_node_id.to_string()))?;
-
-    let _ = loop_node;
 
     let body_targets: Vec<&str> = pipeline
         .edges

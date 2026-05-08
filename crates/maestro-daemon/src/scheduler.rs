@@ -223,14 +223,13 @@ fn handle_loop_input(
     run_state: &RunState,
     loop_node_id: &str,
     target_port: &str,
-    resolved_vars: &HashMap<String, serde_yaml::Value>,
+    _resolved_vars: &HashMap<String, serde_yaml::Value>,
 ) -> Vec<SchedulerAction> {
     let mut actions = Vec::new();
 
-    let loop_node = match pipeline.nodes.iter().find(|n| n.id == loop_node_id) {
-        Some(n) => n,
-        None => return actions,
-    };
+    if !pipeline.nodes.iter().any(|n| n.id == loop_node_id) {
+        return actions;
+    }
 
     match target_port {
         "in" => {
@@ -262,9 +261,6 @@ fn handle_loop_input(
         }
         _ => {}
     }
-
-    let _ = loop_node;
-    let _ = resolved_vars;
 
     actions
 }

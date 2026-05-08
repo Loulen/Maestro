@@ -1,10 +1,5 @@
 import type { EdgeInfo, NodeDefInfo } from "./types";
 
-/**
- * Frontend port of loop_body_resolver — computes the set of node IDs
- * belonging to a Loop's body subgraph via BFS from the "body" output port,
- * stopping at edges back to the Loop node itself. Nested loops are opaque.
- */
 export function computeBodySubgraph(
   edges: EdgeInfo[],
   nodeDefs: NodeDefInfo[],
@@ -24,7 +19,7 @@ export function computeBodySubgraph(
     if (current === loopNodeId) continue;
 
     const currentDef = nodeDefs.find((n) => n.id === current);
-    if (currentDef?.node_type === "loop" && current !== loopNodeId) {
+    if (currentDef?.node_type === "loop") {
       body.add(current);
       continue;
     }
