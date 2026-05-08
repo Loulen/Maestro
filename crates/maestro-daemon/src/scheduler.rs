@@ -215,6 +215,7 @@ mod tests {
             inputs: vec![Port {
                 name: "result".into(),
                 repeated: false,
+                side: None,
                 frontmatter: None,
             }],
             outputs: vec![],

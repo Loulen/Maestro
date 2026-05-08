@@ -1105,14 +1105,20 @@ nodes:
     #[test]
     fn port_side_defaults_left_for_inputs_right_for_outputs() {
         let result = parse_pipeline(VALID_MINIMAL).unwrap();
-        let node = &result.pipeline.nodes[0];
+        let node = result
+            .pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == "ab12cd34")
+            .unwrap();
         assert_eq!(node.inputs[0].side, Some(PortSide::Left));
         assert_eq!(node.outputs[0].side, Some(PortSide::Right));
     }
 
     #[test]
     fn parses_explicit_port_side_all_four_values() {
-        let yaml = r#"
+        let yaml = with_start_end(
+            r#"
 name: sides-test
 nodes:
   - id: ab12cd34
@@ -1136,9 +1142,15 @@ nodes:
         side: top
       - name: bottom-out
         side: bottom
-"#;
-        let result = parse_pipeline(yaml).unwrap();
-        let node = &result.pipeline.nodes[0];
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
+        let node = result
+            .pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == "ab12cd34")
+            .unwrap();
 
         assert_eq!(node.inputs[0].side, Some(PortSide::Left));
         assert_eq!(node.inputs[1].side, Some(PortSide::Right));
@@ -1153,7 +1165,8 @@ nodes:
 
     #[test]
     fn port_side_omitted_gets_contextual_default() {
-        let yaml = r#"
+        let yaml = with_start_end(
+            r#"
 name: defaults-test
 nodes:
   - id: ab12cd34
@@ -1167,9 +1180,15 @@ nodes:
       - name: x
       - name: y
         side: bottom
-"#;
-        let result = parse_pipeline(yaml).unwrap();
-        let node = &result.pipeline.nodes[0];
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
+        let node = result
+            .pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == "ab12cd34")
+            .unwrap();
 
         // Omitted input defaults to left
         assert_eq!(node.inputs[0].side, Some(PortSide::Left));

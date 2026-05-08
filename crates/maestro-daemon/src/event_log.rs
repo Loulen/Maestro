@@ -245,8 +245,8 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                             ports: end_def
                                 .inputs
                                 .iter()
-                                .map(|port_name| EndPortStatus {
-                                    port_name: port_name.clone(),
+                                .map(|port| EndPortStatus {
+                                    port_name: port.name.clone(),
                                     status: "pending".to_string(),
                                     reason: None,
                                     fired_at: None,
@@ -720,11 +720,11 @@ mod tests {
     // --- start_node projection (issue #30, updated for #39) ---
 
     fn start_node_def() -> serde_json::Value {
-        serde_json::json!({ "id": "start", "node_type": "start", "inputs": [], "outputs": ["user_prompt"] })
+        serde_json::json!({ "id": "start", "node_type": "start", "inputs": [], "outputs": [{"name": "user_prompt", "side": "right"}] })
     }
 
     fn end_node_def() -> serde_json::Value {
-        serde_json::json!({ "id": "end", "node_type": "end", "inputs": ["result"], "outputs": [] })
+        serde_json::json!({ "id": "end", "node_type": "end", "inputs": [{"name": "result", "side": "left"}], "outputs": [] })
     }
 
     fn node_def(id: &str) -> serde_json::Value {

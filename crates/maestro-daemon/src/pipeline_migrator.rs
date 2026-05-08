@@ -619,8 +619,12 @@ edges: []
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&result.yaml_text).unwrap();
         let nodes = parsed["nodes"].as_sequence().unwrap();
-        let inputs = nodes[0]["inputs"].as_sequence().unwrap();
-        let outputs = nodes[0]["outputs"].as_sequence().unwrap();
+        let worker = nodes
+            .iter()
+            .find(|n| n["name"].as_str() == Some("worker"))
+            .unwrap();
+        let inputs = worker["inputs"].as_sequence().unwrap();
+        let outputs = worker["outputs"].as_sequence().unwrap();
 
         assert_eq!(inputs[0]["side"].as_str().unwrap(), "left");
         assert_eq!(inputs[1]["side"].as_str().unwrap(), "left");
@@ -634,6 +638,16 @@ edges: []
 name: test
 version: "1.0"
 nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
   - id: aBcD1234
     name: worker
     type: doc-only
