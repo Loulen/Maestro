@@ -17,34 +17,11 @@ import { Pencil, Trash2, Terminal } from "lucide-react";
 import type { NodeStatus, NodeType, RunState, RunStatus, PortBrief } from "../types";
 import { cleanupRun, attachManager } from "../api";
 import { formatWhenClause } from "../predicates";
-import { TYPE_LABELS, TYPE_COLORS } from "../nodeStyles";
+import { TYPE_LABELS, TYPE_COLORS, STATUS_BORDER, STATUS_BG, STATUS_DOT } from "../nodeStyles";
 import CleanupConfirmModal from "./CleanupConfirmModal";
 import TriangleHandle from "./TriangleHandle";
 import { SwitchRunNode } from "./SwitchNode";
 
-const STATUS_COLORS: Record<NodeStatus, string> = {
-  pending: "border-st-pending",
-  running: "border-st-running",
-  awaiting_user: "border-st-await",
-  completed: "border-st-done",
-  failed: "border-st-failed",
-};
-
-const STATUS_BG: Record<NodeStatus, string> = {
-  pending: "bg-bg-3",
-  running: "bg-st-running-bg",
-  awaiting_user: "bg-st-await-bg",
-  completed: "bg-st-done-bg",
-  failed: "bg-st-failed-bg",
-};
-
-const STATUS_DOTS: Record<NodeStatus, string> = {
-  pending: "bg-st-pending",
-  running: "bg-st-running",
-  awaiting_user: "bg-st-await",
-  completed: "bg-st-done",
-  failed: "bg-st-failed",
-};
 
 const RUN_STATUS_DOTS: Record<RunStatus, string> = {
   running: "bg-st-running",
@@ -67,9 +44,9 @@ interface PipelineNodeData {
 }
 
 function PipelineNode({ data }: NodeProps<Node<PipelineNodeData>>) {
-  const borderColor = STATUS_COLORS[data.status];
+  const borderColor = STATUS_BORDER[data.status];
   const bgColor = STATUS_BG[data.status];
-  const dotColor = STATUS_DOTS[data.status];
+  const dotColor = STATUS_DOT[data.status];
   const typeLabel = TYPE_LABELS[data.nodeType] ?? data.nodeType;
   const typeColor = TYPE_COLORS[data.nodeType] ?? TYPE_COLORS["doc-only"];
 
@@ -203,8 +180,8 @@ interface MergeResolverNodeData {
 }
 
 function MergeResolverNode({ data }: NodeProps<Node<MergeResolverNodeData>>) {
-  const dotColor = STATUS_DOTS[data.status];
-  const borderColor = STATUS_COLORS[data.status];
+  const dotColor = STATUS_DOT[data.status];
+  const borderColor = STATUS_BORDER[data.status];
   return (
     <div
       className={`rounded-md border-2 border-dashed ${borderColor} bg-bg-3 px-3 py-2`}

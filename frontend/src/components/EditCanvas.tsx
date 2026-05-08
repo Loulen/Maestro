@@ -90,6 +90,11 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
 
 const nodeTypes = { edit: EditNode, switch: SwitchEditNode };
 
+const DEFAULT_NODE_NAMES: Partial<Record<NodeType, string>> = {
+  "code-mutating": "implementer",
+  "switch": "switch",
+};
+
 function deriveEditNodes(pipeline: PipelineDef): Node[] {
   return pipeline.nodes.map((n, i) => {
     if (n.type === "switch") {
@@ -275,7 +280,7 @@ function EditCanvasInner() {
 
   const handleAddNode = (type: NodeType) => {
     const id = generateNodeId();
-    const name = type === "code-mutating" ? "implementer" : type === "switch" ? "switch" : "node";
+    const name = DEFAULT_NODE_NAMES[type] ?? "node";
 
     const newNode: NodeDef = {
       id,

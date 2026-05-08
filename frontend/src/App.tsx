@@ -99,6 +99,11 @@ export default function App() {
   const editSave = useEditStore((s) => s.save);
   const editActiveTabId = useEditStore((s) => s.activeTabId);
 
+  const editTab = openTabs.find((t) => t.id === editActiveTabId);
+  const editNodeType = editTab && selection.kind === "node" && selection.id
+    ? editTab.pipeline.nodes.find((n) => n.id === selection.id)?.type ?? null
+    : null;
+
   useEffect(() => {
     if (!mountedRef.current) {
       mountedRef.current = true;
@@ -245,12 +250,7 @@ export default function App() {
 
           <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
             {editMode || editScope === "run" ? (
-              (() => {
-                const editTab = openTabs.find((t) => t.id === editActiveTabId);
-                const editNodeType = editTab && selection.kind === "node" && selection.id
-                  ? editTab.pipeline.nodes.find((n) => n.id === selection.id)?.type ?? null
-                  : null;
-                return <>
+              <>
                 {selection.kind === "node" && editNodeType === "switch" && (
                   <SwitchInspector />
                 )}
@@ -268,8 +268,7 @@ export default function App() {
                   />
                 )}
                 {selection.kind === "none" && editScope !== "run" && <PipelineInspector />}
-              </>;
-              })()
+              </>
             ) : (
               <>
                 {selectedNodeType === "start" && selectedRun?.start_node && (

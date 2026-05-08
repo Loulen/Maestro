@@ -1,6 +1,7 @@
 import type { NodeProps, Node } from "@xyflow/react";
 import type { NodeStatus } from "../types";
 import { useEditStore } from "../stores/editStore";
+import { STATUS_BORDER, STATUS_BG, STATUS_DOT } from "../nodeStyles";
 import TriangleHandle from "./TriangleHandle";
 
 interface SwitchBranch {
@@ -86,34 +87,11 @@ interface SwitchRunData {
   [key: string]: unknown;
 }
 
-const STATUS_COLORS: Record<NodeStatus, string> = {
-  pending: "border-st-pending",
-  running: "border-st-running",
-  awaiting_user: "border-st-await",
-  completed: "border-st-done",
-  failed: "border-st-failed",
-};
-
-const STATUS_BG: Record<NodeStatus, string> = {
-  pending: "bg-bg-3",
-  running: "bg-st-running-bg",
-  awaiting_user: "bg-st-await-bg",
-  completed: "bg-st-done-bg",
-  failed: "bg-st-failed-bg",
-};
-
-const STATUS_DOTS: Record<NodeStatus, string> = {
-  pending: "bg-st-pending",
-  running: "bg-st-running",
-  awaiting_user: "bg-st-await",
-  completed: "bg-st-done",
-  failed: "bg-st-failed",
-};
 
 export function SwitchRunNode({ data }: NodeProps<Node<SwitchRunData>>) {
-  const borderColor = STATUS_COLORS[data.status];
+  const borderColor = STATUS_BORDER[data.status];
   const bgColor = STATUS_BG[data.status];
-  const dotColor = STATUS_DOTS[data.status];
+  const dotColor = STATUS_DOT[data.status];
 
   return (
     <div

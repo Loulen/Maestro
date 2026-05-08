@@ -99,12 +99,13 @@ pub fn evaluate_outgoing_edges_with_context(
     let matched_port = if is_switch {
         let switch_node = completed_node.unwrap();
         let chosen =
-            switch_router::route(switch_node, frontmatter_fields, resolved_vars, source_iter);
+            switch_router::route(switch_node, frontmatter_fields, resolved_vars, source_iter)
+                .to_string();
         actions.push(SchedulerAction::SwitchRouted {
             node_id: completed_node_id.to_string(),
-            chosen_branch: chosen.to_string(),
+            chosen_branch: chosen.clone(),
         });
-        Some(chosen.to_string())
+        Some(chosen)
     } else {
         None
     };
