@@ -4926,6 +4926,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_pipeline_returns_loop_switch_fixture() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipelines_dir = tmp.path().join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        let fixture = include_str!("../../../.maestro/pipelines/review-loop.yaml");
+        std::fs::write(pipelines_dir.join("review-loop.yaml"), fixture).unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines/review-loop")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(detail["id"], "review-loop");
+
+        let nodes = detail["pipeline"]["nodes"].as_array().unwrap();
+        assert!(nodes.iter().any(|n| n["type"] == "loop"));
+        assert!(nodes.iter().any(|n| n["type"] == "switch"));
+
+        let loop_node = nodes.iter().find(|n| n["type"] == "loop").unwrap();
+        assert_eq!(loop_node["max_iter"], 3);
+
+        let switch_node = nodes.iter().find(|n| n["type"] == "switch").unwrap();
+        let switch_outputs = switch_node["outputs"].as_array().unwrap();
+        assert!(switch_outputs.iter().any(|o| o["name"] == "pass" && o["when"].is_object()));
+        assert!(switch_outputs.iter().any(|o| o["name"] == "default"));
+    }
+
+    #[tokio::test]
     async fn get_pipeline_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state_with_dir(tmp.path()).await;
