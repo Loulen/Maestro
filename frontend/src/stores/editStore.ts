@@ -5,7 +5,7 @@ import type {
   NodeDef,
   EdgeDef,
 } from "../types";
-import { fetchPipeline, fetchPipelines, savePipeline, fetchRunPipeline, saveRunPipeline } from "../api";
+import { fetchPipeline, fetchPipelines, savePipeline, fetchRunPipeline, saveRunPipeline, deletePipeline as apiDeletePipeline } from "../api";
 import { generateNodeId } from "../lib/nanoid";
 
 export type SelectionKind = "node" | "edge" | "none";
@@ -56,6 +56,9 @@ interface EditState {
 
   // Prompt mutations
   updatePrompt: (nodeId: string, content: string) => void;
+
+  // Pipeline deletion
+  removePipeline: (id: string) => Promise<void>;
 
   // Persistence
   save: (id: string) => Promise<void>;
@@ -377,6 +380,23 @@ export const useEditStore = create<EditState>((set, get) => ({
     set((s) => mutateActiveTab(s, (tab) => {
       tab.prompts = { ...tab.prompts, [nodeId]: content };
     }));
+  },
+
+  removePipeline: async (id: string) => {
+    await apiDeletePipeline(id);
+    set((s) => {
+      const openTabs = s.openTabs.filter((t) => t.id !== id);
+      let activeTabId = s.activeTabId;
+      if (s.activeTabId === id) {
+        activeTabId = openTabs.length > 0 ? openTabs[openTabs.length - 1].id : null;
+      }
+      return {
+        pipelines: s.pipelines.filter((p) => p.id !== id),
+        openTabs,
+        activeTabId,
+        selection: s.activeTabId === id ? { kind: "none" as const, id: null } : s.selection,
+      };
+    });
   },
 
   save: async (id: string) => {

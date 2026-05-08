@@ -288,3 +288,20 @@ export async function instantiateFromLibrary(name: string): Promise<InstantiateR
   if (!resp.ok) throw new Error(`POST /library/${name}/instantiate failed: ${resp.status}`);
   return resp.json();
 }
+
+export interface DeletePipelineError {
+  conflict: boolean;
+  message: string;
+}
+
+export async function deletePipeline(id: string): Promise<void> {
+  const resp = await fetch(`${BASE}/pipelines/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (resp.status === 409) {
+    const body = await resp.json();
+    const err: DeletePipelineError = { conflict: true, message: body.error ?? "Pipeline has active runs" };
+    throw err;
+  }
+  if (!resp.ok) throw new Error(`DELETE /pipelines/${id} failed: ${resp.status}`);
+}

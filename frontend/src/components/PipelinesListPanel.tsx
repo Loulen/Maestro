@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import type { PipelineListEntry, PipelineScope } from "../types";
 import { useEditStore } from "../stores/editStore";
 import { createPipeline } from "../api";
+import ConfirmDeleteModal from "./ConfirmDeleteModal";
 
 const SCOPE_BADGE: Record<PipelineScope, { label: string; cls: string }> = {
   repo: { label: "repo", cls: "border-acc text-acc" },
@@ -15,9 +16,12 @@ export default function PipelinesListPanel() {
   const pipelines = useEditStore((s) => s.pipelines);
   const loadPipelines = useEditStore((s) => s.loadPipelines);
   const openPipeline = useEditStore((s) => s.openPipeline);
+  const removePipeline = useEditStore((s) => s.removePipeline);
   const activeTabId = useEditStore((s) => s.activeTabId);
   const [filter, setFilter] = useState<FilterChip>("all");
   const [showNewModal, setShowNewModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<PipelineListEntry | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; pipeline: PipelineListEntry } | null>(null);
 
   useEffect(() => {
     loadPipelines();
@@ -27,6 +31,16 @@ export default function PipelinesListPanel() {
     filter === "all"
       ? pipelines
       : pipelines.filter((p) => p.scope === filter);
+
+  async function handleConfirmDelete() {
+    if (!deleteTarget) return;
+    try {
+      await removePipeline(deleteTarget.id);
+    } catch {
+      // ignore — 409 or network error
+    }
+    setDeleteTarget(null);
+  }
 
   return (
     <aside className="flex h-full flex-col bg-bg-2">
@@ -78,12 +92,33 @@ export default function PipelinesListPanel() {
             pipeline={p}
             isSelected={p.id === activeTabId}
             onSelect={() => openPipeline(p.id)}
+            onDelete={() => setDeleteTarget(p)}
+            onContextMenu={(x, y) => setContextMenu({ x, y, pipeline: p })}
           />
         ))}
       </div>
 
       {showNewModal && (
         <NewPipelineModal onClose={() => setShowNewModal(false)} />
+      )}
+
+      <ConfirmDeleteModal
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleConfirmDelete}
+        name={deleteTarget?.name ?? ""}
+      />
+
+      {contextMenu && (
+        <PipelineContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onDelete={() => {
+            setDeleteTarget(contextMenu.pipeline);
+            setContextMenu(null);
+          }}
+          onClose={() => setContextMenu(null)}
+        />
       )}
     </aside>
   );
@@ -93,17 +128,25 @@ function PipelineRow({
   pipeline,
   isSelected,
   onSelect,
+  onDelete,
+  onContextMenu,
 }: {
   pipeline: PipelineListEntry;
   isSelected: boolean;
   onSelect: () => void;
+  onDelete: () => void;
+  onContextMenu: (x: number, y: number) => void;
 }) {
   const badge = SCOPE_BADGE[pipeline.scope];
 
   return (
     <button
       onClick={onSelect}
-      className={`flex w-full items-center gap-2 border-b border-line-soft px-3 py-2 text-left transition-colors ${
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(e.clientX, e.clientY);
+      }}
+      className={`group flex w-full items-center gap-2 border-b border-line-soft px-3 py-2 text-left transition-colors ${
         isSelected ? "bg-bg-3 text-fg" : "text-fg-2 hover:bg-bg-3/50"
       }`}
       style={{ fontSize: "11.5px" }}
@@ -118,12 +161,55 @@ function PipelineRow({
         </div>
       </div>
       <span
-        className={`shrink-0 rounded border px-1 py-px ${badge.cls}`}
+        className={`shrink-0 rounded border px-1 py-px group-hover:hidden ${badge.cls}`}
         style={{ fontSize: "9px", fontWeight: 500 }}
       >
         {badge.label}
       </span>
+      <span
+        className="hidden shrink-0 group-hover:inline-flex"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        role="button"
+        title="Delete pipeline"
+      >
+        <Trash2
+          size={14}
+          className="text-fg-4 transition-colors hover:text-st-failed"
+        />
+      </span>
     </button>
+  );
+}
+
+function PipelineContextMenu({
+  x,
+  y,
+  onDelete,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div
+        className="fixed z-50 rounded-md border border-line bg-bg-3 py-1 shadow-lg"
+        style={{ left: x, top: y, fontSize: "11.5px", minWidth: 140 }}
+      >
+        <button
+          onClick={onDelete}
+          className="flex w-full items-center px-3 py-1.5 text-left text-st-failed hover:bg-bg-4"
+        >
+          Delete
+        </button>
+      </div>
+    </>
   );
 }
 
