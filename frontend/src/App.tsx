@@ -14,7 +14,6 @@ import PipelinesListPanel from "./components/PipelinesListPanel";
 import EditCanvas from "./components/EditCanvas";
 import TabBar from "./components/TabBar";
 import NodeInspector from "./components/NodeInspector";
-import EdgeInspector from "./components/EdgeInspector";
 import PipelineInspector from "./components/PipelineInspector";
 import StartInspector from "./components/StartInspector";
 import EndInspector from "./components/EndInspector";
@@ -250,7 +249,6 @@ export default function App() {
                     onLibraryChanged={refreshLibrary}
                   />
                 )}
-                {selection.kind === "edge" && <EdgeInspector />}
                 {selection.kind === "none" && editScope === "run" && selectedRun && (
                   <RunEditSidebar
                     run={selectedRun}
