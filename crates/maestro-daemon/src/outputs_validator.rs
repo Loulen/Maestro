@@ -72,6 +72,7 @@ mod tests {
             variables: HashMap::new(),
             nodes,
             edges: Vec::new(),
+            auto_merge_resolver: true,
         }
     }
 

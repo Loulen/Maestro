@@ -41,6 +41,9 @@ pub enum EventKind {
     NodeCompleted,
     NodeFailed,
     MergeConflictDetected,
+    MergeResolverStarted,
+    MergeResolverCompleted,
+    MergeResolverFailed,
     PipelineModified,
     RunCompleted,
     RunFailed,
@@ -123,6 +126,17 @@ pub struct EndNodeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResolverInfo {
+    pub status: NodeStatus,
+    pub conflicting_node_id: String,
+    pub iter: i64,
+    pub session_name: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
     pub status: RunStatus,
@@ -139,6 +153,8 @@ pub struct RunState {
     pub start_node: Option<StartNodeInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_node: Option<EndNodeInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_resolver: Option<MergeResolverInfo>,
 }
 
 impl RunState {
@@ -155,6 +171,7 @@ impl RunState {
             node_defs: Vec::new(),
             start_node: None,
             end_node: None,
+            merge_resolver: None,
         }
     }
 }
@@ -329,7 +346,48 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                 }
             }
             EventKind::MergeConflictDetected => {
-                // Informational event — the run is halted via a subsequent RunFailed
+                // Informational — the run either spawns a resolver or fails
+            }
+            EventKind::MergeResolverStarted => {
+                if let Some(ref payload) = event.payload {
+                    let conflicting_node_id = payload
+                        .get("conflicting_node_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let iter = payload.get("iter").and_then(|v| v.as_i64()).unwrap_or(1);
+                    let session_name = payload
+                        .get("session_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    state.merge_resolver = Some(MergeResolverInfo {
+                        status: NodeStatus::Running,
+                        conflicting_node_id,
+                        iter,
+                        session_name,
+                        started_at: Some(event.ts.clone()),
+                        completed_at: None,
+                        failure_reason: None,
+                    });
+                }
+            }
+            EventKind::MergeResolverCompleted => {
+                if let Some(ref mut mr) = state.merge_resolver {
+                    mr.status = NodeStatus::Completed;
+                    mr.completed_at = Some(event.ts.clone());
+                }
+            }
+            EventKind::MergeResolverFailed => {
+                if let Some(ref mut mr) = state.merge_resolver {
+                    mr.status = NodeStatus::Failed;
+                    mr.completed_at = Some(event.ts.clone());
+                    if let Some(ref payload) = event.payload {
+                        mr.failure_reason = payload
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                    }
+                }
             }
             EventKind::PipelineModified => {
                 // The run-scoped pipeline changed on disk. Node_defs/edges are
@@ -1343,5 +1401,129 @@ mod tests {
 
         let state = project(&events).unwrap();
         assert!(state.end_node.is_none());
+    }
+
+    // --- Merge Resolver projection tests (issue #8) ---
+
+    #[test]
+    fn merge_resolver_full_lifecycle_conflict_to_completion() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "fan-in" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("impl-a"), Some(1)),
+            make_event(EventKind::NodeStarted, Some("impl-b"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("impl-a"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("impl-b"), Some(1)),
+            make_event_with_payload(
+                EventKind::MergeConflictDetected,
+                Some("impl-b"),
+                serde_json::json!({
+                    "reason": "conflict merging impl-b into pipeline branch"
+                }),
+            ),
+            make_event_with_payload(
+                EventKind::MergeResolverStarted,
+                None,
+                serde_json::json!({
+                    "conflicting_node_id": "impl-b",
+                    "iter": 1,
+                    "session_name": "maestro-run-1-__merge_resolver__-iter-1"
+                }),
+            ),
+            make_event(EventKind::MergeResolverCompleted, None, None),
+            make_event(EventKind::RunCompleted, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Completed);
+        assert_eq!(state.nodes["impl-a"].status, NodeStatus::Completed);
+        assert_eq!(state.nodes["impl-b"].status, NodeStatus::Completed);
+
+        let mr = state.merge_resolver.as_ref().unwrap();
+        assert_eq!(mr.status, NodeStatus::Completed);
+        assert_eq!(mr.conflicting_node_id, "impl-b");
+        assert_eq!(mr.iter, 1);
+        assert_eq!(
+            mr.session_name.as_deref(),
+            Some("maestro-run-1-__merge_resolver__-iter-1")
+        );
+        assert!(mr.completed_at.is_some());
+        assert!(mr.failure_reason.is_none());
+    }
+
+    #[test]
+    fn merge_resolver_failure_preserves_info_on_run_failed() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "fan-in" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("impl-a"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("impl-a"), Some(1)),
+            make_event_with_payload(
+                EventKind::MergeConflictDetected,
+                Some("impl-a"),
+                serde_json::json!({ "reason": "conflict" }),
+            ),
+            make_event_with_payload(
+                EventKind::MergeResolverStarted,
+                None,
+                serde_json::json!({
+                    "conflicting_node_id": "impl-a",
+                    "iter": 1,
+                    "session_name": "resolver-session"
+                }),
+            ),
+            make_event_with_payload(
+                EventKind::MergeResolverFailed,
+                None,
+                serde_json::json!({
+                    "reason": "conflict markers remain"
+                }),
+            ),
+            make_event(EventKind::RunFailed, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+
+        let mr = state.merge_resolver.as_ref().unwrap();
+        assert_eq!(mr.status, NodeStatus::Failed);
+        assert_eq!(mr.conflicting_node_id, "impl-a");
+        assert_eq!(mr.session_name.as_deref(), Some("resolver-session"));
+        assert_eq!(
+            mr.failure_reason.as_deref(),
+            Some("conflict markers remain")
+        );
+    }
+
+    #[test]
+    fn merge_conflict_without_resolver_has_no_merge_resolver_info() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "no-resolver" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("impl-1"), Some(1)),
+            make_event(EventKind::NodeCompleted, Some("impl-1"), Some(1)),
+            make_event_with_payload(
+                EventKind::MergeConflictDetected,
+                Some("impl-1"),
+                serde_json::json!({ "reason": "conflict" }),
+            ),
+            make_event(EventKind::RunFailed, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Failed);
+        assert!(
+            state.merge_resolver.is_none(),
+            "no resolver should be present when auto_merge_resolver is false"
+        );
     }
 }

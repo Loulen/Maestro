@@ -130,6 +130,12 @@ pub struct PipelineDef {
     pub nodes: Vec<NodeDef>,
     #[serde(default)]
     pub edges: Vec<EdgeDef>,
+    #[serde(default = "default_true")]
+    pub auto_merge_resolver: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn infer_variable_type(val: &serde_yaml::Value) -> VariableType {
@@ -265,7 +271,14 @@ pub fn parse_pipeline(yaml: &str) -> Result<ParseResult, ParseError> {
         }
     }
 
-    let known_keys: &[&str] = &["name", "version", "variables", "nodes", "edges"];
+    let known_keys: &[&str] = &[
+        "name",
+        "version",
+        "variables",
+        "nodes",
+        "edges",
+        "auto_merge_resolver",
+    ];
     if let Some(mapping) = raw.as_mapping() {
         for key in mapping.keys() {
             if let Some(k) = key.as_str() {
@@ -1231,5 +1244,35 @@ nodes:
             path.to_str().unwrap(),
             "/runs/run-1/pipeline.prompts/ab12cd34.md"
         );
+    }
+
+    // --- auto_merge_resolver tests (issue #8) ---
+
+    #[test]
+    fn auto_merge_resolver_defaults_to_true() {
+        let result = parse_pipeline(VALID_MINIMAL).unwrap();
+        assert!(result.pipeline.auto_merge_resolver);
+    }
+
+    #[test]
+    fn auto_merge_resolver_explicit_false() {
+        let yaml = r#"
+name: no-resolver
+auto_merge_resolver: false
+nodes: []
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        assert!(!result.pipeline.auto_merge_resolver);
+    }
+
+    #[test]
+    fn auto_merge_resolver_explicit_true() {
+        let yaml = r#"
+name: with-resolver
+auto_merge_resolver: true
+nodes: []
+"#;
+        let result = parse_pipeline(yaml).unwrap();
+        assert!(result.pipeline.auto_merge_resolver);
     }
 }
