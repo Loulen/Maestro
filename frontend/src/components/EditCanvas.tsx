@@ -330,50 +330,39 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete }: EditCanvasProps) {
     const id = generateNodeId();
     const name = DEFAULT_NODE_NAMES[type] ?? "node";
 
-    const newNode: NodeDef = type === "loop"
-      ? {
-          id,
-          name,
-          type,
-          inputs: [
-            { name: "in", repeated: false, side: "left" },
-            { name: "break", repeated: false, side: "left" },
-          ],
-          outputs: [
-            { name: "body", repeated: false, side: "right" },
-            { name: "done", repeated: false, side: "right" },
-          ],
-          interactive: false,
-          view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
-          max_iter: 5,
-        }
-      : type === "for-each"
-      ? {
-          id,
-          name,
-          type,
-          inputs: [
-            { name: "in", repeated: false, side: "left" },
-            { name: "break", repeated: false, side: "left" },
-          ],
-          outputs: [
-            { name: "body", repeated: false, side: "right" },
-            { name: "done", repeated: false, side: "right" },
-          ],
-          interactive: false,
-          view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
-        }
-      : {
-          id,
-          name,
-          type,
-          inputs: [{ name: "in", repeated: false, side: "left" }],
-          outputs: type === "switch"
-            ? [{ name: "default", repeated: false, side: "right" }]
-            : [{ name: "out", repeated: false, side: "right" }],
-          interactive: false,
-          view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
-        };
+    const view = { x: 200, y: 80 + pipeline.nodes.length * 140 };
+    let newNode: NodeDef;
+
+    if (type === "loop" || type === "for-each") {
+      newNode = {
+        id,
+        name,
+        type,
+        inputs: [
+          { name: "in", repeated: false, side: "left" },
+          { name: "break", repeated: false, side: "left" },
+        ],
+        outputs: [
+          { name: "body", repeated: false, side: "right" },
+          { name: "done", repeated: false, side: "right" },
+        ],
+        interactive: false,
+        view,
+        ...(type === "loop" ? { max_iter: 5 } : {}),
+      };
+    } else {
+      newNode = {
+        id,
+        name,
+        type,
+        inputs: [{ name: "in", repeated: false, side: "left" }],
+        outputs: type === "switch"
+          ? [{ name: "default", repeated: false, side: "right" }]
+          : [{ name: "out", repeated: false, side: "right" }],
+        interactive: false,
+        view,
+      };
+    }
     addNodeToStore(newNode);
   };
 

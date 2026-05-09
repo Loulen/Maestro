@@ -467,12 +467,7 @@ fn handle_foreach_input(
 ) -> Vec<SchedulerAction> {
     let mut actions = Vec::new();
 
-    if pipeline
-        .nodes
-        .iter()
-        .find(|n| n.id == foreach_node_id)
-        .is_none()
-    {
+    if !pipeline.nodes.iter().any(|n| n.id == foreach_node_id) {
         return actions;
     }
 

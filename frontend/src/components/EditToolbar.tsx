@@ -1,4 +1,5 @@
 import { Plus, Repeat, GitBranch } from "lucide-react";
+import { ForEachIcon } from "./ForEachNode";
 import type { NodeType } from "../types";
 import type { LibraryEntry } from "../api";
 import { Tooltip } from "./ui/tooltip";
@@ -46,15 +47,7 @@ export default function EditToolbar({ onAddNode, libraryEntries, onLibraryDelete
           onClick={() => onAddNode("for-each")}
           className="grid h-7 w-7 cursor-pointer place-items-center rounded text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg active:bg-acc active:text-bg-0"
         >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" stroke="none">
-            <circle cx="3" cy="7" r="1.6" />
-            <circle cx="9" cy="4" r="1.4" />
-            <circle cx="9" cy="7" r="1.4" />
-            <circle cx="9" cy="10" r="1.4" />
-            <line x1="4.6" y1="7" x2="7" y2="4" stroke="currentColor" strokeWidth="1.2" />
-            <line x1="4.6" y1="7" x2="7" y2="7" stroke="currentColor" strokeWidth="1.2" />
-            <line x1="4.6" y1="7" x2="7" y2="10" stroke="currentColor" strokeWidth="1.2" />
-          </svg>
+          <ForEachIcon />
         </button>
       </Tooltip>
 

@@ -17,7 +17,7 @@ interface ForEachEditData {
   [key: string]: unknown;
 }
 
-const ForEachIcon = () => (
+export const ForEachIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" stroke="none">
     <circle cx="3" cy="7" r="1.6" />
     <circle cx="9" cy="4" r="1.4" />
