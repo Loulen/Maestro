@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Star } from "lucide-react";
 import { useEditStore, serializePipeline } from "../stores/editStore";
-import type { VariableDef } from "../types";
+import type { PipelineDef, VariableDef } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
 import { saveLibraryPipeline, deleteLibraryPipeline } from "../api";
 import type { LibraryPipelineEntry } from "../api";
@@ -27,12 +27,9 @@ export default function PipelineInspector({
   const pipeline = tab.pipeline;
   const variables = Object.entries(pipeline.variables);
 
-  const isStarred = libraryPipelines.some(
-    (lp) => lp.name === pipeline.name,
-  );
-  const starredId = libraryPipelines.find(
-    (lp) => lp.name === pipeline.name,
-  )?.id ?? null;
+  const starredEntry = libraryPipelines.find((lp) => lp.name === pipeline.name);
+  const isStarred = !!starredEntry;
+  const starredId = starredEntry?.id ?? null;
 
   function handleAddVariable() {
     let name = "new_var";
@@ -141,7 +138,7 @@ function PipelineStarButton({
 }: {
   isStarred: boolean;
   starredId: string | null;
-  pipeline: { name: string } & Record<string, unknown>;
+  pipeline: PipelineDef;
   onLibraryChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -153,8 +150,8 @@ function PipelineStarButton({
       if (isStarred && starredId) {
         await deleteLibraryPipeline(starredId);
       } else {
-        const yaml = serializePipeline(pipeline as Parameters<typeof serializePipeline>[0]);
-        await saveLibraryPipeline(pipeline.name as string, yaml);
+        const yaml = serializePipeline(pipeline);
+        await saveLibraryPipeline(pipeline.name, yaml);
       }
       onLibraryChanged();
     } catch {

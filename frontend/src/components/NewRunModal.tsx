@@ -5,6 +5,8 @@ import { createRun, fetchPipelines } from "../api";
 import type { LibraryPipelineEntry } from "../api";
 import { useEditStore } from "../stores/editStore";
 
+const LIB_PREFIX = "__lib__";
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -63,9 +65,8 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
 
   const handlePipelineChange = useCallback(
     (value: string) => {
-      const libPrefix = "__lib__";
-      if (value.startsWith(libPrefix)) {
-        const libId = value.slice(libPrefix.length);
+      if (value.startsWith(LIB_PREFIX)) {
+        const libId = value.slice(LIB_PREFIX.length);
         const libEntry = libraryPipelines.find((p) => p.id === libId);
         setSelectedPipeline(libEntry?.name ?? "");
         setSelectedLibraryId(libId);
@@ -165,13 +166,13 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
             <select
               className="w-full rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none"
               style={{ fontSize: "12px" }}
-              value={selectedLibraryId ? `__lib__${selectedLibraryId}` : selectedPipeline}
+              value={selectedLibraryId ? `${LIB_PREFIX}${selectedLibraryId}` : selectedPipeline}
               onChange={(e) => handlePipelineChange(e.target.value)}
             >
               {libraryPipelines.length > 0 && (
                 <optgroup label="★ Starred templates">
                   {libraryPipelines.map((p) => (
-                    <option key={`lib-${p.id}`} value={`__lib__${p.id}`}>
+                    <option key={`lib-${p.id}`} value={`${LIB_PREFIX}${p.id}`}>
                       {p.name}
                     </option>
                   ))}
