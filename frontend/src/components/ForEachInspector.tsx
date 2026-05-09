@@ -1,5 +1,5 @@
 import { useEditStore } from "../stores/editStore";
-import type { PortSide } from "../types";
+import type { FrontmatterFieldDecl, PortSide } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
 import SidePicker from "./SidePicker";
 
@@ -9,6 +9,26 @@ const FOREACH_PORTS = [
   { name: "body", dir: "output" as const },
   { name: "done", dir: "output" as const },
 ];
+
+function collectUpstreamListFields(
+  pipeline: { nodes: Array<{ id: string; outputs: Array<{ name: string; frontmatter?: Record<string, FrontmatterFieldDecl> | null }> }>; edges: Array<{ source: { node: string; port: string }; target: { node: string; port: string } }> },
+  nodeId: string,
+): string[] {
+  const fields: string[] = [];
+  for (const edge of pipeline.edges) {
+    if (edge.target.node !== nodeId || edge.target.port !== "in") continue;
+    const srcNode = pipeline.nodes.find((n) => n.id === edge.source.node);
+    if (!srcNode) continue;
+    const srcPort = srcNode.outputs.find((p) => p.name === edge.source.port);
+    if (!srcPort?.frontmatter) continue;
+    for (const [fieldName, decl] of Object.entries(srcPort.frontmatter)) {
+      if (decl.type === "list" && !fields.includes(fieldName)) {
+        fields.push(fieldName);
+      }
+    }
+  }
+  return fields;
+}
 
 export default function ForEachInspector() {
   const openTabs = useEditStore((s) => s.openTabs);
@@ -23,6 +43,17 @@ export default function ForEachInspector() {
       : null;
 
   if (!tab || !node || node.type !== "for-each") return null;
+
+  const listFields = collectUpstreamListFields(tab.pipeline, node.id);
+  const hasInEdge = tab.pipeline.edges.some(
+    (e) => e.target.node === node.id && e.target.port === "in",
+  );
+  const dropdownDisabled = listFields.length === 0;
+
+  function handleOverChange(value: string) {
+    const over = value === "" ? null : value;
+    updateNode(node!.id, { over });
+  }
 
   function handlePortSideChange(portName: string, dir: "input" | "output", side: PortSide) {
     const isInput = dir === "input";
@@ -73,6 +104,43 @@ export default function ForEachInspector() {
           />
         </Field>
 
+        {/* Iteration source */}
+        <SectionHead title="Iteration source" />
+        <Field label="over">
+          <select
+            data-testid="foreach-over-select"
+            value={node.over ?? ""}
+            onChange={(e) => handleOverChange(e.target.value)}
+            disabled={dropdownDisabled}
+            className="w-full rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg outline-none focus:border-acc disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">— select field —</option>
+            {listFields.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+            {node.over && !listFields.includes(node.over) && (
+              <option value={node.over}>{node.over} (stale)</option>
+            )}
+          </select>
+        </Field>
+        {dropdownDisabled && hasInEdge && (
+          <p className="text-fg-4" style={{ fontSize: "10px", lineHeight: 1.5 }}>
+            No <code className="text-fg-3">list</code>-typed fields found in
+            upstream output schema. Add a frontmatter field with{" "}
+            <code className="text-fg-3">type: list</code> to the upstream
+            node&apos;s output port.
+          </p>
+        )}
+        {!hasInEdge && (
+          <p className="text-fg-4" style={{ fontSize: "10px", lineHeight: 1.5 }}>
+            Connect an upstream node to the{" "}
+            <code className="text-fg-3">in</code> port to configure the
+            iteration source.
+          </p>
+        )}
+
         {/* Ports */}
         <SectionHead title="Ports" count={4} />
         <div className="flex flex-col gap-2">
@@ -115,9 +183,9 @@ export default function ForEachInspector() {
           <code className="text-fg-3">break</code> (inputs);{" "}
           <code className="text-fg-3">body</code>,{" "}
           <code className="text-fg-3">done</code> (outputs). The upstream
-          artifact must include an <code className="text-fg-3">items</code>{" "}
-          frontmatter field (YAML sequence). Each body iteration receives one
-          item.
+          artifact&apos;s frontmatter field named by{" "}
+          <code className="text-fg-3">over</code> provides the iteration
+          list.
         </p>
       </div>
     </aside>

@@ -86,6 +86,9 @@ fn needs_migration(yaml_value: &serde_yaml::Value) -> bool {
     };
     for node in nodes {
         let node_type = node.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if node_type == "for-each" && node.get("over").is_none() {
+            return true;
+        }
         if matches!(node_type, "start" | "end" | "switch" | "loop" | "merge") {
             continue;
         }
@@ -226,6 +229,7 @@ pub fn migrate_pipeline_yaml(
     }
 
     inject_start_end_nodes(&mut doc);
+    backfill_foreach_over(&mut doc);
 
     let yaml_text =
         serde_yaml::to_string(&doc).map_err(|e| format!("YAML serialize error: {e}"))?;
@@ -235,6 +239,28 @@ pub fn migrate_pipeline_yaml(
         yaml_text,
         prompt_moves,
     })
+}
+
+fn backfill_foreach_over(doc: &mut serde_yaml::Value) {
+    let nodes = match doc.get_mut("nodes").and_then(|n| n.as_sequence_mut()) {
+        Some(seq) => seq,
+        None => return,
+    };
+    let over_key = serde_yaml::Value::String("over".into());
+    for node in nodes.iter_mut() {
+        let is_foreach = node
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "for-each");
+        if !is_foreach {
+            continue;
+        }
+        if let Some(m) = node.as_mapping_mut() {
+            if !m.contains_key(&over_key) {
+                m.insert(over_key.clone(), serde_yaml::Value::String("items".into()));
+            }
+        }
+    }
 }
 
 fn backfill_port_sides(node: &mut serde_yaml::Value, key: &str, default_side: &str) {
@@ -895,6 +921,7 @@ edges:
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -920,6 +947,7 @@ edges:
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -945,6 +973,7 @@ edges:
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -1042,5 +1071,89 @@ edges:
         };
         let diags = lint_missing_merge(&pipeline);
         assert!(diags.is_empty());
+    }
+
+    // --- ForEach `over` migration tests (issue #65) ---
+
+    #[test]
+    fn migrates_foreach_without_over_to_over_items() {
+        let yaml = r#"
+name: test
+version: "1.0"
+nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
+  - id: aBcD1234
+    name: per-issue
+    type: for-each
+    inputs:
+      - name: in
+        side: left
+      - name: break
+        side: left
+    outputs:
+      - name: body
+        side: right
+      - name: done
+        side: right
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges: []
+"#;
+        let result = migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
+        assert!(result.migrated);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&result.yaml_text).unwrap();
+        let nodes = parsed["nodes"].as_sequence().unwrap();
+        let fe = nodes
+            .iter()
+            .find(|n| n["type"].as_str() == Some("for-each"))
+            .unwrap();
+        assert_eq!(fe["over"].as_str().unwrap(), "items");
+    }
+
+    #[test]
+    fn foreach_with_existing_over_not_overwritten() {
+        let yaml = r#"
+name: test
+version: "1.0"
+nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
+  - id: aBcD1234
+    name: per-issue
+    type: for-each
+    over: tasks
+    inputs:
+      - name: in
+        side: left
+      - name: break
+        side: left
+    outputs:
+      - name: body
+        side: right
+      - name: done
+        side: right
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges: []
+"#;
+        let result = migrate_pipeline_yaml(yaml, Path::new("/tmp/test.yaml")).unwrap();
+        assert!(
+            !result.migrated,
+            "pipeline with over already set should not need migration"
+        );
     }
 }

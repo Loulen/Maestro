@@ -359,6 +359,7 @@ mod tests {
                 interactive: false,
                 view: None,
                 max_iter: None,
+                over: None,
             }],
             edges: vec![],
         }
@@ -478,6 +479,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         });
         pipeline.edges.push(EdgeDef {
             source: EdgeEndpoint {
@@ -569,6 +571,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
                 NodeDef {
                     id: "researcher".into(),
@@ -585,6 +588,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
                 NodeDef {
                     id: "implementer".into(),
@@ -616,6 +620,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
             ],
             edges: vec![
@@ -707,6 +712,7 @@ mod tests {
                 interactive: false,
                 view: None,
                 max_iter: None,
+                over: None,
             }],
             edges: vec![],
         };

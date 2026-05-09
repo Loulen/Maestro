@@ -339,6 +339,24 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
     [],
   );
 
+  const diagnostics = useMemo(() => {
+    if (!tab) return [];
+    const base = tab.diagnostics ?? [];
+    const extra: string[] = [];
+    for (const n of tab.pipeline.nodes) {
+      if (n.type !== "for-each" || n.over) continue;
+      const hasInEdge = tab.pipeline.edges.some(
+        (e) => e.target.node === n.id && e.target.port === "in",
+      );
+      if (hasInEdge) {
+        extra.push(
+          `ForEach node "${n.name ?? n.id}" has an "in" edge but no "over" field set. Select the node and choose which list field to iterate.`,
+        );
+      }
+    }
+    return [...base, ...extra];
+  }, [tab]);
+
   if (!tab || !pipeline) {
     return (
       <div className="flex flex-1 items-center justify-center text-fg-4">
@@ -403,8 +421,6 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
     }
     addNodeToStore(newNode);
   };
-
-  const diagnostics = tab.diagnostics ?? [];
 
   return (
     <div className="relative flex-1" ref={reactFlowRef}>

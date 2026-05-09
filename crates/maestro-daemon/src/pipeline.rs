@@ -92,6 +92,8 @@ pub struct NodeDef {
     pub view: Option<ViewPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_iter: Option<serde_yaml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1969,5 +1971,93 @@ nodes:
             msg.contains("must have output 'body'"),
             "error should mention body: {msg}"
         );
+    }
+
+    // --- ForEach `over` field tests (issue #65) ---
+
+    #[test]
+    fn parses_foreach_node_with_over_field() {
+        let yaml = with_start_end(
+            r#"
+name: foreach-over
+nodes:
+  - id: ab000001
+    name: per-issue
+    type: for-each
+    over: issues
+    inputs:
+      - name: in
+      - name: break
+    outputs:
+      - name: body
+      - name: done
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
+        let fe = result
+            .pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == "ab000001")
+            .unwrap();
+        assert_eq!(fe.node_type, NodeType::ForEach);
+        assert_eq!(fe.over.as_deref(), Some("issues"));
+    }
+
+    #[test]
+    fn foreach_node_without_over_field_defaults_to_none() {
+        let yaml = with_start_end(
+            r#"
+name: foreach-no-over
+nodes:
+  - id: ab000001
+    name: per-issue
+    type: for-each
+    inputs:
+      - name: in
+      - name: break
+    outputs:
+      - name: body
+      - name: done
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
+        let fe = result
+            .pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == "ab000001")
+            .unwrap();
+        assert!(fe.over.is_none());
+    }
+
+    #[test]
+    fn foreach_over_field_round_trips_through_serialize() {
+        let yaml = with_start_end(
+            r#"
+name: foreach-rt
+nodes:
+  - id: ab000001
+    name: per-issue
+    type: for-each
+    over: tasks
+    inputs:
+      - name: in
+      - name: break
+    outputs:
+      - name: body
+      - name: done
+"#,
+        );
+        let result = parse_pipeline(&yaml).unwrap();
+        let serialized = serde_yaml::to_string(&result.pipeline).unwrap();
+        let result2 = parse_pipeline(&serialized).unwrap();
+        let fe = result2
+            .pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == "ab000001")
+            .unwrap();
+        assert_eq!(fe.over.as_deref(), Some("tasks"));
     }
 }

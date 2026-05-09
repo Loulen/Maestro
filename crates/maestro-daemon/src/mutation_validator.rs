@@ -86,6 +86,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -101,6 +102,7 @@ mod tests {
             max_iter: Some(serde_yaml::Value::Number(serde_yaml::Number::from(
                 max_iter,
             ))),
+            over: None,
         }
     }
 
@@ -111,7 +113,6 @@ mod tests {
             variables: HashMap::new(),
             nodes,
             edges: vec![],
-            auto_merge_resolver: true,
         }
     }
 
@@ -128,6 +129,8 @@ mod tests {
                     completed_at: None,
                     failure_reason: None,
                     iterations: vec![],
+                    frontmatter_retries: 0,
+                    frontmatter_violations: Vec::new(),
                 },
             );
         }

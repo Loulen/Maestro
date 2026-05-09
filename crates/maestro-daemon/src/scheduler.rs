@@ -458,6 +458,17 @@ pub fn evaluate_loop_body_completion(
     actions
 }
 
+pub fn foreach_resolve_collection(
+    frontmatter_fields: &HashMap<String, serde_yaml::Value>,
+    over: &str,
+) -> Vec<serde_yaml::Value> {
+    frontmatter_fields
+        .get(over)
+        .and_then(|v| v.as_sequence())
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn handle_foreach_input(
     pipeline: &PipelineDef,
     run_state: &RunState,
@@ -467,9 +478,10 @@ fn handle_foreach_input(
 ) -> Vec<SchedulerAction> {
     let mut actions = Vec::new();
 
-    if !pipeline.nodes.iter().any(|n| n.id == foreach_node_id) {
-        return actions;
-    }
+    let foreach_node = match pipeline.nodes.iter().find(|n| n.id == foreach_node_id) {
+        Some(n) => n,
+        None => return actions,
+    };
 
     match target_port {
         "in" => {
@@ -477,11 +489,8 @@ fn handle_foreach_input(
                 return actions;
             }
 
-            let items = frontmatter_fields
-                .get("items")
-                .and_then(|v| v.as_sequence())
-                .cloned()
-                .unwrap_or_default();
+            let over_field = foreach_node.over.as_deref().unwrap_or("items");
+            let items = foreach_resolve_collection(frontmatter_fields, over_field);
 
             let total = items.len() as i64;
 
@@ -664,6 +673,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -683,6 +693,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -1138,6 +1149,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -1341,6 +1353,7 @@ mod tests {
             max_iter: Some(serde_yaml::Value::Number(serde_yaml::Number::from(
                 max_iter,
             ))),
+            over: None,
         }
     }
 
@@ -1774,6 +1787,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -1950,6 +1964,12 @@ mod tests {
 
     // --- ForEach dispatch ---
 
+    fn make_foreach_node_with_over(id: &str, over: &str) -> NodeDef {
+        let mut node = make_foreach_node(id);
+        node.over = Some(over.into());
+        node
+    }
+
     fn make_foreach_node(id: &str) -> NodeDef {
         NodeDef {
             id: id.into(),
@@ -1990,6 +2010,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -2010,7 +2031,6 @@ mod tests {
                 make_edge("fe1", "body", "worker", "in"),
                 make_edge("fe1", "done", "end", "result"),
             ],
-            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -2060,7 +2080,6 @@ mod tests {
                 make_edge("worker", "out", "fe1", "done"),
                 make_edge("fe1", "done", "end", "result"),
             ],
-            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -2125,7 +2144,6 @@ mod tests {
                 make_edge("worker", "out", "fe1", "break"),
                 make_edge("fe1", "done", "end", "result"),
             ],
-            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -2174,7 +2192,6 @@ mod tests {
                 make_edge("worker", "out", "fe1", "done"),
                 make_edge("fe1", "done", "end", "result"),
             ],
-            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -2236,7 +2253,6 @@ mod tests {
                 make_edge("worker", "out", "fe1", "done"),
                 make_edge("fe1", "done", "end", "result"),
             ],
-            auto_merge_resolver: true,
         };
 
         let mut state = empty_run_state();
@@ -2286,7 +2302,6 @@ mod tests {
                 make_node("worker", &["in"], &["out"]),
             ],
             edges: vec![make_edge("fe1", "body", "worker", "in")],
-            auto_merge_resolver: true,
         };
 
         let state = empty_run_state();
@@ -2294,6 +2309,341 @@ mod tests {
         assert!(
             !ready.contains(&"fe1".to_string()),
             "ForEach should not appear in ready_nodes"
+        );
+    }
+
+    // --- foreach_resolve_collection tests (issue #65) ---
+
+    #[test]
+    fn foreach_resolve_collection_returns_list_for_matching_field() {
+        let mut fm = HashMap::new();
+        fm.insert(
+            "issues".into(),
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("a".into()),
+                serde_yaml::Value::String("b".into()),
+            ]),
+        );
+        let result = foreach_resolve_collection(&fm, "issues");
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn foreach_resolve_collection_returns_empty_for_missing_field() {
+        let fm = HashMap::new();
+        let result = foreach_resolve_collection(&fm, "issues");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn foreach_resolve_collection_returns_empty_for_wrong_type() {
+        let mut fm = HashMap::new();
+        fm.insert(
+            "issues".into(),
+            serde_yaml::Value::String("not-a-list".into()),
+        );
+        let result = foreach_resolve_collection(&fm, "issues");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn foreach_with_over_field_reads_named_frontmatter_field() {
+        let pipeline = PipelineDef {
+            name: "foreach-over".into(),
+            version: None,
+            variables: HashMap::new(),
+            nodes: vec![
+                make_node("upstream", &["in"], &["out"]),
+                make_foreach_node_with_over("fe1", "tasks"),
+                make_node("worker", &["in"], &["out"]),
+                make_end_node(),
+            ],
+            edges: vec![
+                make_edge("upstream", "out", "fe1", "in"),
+                make_edge("fe1", "body", "worker", "in"),
+                make_edge("fe1", "done", "end", "result"),
+            ],
+        };
+
+        let mut state = empty_run_state();
+        state
+            .nodes
+            .insert("upstream".into(), completed_node("upstream"));
+
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert(
+            "tasks".into(),
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("t1".into()),
+                serde_yaml::Value::String("t2".into()),
+            ]),
+        );
+
+        let actions = evaluate_outgoing_edges_with_context(
+            &pipeline,
+            &state,
+            "upstream",
+            &HashMap::new(),
+            &frontmatter,
+        );
+
+        assert!(actions.contains(&SchedulerAction::ForEachStarted {
+            foreach_node_id: "fe1".into(),
+            total_items: 2,
+            items: vec![
+                serde_yaml::Value::String("t1".into()),
+                serde_yaml::Value::String("t2".into()),
+            ],
+        }));
+        for i in 1..=2 {
+            assert!(
+                actions.contains(&SchedulerAction::Spawn {
+                    node_id: "worker".into(),
+                    iter: i,
+                }),
+                "should spawn worker iter {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreach_without_over_falls_back_to_items() {
+        let pipeline = PipelineDef {
+            name: "foreach-fallback".into(),
+            version: None,
+            variables: HashMap::new(),
+            nodes: vec![
+                make_node("upstream", &["in"], &["out"]),
+                make_foreach_node("fe1"),
+                make_node("worker", &["in"], &["out"]),
+                make_end_node(),
+            ],
+            edges: vec![
+                make_edge("upstream", "out", "fe1", "in"),
+                make_edge("fe1", "body", "worker", "in"),
+                make_edge("fe1", "done", "end", "result"),
+            ],
+        };
+
+        let mut state = empty_run_state();
+        state
+            .nodes
+            .insert("upstream".into(), completed_node("upstream"));
+
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert(
+            "items".into(),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("x".into())]),
+        );
+
+        let actions = evaluate_outgoing_edges_with_context(
+            &pipeline,
+            &state,
+            "upstream",
+            &HashMap::new(),
+            &frontmatter,
+        );
+
+        assert!(actions.contains(&SchedulerAction::ForEachStarted {
+            foreach_node_id: "fe1".into(),
+            total_items: 1,
+            items: vec![serde_yaml::Value::String("x".into())],
+        }));
+    }
+
+    // --- Layer 3a: integration test — parse YAML + schedule (issue #65) ---
+
+    #[test]
+    fn integration_foreach_over_issues_with_typed_upstream() {
+        let yaml = r#"
+name: foreach-integration
+nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
+  - id: ab000001
+    name: lister
+    type: doc-only
+    inputs:
+      - name: task
+    outputs:
+      - name: plan
+        frontmatter:
+          issues:
+            type: list
+  - id: ab000002
+    name: per-issue
+    type: for-each
+    over: issues
+    inputs:
+      - name: in
+      - name: break
+    outputs:
+      - name: body
+      - name: done
+  - id: ab000003
+    name: worker
+    type: code-mutating
+    inputs:
+      - name: in
+    outputs:
+      - name: out
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: ab000001, port: task }
+  - source: { node: ab000001, port: plan }
+    target: { node: ab000002, port: in }
+  - source: { node: ab000002, port: body }
+    target: { node: ab000003, port: in }
+  - source: { node: ab000002, port: done }
+    target: { node: end, port: result }
+"#;
+        let result = crate::pipeline::parse_pipeline(yaml).unwrap();
+        let pipeline = result.pipeline;
+
+        let fe = pipeline
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::ForEach)
+            .unwrap();
+        assert_eq!(fe.over.as_deref(), Some("issues"));
+
+        let mut state = empty_run_state();
+        state
+            .nodes
+            .insert("ab000001".into(), completed_node("ab000001"));
+
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert(
+            "issues".into(),
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("a".into()),
+                serde_yaml::Value::String("b".into()),
+                serde_yaml::Value::String("c".into()),
+            ]),
+        );
+
+        let actions = evaluate_outgoing_edges_with_context(
+            &pipeline,
+            &state,
+            "ab000001",
+            &HashMap::new(),
+            &frontmatter,
+        );
+
+        assert!(
+            actions.contains(&SchedulerAction::ForEachStarted {
+                foreach_node_id: "ab000002".into(),
+                total_items: 3,
+                items: vec![
+                    serde_yaml::Value::String("a".into()),
+                    serde_yaml::Value::String("b".into()),
+                    serde_yaml::Value::String("c".into()),
+                ],
+            }),
+            "3 issues should produce ForEachStarted with total_items=3"
+        );
+        for i in 1..=3 {
+            assert!(
+                actions.contains(&SchedulerAction::Spawn {
+                    node_id: "ab000003".into(),
+                    iter: i,
+                }),
+                "should spawn worker iter {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn integration_foreach_over_missing_field_fires_empty() {
+        let yaml = r#"
+name: foreach-missing
+nodes:
+  - id: start
+    name: Start
+    type: start
+    outputs:
+      - name: user_prompt
+  - id: ab000001
+    name: lister
+    type: doc-only
+    inputs:
+      - name: task
+    outputs:
+      - name: plan
+  - id: ab000002
+    name: per-issue
+    type: for-each
+    over: nonexistent
+    inputs:
+      - name: in
+      - name: break
+    outputs:
+      - name: body
+      - name: done
+  - id: ab000003
+    name: worker
+    type: code-mutating
+    inputs:
+      - name: in
+    outputs:
+      - name: out
+  - id: end
+    name: End
+    type: end
+    inputs:
+      - name: result
+edges:
+  - source: { node: start, port: user_prompt }
+    target: { node: ab000001, port: task }
+  - source: { node: ab000001, port: plan }
+    target: { node: ab000002, port: in }
+  - source: { node: ab000002, port: body }
+    target: { node: ab000003, port: in }
+  - source: { node: ab000002, port: done }
+    target: { node: end, port: result }
+"#;
+        let result = crate::pipeline::parse_pipeline(yaml).unwrap();
+        let pipeline = result.pipeline;
+
+        let mut state = empty_run_state();
+        state
+            .nodes
+            .insert("ab000001".into(), completed_node("ab000001"));
+
+        let frontmatter: HashMap<String, serde_yaml::Value> = [(
+            "items".into(),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("a".into())]),
+        )]
+        .into_iter()
+        .collect();
+
+        let actions = evaluate_outgoing_edges_with_context(
+            &pipeline,
+            &state,
+            "ab000001",
+            &HashMap::new(),
+            &frontmatter,
+        );
+
+        assert!(
+            actions.contains(&SchedulerAction::ForEachEmpty {
+                foreach_node_id: "ab000002".into(),
+            }),
+            "over: nonexistent should resolve to empty list and fire ForEachEmpty"
+        );
+        assert!(
+            actions.contains(&SchedulerAction::ForEachDone {
+                foreach_node_id: "ab000002".into(),
+            }),
+            "empty foreach should fire done immediately"
         );
     }
 }

@@ -55,6 +55,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 

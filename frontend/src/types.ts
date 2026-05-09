@@ -180,6 +180,7 @@ export interface NodeDef {
   interactive: boolean;
   view?: { x: number; y: number } | null;
   max_iter?: number | string | null;
+  over?: string | null;
 }
 
 export interface EdgeEndpoint {

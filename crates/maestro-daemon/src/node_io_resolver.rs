@@ -251,6 +251,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
                 NodeDef {
                     id: "implementer".into(),
@@ -273,6 +274,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
             ],
             edges: vec![EdgeDef {
@@ -393,6 +395,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
                 NodeDef {
                     id: "implementer".into(),
@@ -415,6 +418,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
             ],
             edges: vec![EdgeDef {
@@ -482,6 +486,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
                 NodeDef {
                     id: "b".into(),
@@ -498,6 +503,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
                 NodeDef {
                     id: "merger".into(),
@@ -514,6 +520,7 @@ mod tests {
                     interactive: false,
                     view: None,
                     max_iter: None,
+                    over: None,
                 },
             ],
             edges: vec![

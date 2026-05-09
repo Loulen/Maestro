@@ -122,6 +122,7 @@ mod tests {
             interactive: false,
             view: None,
             max_iter: None,
+            over: None,
         }
     }
 
@@ -167,6 +168,7 @@ mod tests {
             max_iter: Some(serde_yaml::Value::Number(serde_yaml::Number::from(
                 max_iter,
             ))),
+            over: None,
         }
     }
 
