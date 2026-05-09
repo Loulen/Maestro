@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Save, X } from "lucide-react";
 import { useEditStore } from "../stores/editStore";
 
@@ -28,51 +28,75 @@ export default function TabBar() {
   const closeTab = useEditStore((s) => s.closeTab);
   const save = useEditStore((s) => s.save);
   const lastSavedAt = useEditStore((s) => s.lastSavedAt);
+  const tabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   const anyDirty = openTabs.some((t) => t.dirty);
   const activeLastSaved = activeTabId ? lastSavedAt[activeTabId] : undefined;
   const savedAgo = useRelativeTime(activeLastSaved);
 
+  const setTabRef = useCallback((id: string, el: HTMLButtonElement | null) => {
+    if (el) {
+      tabRefs.current.set(id, el);
+    } else {
+      tabRefs.current.delete(id);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeTabId) return;
+    const el = tabRefs.current.get(activeTabId);
+    if (el) {
+      el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    }
+  }, [activeTabId]);
+
   if (openTabs.length === 0) return null;
 
   return (
-    <div className="flex h-[30px] shrink-0 items-end gap-px border-b border-line bg-bg-2 px-1">
-      {openTabs.map((tab) => {
-        const isActive = tab.id === activeTabId;
-        const label = tab.dirty ? `• ${tab.id}.yaml` : `${tab.id}.yaml`;
-        return (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`group flex cursor-pointer items-center gap-1.5 rounded-t-md border border-b-0 px-2.5 py-1 transition-colors ${
-              isActive
-                ? "border-line bg-bg-1 text-fg"
-                : "border-transparent bg-bg-2 text-fg-3 hover:text-fg-2"
-            }`}
-            style={{ fontSize: "11px", maxWidth: 180 }}
-          >
-            <span className="truncate" data-testid={`tab-title-${tab.id}`}>{label}</span>
-            {tab.externalDirty && (
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-st-blocked" />
-            )}
-            <span
-              role="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                closeTab(tab.id);
-              }}
-              className="ml-auto hidden shrink-0 cursor-pointer rounded p-0.5 text-fg-4 hover:bg-bg-3 hover:text-fg group-hover:inline-flex"
+    <div className="flex h-[30px] shrink-0 items-end border-b border-line bg-bg-2">
+      <div
+        className="flex min-w-0 flex-1 items-end gap-px overflow-x-auto px-1"
+        data-testid="tab-list"
+        style={{ scrollbarWidth: "thin" }}
+      >
+        {openTabs.map((tab) => {
+          const isActive = tab.id === activeTabId;
+          const label = tab.dirty ? `• ${tab.id}.yaml` : `${tab.id}.yaml`;
+          return (
+            <button
+              key={tab.id}
+              ref={(el) => setTabRef(tab.id, el)}
+              onClick={() => setActiveTab(tab.id)}
+              className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-t-md border border-b-0 px-2.5 py-1 transition-colors ${
+                isActive
+                  ? "border-line bg-bg-1 text-fg"
+                  : "border-transparent bg-bg-2 text-fg-3 hover:text-fg-2"
+              }`}
+              style={{ fontSize: "11px", maxWidth: 180 }}
             >
-              <X size={10} />
-            </span>
-          </button>
-        );
-      })}
+              <span className="truncate" data-testid={`tab-title-${tab.id}`}>{label}</span>
+              {tab.externalDirty && (
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-st-blocked" />
+              )}
+              <span
+                role="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeTab(tab.id);
+                }}
+                className="ml-auto hidden shrink-0 cursor-pointer rounded p-0.5 text-fg-4 hover:bg-bg-3 hover:text-fg group-hover:inline-flex"
+              >
+                <X size={10} />
+              </span>
+            </button>
+          );
+        })}
+      </div>
 
-      <div className="ml-auto flex items-center gap-2 px-1.5 pb-0.5">
+      <div className="flex shrink-0 items-center gap-2 px-1.5 pb-0.5">
         {savedAgo && (
           <span
-            className="font-mono text-fg-4"
+            className="whitespace-nowrap font-mono text-fg-4"
             style={{ fontSize: "10px" }}
             data-testid="saved-ago"
           >
