@@ -1,5 +1,5 @@
 import { useEditStore } from "../stores/editStore";
-import type { FrontmatterFieldDecl, PortSide } from "../types";
+import type { PipelineDef, PortSide } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
 import SidePicker from "./SidePicker";
 
@@ -11,7 +11,7 @@ const FOREACH_PORTS = [
 ];
 
 function collectUpstreamListFields(
-  pipeline: { nodes: Array<{ id: string; outputs: Array<{ name: string; frontmatter?: Record<string, FrontmatterFieldDecl> | null }> }>; edges: Array<{ source: { node: string; port: string }; target: { node: string; port: string } }> },
+  pipeline: PipelineDef,
   nodeId: string,
 ): string[] {
   const fields: string[] = [];
