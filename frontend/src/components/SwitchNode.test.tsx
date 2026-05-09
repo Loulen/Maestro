@@ -19,10 +19,10 @@ const baseSwitchEditData = {
   label: "route-requests",
   nodeId: "sw1",
   branches: [
-    { name: "fast", side: "right", hasWhen: true },
-    { name: "default", side: "right", hasWhen: false },
+    { name: "fast", side: "right" as const, hasWhen: true },
+    { name: "default", side: "right" as const, hasWhen: false },
   ],
-  inputSide: "left",
+  inputSide: "left" as const,
 };
 
 const baseSwitchRunData = {
@@ -30,10 +30,10 @@ const baseSwitchRunData = {
   nodeId: "sw1",
   status: "completed" as NodeStatus,
   branches: [
-    { name: "fast", side: "right", hasWhen: true },
-    { name: "default", side: "right", hasWhen: false },
+    { name: "fast", side: "right" as const, hasWhen: true },
+    { name: "default", side: "right" as const, hasWhen: false },
   ],
-  inputSide: "left",
+  inputSide: "left" as const,
   activeBranch: "fast",
   iter: 1,
 };

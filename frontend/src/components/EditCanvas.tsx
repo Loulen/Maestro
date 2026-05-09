@@ -12,7 +12,7 @@ import {
   ReactFlowProvider,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { NodeDef, NodeType, PipelineDef, PortBrief } from "../types";
+import type { NodeDef, NodeType, PipelineDef, PortBrief, PortSide } from "../types";
 import type { LibraryEntry } from "../api";
 import { useEditStore } from "../stores/editStore";
 import { generateNodeId } from "../lib/nanoid";
@@ -161,8 +161,8 @@ function deriveEditNodes(pipeline: PipelineDef): Node[] {
           nodeId: n.id,
           maxIter: n.max_iter ?? 5,
           ports: [
-            ...n.inputs.map((p) => ({ name: p.name, kind: "input" as const, side: (p.side ?? "left") as import("../types").PortSide })),
-            ...n.outputs.map((p) => ({ name: p.name, kind: "output" as const, side: (p.side ?? "right") as import("../types").PortSide })),
+            ...n.inputs.map((p) => ({ name: p.name, kind: "input" as const, side: (p.side ?? "left") as PortSide })),
+            ...n.outputs.map((p) => ({ name: p.name, kind: "output" as const, side: (p.side ?? "right") as PortSide })),
           ],
         },
       };
@@ -179,8 +179,8 @@ function deriveEditNodes(pipeline: PipelineDef): Node[] {
           label: n.name ?? n.id,
           nodeId: n.id,
           ports: [
-            ...n.inputs.map((p) => ({ name: p.name, kind: "input" as const, side: (p.side ?? "left") as import("../types").PortSide })),
-            ...n.outputs.map((p) => ({ name: p.name, kind: "output" as const, side: (p.side ?? "right") as import("../types").PortSide })),
+            ...n.inputs.map((p) => ({ name: p.name, kind: "input" as const, side: (p.side ?? "left") as PortSide })),
+            ...n.outputs.map((p) => ({ name: p.name, kind: "output" as const, side: (p.side ?? "right") as PortSide })),
           ],
         },
       };

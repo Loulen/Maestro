@@ -1,5 +1,5 @@
 import type { NodeProps, Node } from "@xyflow/react";
-import type { NodeStatus } from "../types";
+import type { NodeStatus, PortSide } from "../types";
 import { useEditStore } from "../stores/editStore";
 import { STATUS_BORDER, STATUS_BG, STATUS_DOT } from "../nodeStyles";
 import TriangleHandle from "./TriangleHandle";
@@ -7,7 +7,7 @@ import PortRow from "./PortRow";
 
 interface SwitchBranch {
   name: string;
-  side: string;
+  side: PortSide;
   hasWhen: boolean;
 }
 
@@ -15,7 +15,7 @@ interface SwitchEditData {
   label: string;
   nodeId: string;
   branches: SwitchBranch[];
-  inputSide: string;
+  inputSide: PortSide;
   [key: string]: unknown;
 }
 
@@ -34,7 +34,7 @@ export function SwitchEditNode({ data, id }: NodeProps<Node<SwitchEditData>>) {
         <PortRow
           portName="in"
           kind="input"
-          side={data.inputSide as "left" | "right" | "top" | "bottom"}
+          side={data.inputSide}
           index={0}
           total={1}
           nodeType="switch"
@@ -59,7 +59,7 @@ export function SwitchEditNode({ data, id }: NodeProps<Node<SwitchEditData>>) {
             key={branch.name}
             portName={branch.name}
             kind="output"
-            side={branch.side as "left" | "right" | "top" | "bottom"}
+            side={branch.side}
             index={i}
             total={data.branches.length}
             nodeType="switch"
@@ -81,12 +81,11 @@ interface SwitchRunData {
   nodeId: string;
   status: NodeStatus;
   branches: SwitchBranch[];
-  inputSide: string;
+  inputSide: PortSide;
   activeBranch: string | null;
   iter: number;
   [key: string]: unknown;
 }
-
 
 export function SwitchRunNode({ data }: NodeProps<Node<SwitchRunData>>) {
   const borderColor = STATUS_BORDER[data.status];
@@ -102,7 +101,7 @@ export function SwitchRunNode({ data }: NodeProps<Node<SwitchRunData>>) {
         <PortRow
           portName="in"
           kind="input"
-          side={data.inputSide as "left" | "right" | "top" | "bottom"}
+          side={data.inputSide}
           index={0}
           total={1}
           nodeType="switch"
@@ -159,7 +158,7 @@ export function SwitchRunNode({ data }: NodeProps<Node<SwitchRunData>>) {
               <TriangleHandle
                 id={branch.name}
                 kind="output"
-                side={branch.side as "left" | "right" | "top" | "bottom"}
+                side={branch.side}
                 index={i}
                 total={data.branches.length}
               />
