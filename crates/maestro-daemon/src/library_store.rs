@@ -197,6 +197,127 @@ pub fn sync_state(node: &pipeline::NodeDef, prompt: &str) -> SyncState {
     }
 }
 
+pub mod pipelines {
+    use std::path::PathBuf;
+
+    use serde::{Deserialize, Serialize};
+
+    fn pipelines_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|h| {
+            PathBuf::from(h)
+                .join(".maestro")
+                .join("library")
+                .join("pipelines")
+        })
+    }
+
+    fn slugify(name: &str) -> String {
+        let mut slug = String::new();
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                slug.push(ch.to_ascii_lowercase());
+            } else if ch == ' ' {
+                slug.push('-');
+            }
+        }
+        if slug.is_empty() {
+            slug.push_str("pipeline");
+        }
+        slug
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PipelineLibraryEntry {
+        pub id: String,
+        pub name: String,
+        pub node_count: usize,
+        pub modified: Option<String>,
+    }
+
+    pub fn list() -> Vec<PipelineLibraryEntry> {
+        let Some(dir) = pipelines_dir() else {
+            return Vec::new();
+        };
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(parsed) = crate::pipeline::parse_pipeline(&contents) else {
+                continue;
+            };
+            let modified = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| {
+                    chrono::DateTime::<chrono::Utc>::from(t)
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string()
+                });
+            entries.push(PipelineLibraryEntry {
+                id,
+                name: parsed.pipeline.name.clone(),
+                node_count: parsed.pipeline.nodes.len(),
+                modified,
+            });
+        }
+        entries.sort_by_key(|a| a.name.to_lowercase());
+        entries
+    }
+
+    pub fn get_yaml(id: &str) -> Option<String> {
+        let dir = pipelines_dir()?;
+        let path = dir.join(format!("{id}.yaml"));
+        std::fs::read_to_string(&path).ok()
+    }
+
+    pub fn get_path(id: &str) -> Option<PathBuf> {
+        let dir = pipelines_dir()?;
+        let path = dir.join(format!("{id}.yaml"));
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    pub fn save(name: &str, yaml: &str) -> Result<String, String> {
+        let dir = pipelines_dir().ok_or("HOME not set")?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create library pipelines dir: {e}"))?;
+
+        crate::pipeline::parse_pipeline(yaml).map_err(|e| format!("invalid pipeline YAML: {e}"))?;
+
+        let id = slugify(name);
+        let path = dir.join(format!("{id}.yaml"));
+        std::fs::write(&path, yaml).map_err(|e| format!("write error: {e}"))?;
+        Ok(id)
+    }
+
+    pub fn delete(id: &str) -> Result<bool, String> {
+        let dir = pipelines_dir().ok_or("HOME not set")?;
+        let path = dir.join(format!("{id}.yaml"));
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("delete error: {e}"))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +559,116 @@ mod tests {
             save(&entry2).unwrap();
             assert_eq!(get("Worker").unwrap().prompt, "version 2");
             assert_eq!(list().len(), 1);
+        });
+    }
+
+    fn sample_pipeline_yaml(name: &str) -> String {
+        format!(
+            "name: {name}\nnodes:\n  - id: start\n    name: Start\n    type: start\n    outputs:\n      - name: user_prompt\n  - id: planner\n    name: Planner\n    type: doc-only\n    inputs:\n      - name: in\n    outputs:\n      - name: plan\n  - id: end\n    name: End\n    type: end\n    inputs:\n      - name: result\nedges:\n  - source: {{ node: start, port: user_prompt }}\n    target: {{ node: planner, port: in }}\n  - source: {{ node: planner, port: plan }}\n    target: {{ node: end, port: result }}\n"
+        )
+    }
+
+    #[test]
+    fn pipeline_library_crud_round_trip() {
+        with_temp_home(|| {
+            let yaml = sample_pipeline_yaml("Review Pipeline");
+            let id = pipelines::save("Review Pipeline", &yaml).unwrap();
+            assert_eq!(id, "review-pipeline");
+
+            let all = pipelines::list();
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].id, "review-pipeline");
+            assert_eq!(all[0].name, "Review Pipeline");
+            assert_eq!(all[0].node_count, 3);
+
+            let got = pipelines::get_yaml("review-pipeline").unwrap();
+            assert_eq!(got, yaml);
+
+            let deleted = pipelines::delete("review-pipeline").unwrap();
+            assert!(deleted);
+
+            assert!(pipelines::get_yaml("review-pipeline").is_none());
+            assert!(pipelines::list().is_empty());
+        });
+    }
+
+    #[test]
+    fn pipeline_library_delete_nonexistent() {
+        with_temp_home(|| {
+            let result = pipelines::delete("ghost").unwrap();
+            assert!(!result);
+        });
+    }
+
+    #[test]
+    fn pipeline_library_save_invalid_yaml_errors() {
+        with_temp_home(|| {
+            let result = pipelines::save("Bad", "not: valid: yaml: [[[");
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn pipeline_library_overwrite() {
+        with_temp_home(|| {
+            let yaml1 = sample_pipeline_yaml("My Pipeline");
+            let yaml2 = sample_pipeline_yaml("My Pipeline v2");
+            pipelines::save("My Pipeline", &yaml1).unwrap();
+            pipelines::save("My Pipeline", &yaml2).unwrap();
+
+            let got = pipelines::get_yaml("my-pipeline").unwrap();
+            assert!(got.contains("My Pipeline v2"));
+            assert_eq!(pipelines::list().len(), 1);
+        });
+    }
+
+    #[test]
+    fn pipeline_library_sorted_alphabetically() {
+        with_temp_home(|| {
+            for name in ["Zebra Pipeline", "Alpha Pipeline", "middle pipeline"] {
+                let yaml = sample_pipeline_yaml(name);
+                pipelines::save(name, &yaml).unwrap();
+            }
+
+            let names: Vec<String> = pipelines::list().into_iter().map(|e| e.name).collect();
+            assert_eq!(
+                names,
+                vec!["Alpha Pipeline", "middle pipeline", "Zebra Pipeline"]
+            );
+        });
+    }
+
+    #[test]
+    fn pipeline_library_does_not_affect_node_library() {
+        with_temp_home(|| {
+            let node = make_node("Worker");
+            let entry = entry_from_node(&node, "node prompt");
+            save(&entry).unwrap();
+
+            let yaml = sample_pipeline_yaml("My Pipeline");
+            pipelines::save("My Pipeline", &yaml).unwrap();
+
+            assert_eq!(list().len(), 1);
+            assert_eq!(list()[0].name, "Worker");
+            assert_eq!(pipelines::list().len(), 1);
+            assert_eq!(pipelines::list()[0].name, "My Pipeline");
+        });
+    }
+
+    #[test]
+    fn pipeline_library_get_path() {
+        with_temp_home(|| {
+            let yaml = sample_pipeline_yaml("Test Path");
+            pipelines::save("Test Path", &yaml).unwrap();
+
+            let path = pipelines::get_path("test-path").unwrap();
+            assert!(path.exists());
+            assert!(path
+                .to_str()
+                .unwrap()
+                .contains("library/pipelines/test-path.yaml"));
+
+            assert!(pipelines::get_path("nonexistent").is_none());
         });
     }
 }

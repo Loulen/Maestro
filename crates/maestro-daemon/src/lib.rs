@@ -113,6 +113,8 @@ struct CreateRunRequest {
     input: String,
     #[serde(default)]
     variables: HashMap<String, serde_yaml::Value>,
+    #[serde(default)]
+    pipeline_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -379,6 +381,12 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/library/{name}/instantiate",
             post(instantiate_from_library),
+        )
+        .route("/library/pipelines", get(list_library_pipelines))
+        .route("/library/pipelines", post(save_library_pipeline))
+        .route(
+            "/library/pipelines/{id}",
+            axum::routing::delete(delete_library_pipeline),
         )
         .fallback(static_handler)
         .with_state(state)
@@ -906,6 +914,52 @@ async fn instantiate_from_library(AxumPath(name): AxumPath<String>) -> Response 
     }
 }
 
+// --- Library pipeline endpoints ---
+
+async fn list_library_pipelines() -> Response {
+    Json(library_store::pipelines::list()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SaveLibraryPipelineRequest {
+    name: String,
+    yaml: String,
+}
+
+async fn save_library_pipeline(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<SaveLibraryPipelineRequest>,
+) -> Response {
+    match library_store::pipelines::save(&req.name, &req.yaml) {
+        Ok(id) => {
+            let entry_list = library_store::pipelines::list();
+            let entry = entry_list.into_iter().find(|e| e.id == id);
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "id": id, "entry": entry })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_library_pipeline(AxumPath(id): AxumPath<String>) -> Response {
+    match library_store::pipelines::delete(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "pipeline template not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 async fn delete_pipeline(
     State(state): State<Arc<AppState>>,
     AxumPath(pipeline_id): AxumPath<String>,
@@ -1398,15 +1452,32 @@ async fn create_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRunRequest>,
 ) -> Response {
-    let pipeline_path = resolve_pipeline_path(&state.repo_root, &req.pipeline);
-    let yaml = match std::fs::read_to_string(&pipeline_path) {
-        Ok(y) => y,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("cannot read pipeline: {e}") })),
-            )
-                .into_response();
+    let (yaml, pipeline_path) = if let Some(ref lib_id) = req.pipeline_id {
+        match library_store::pipelines::get_yaml(lib_id) {
+            Some(y) => {
+                let path = library_store::pipelines::get_path(lib_id)
+                    .unwrap_or_else(|| resolve_pipeline_path(&state.repo_root, &req.pipeline));
+                (y, path)
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("library pipeline template not found: {lib_id}") })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        let path = resolve_pipeline_path(&state.repo_root, &req.pipeline);
+        match std::fs::read_to_string(&path) {
+            Ok(y) => (y, path),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("cannot read pipeline: {e}") })),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -3237,11 +3308,14 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
             match action {
                 scheduler::SchedulerAction::Spawn { node_id, iter } => {
                     let already_active =
-                        fresh_run_state.nodes.get(node_id.as_str()).is_some_and(|n| {
-                            n.iter >= *iter
-                                && (n.status == event_log::NodeStatus::Running
-                                    || n.status == event_log::NodeStatus::Completed)
-                        });
+                        fresh_run_state
+                            .nodes
+                            .get(node_id.as_str())
+                            .is_some_and(|n| {
+                                n.iter >= *iter
+                                    && (n.status == event_log::NodeStatus::Running
+                                        || n.status == event_log::NodeStatus::Completed)
+                            });
                     if !already_active {
                         if let Some(node) = pipeline.nodes.iter().find(|n| n.id == *node_id) {
                             spawn_node(state, &fresh_spawn_ctx, node, *iter).await;
@@ -7497,10 +7571,7 @@ edges: []
         static LIB_TEST_LOCK: StdMutex<()> = StdMutex::new(());
         let _guard = LIB_TEST_LOCK.lock().unwrap();
 
-        let tmp = std::env::temp_dir().join(format!(
-            "maestro-lib-nopipe-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("maestro-lib-nopipe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let prev_home = std::env::var("HOME").ok();

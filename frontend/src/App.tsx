@@ -4,6 +4,7 @@ import { useDaemonSocket } from "./hooks/useDaemonSocket";
 import type { ConnectionStatus } from "./hooks/useDaemonSocket";
 import { useResizableLayout } from "./hooks/useResizableLayout";
 import { useLibrary } from "./hooks/useLibrary";
+import { useLibraryPipelines } from "./hooks/useLibraryPipelines";
 import { fetchRuns, fetchRun } from "./api";
 import type { RunListEntry, RunState, EditScope } from "./types";
 import RunsListPanel from "./components/RunsListPanel";
@@ -81,6 +82,7 @@ function useSelectedRun() {
 export default function App() {
   const { status, subscribe } = useDaemonSocket();
   const { entries: libraryEntries, refresh: refreshLibrary } = useLibrary();
+  const { entries: libraryPipelines, refresh: refreshLibraryPipelines } = useLibraryPipelines();
   const { runs, refresh: refreshRuns } = useRuns();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const { run: selectedRun, select: selectRun, refresh: refreshRun } = useSelectedRun();
@@ -217,6 +219,9 @@ export default function App() {
                 selectedRunId={selectedRunId}
                 onSelectRun={handleSelectRun}
                 onNewRun={() => setNewRunModalOpen(true)}
+                libraryPipelines={libraryPipelines}
+                libraryNodes={libraryEntries}
+                onLibraryPipelinesChanged={refreshLibraryPipelines}
               />
             )}
           </ResizablePanel>
@@ -271,7 +276,12 @@ export default function App() {
                     onStopEditing={() => handleToggleRunEdit(selectedRun.run_id)}
                   />
                 )}
-                {selection.kind === "none" && editScope !== "run" && <PipelineInspector />}
+                {selection.kind === "none" && editScope !== "run" && (
+                  <PipelineInspector
+                    libraryPipelines={libraryPipelines}
+                    onLibraryChanged={refreshLibraryPipelines}
+                  />
+                )}
               </>
             ) : (
               <>
@@ -313,6 +323,7 @@ export default function App() {
         open={newRunModalOpen}
         onClose={() => setNewRunModalOpen(false)}
         onCreated={handleRunCreated}
+        libraryPipelines={libraryPipelines}
       />
     </div>
     </TooltipProvider>

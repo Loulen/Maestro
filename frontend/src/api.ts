@@ -151,6 +151,7 @@ export interface CreateRunRequest {
   pipeline: string;
   input: string;
   variables: Record<string, unknown>;
+  pipeline_id?: string;
 }
 
 export interface CreateRunResponse {
@@ -310,4 +311,39 @@ export async function deletePipeline(id: string): Promise<void> {
     throw err;
   }
   if (!resp.ok) throw new Error(`DELETE /pipelines/${id} failed: ${resp.status}`);
+}
+
+// --- Library Pipelines API ---
+
+export interface LibraryPipelineEntry {
+  id: string;
+  name: string;
+  node_count: number;
+  modified: string | null;
+}
+
+export async function fetchLibraryPipelines(): Promise<LibraryPipelineEntry[]> {
+  const resp = await fetch(`${BASE}/library/pipelines`);
+  if (!resp.ok) throw new Error(`GET /library/pipelines failed: ${resp.status}`);
+  return resp.json();
+}
+
+export async function saveLibraryPipeline(
+  name: string,
+  yaml: string,
+): Promise<{ id: string }> {
+  const resp = await fetch(`${BASE}/library/pipelines`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, yaml }),
+  });
+  if (!resp.ok) throw new Error(`POST /library/pipelines failed: ${resp.status}`);
+  return resp.json();
+}
+
+export async function deleteLibraryPipeline(id: string): Promise<void> {
+  const resp = await fetch(`${BASE}/library/pipelines/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error(`DELETE /library/pipelines/${id} failed: ${resp.status}`);
 }

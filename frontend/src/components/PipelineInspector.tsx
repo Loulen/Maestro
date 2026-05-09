@@ -1,10 +1,21 @@
-import { useEditStore } from "../stores/editStore";
+import { useState } from "react";
+import { Star } from "lucide-react";
+import { useEditStore, serializePipeline } from "../stores/editStore";
 import type { VariableDef } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
+import { saveLibraryPipeline, deleteLibraryPipeline } from "../api";
+import type { LibraryPipelineEntry } from "../api";
+import { Tooltip } from "./ui/tooltip";
 
 const VAR_TYPES = ["int", "float", "string", "bool", "list"] as const;
 
-export default function PipelineInspector() {
+export default function PipelineInspector({
+  libraryPipelines,
+  onLibraryChanged,
+}: {
+  libraryPipelines: LibraryPipelineEntry[];
+  onLibraryChanged: () => void;
+}) {
   const openTabs = useEditStore((s) => s.openTabs);
   const activeTabId = useEditStore((s) => s.activeTabId);
   const selection = useEditStore((s) => s.selection);
@@ -15,6 +26,13 @@ export default function PipelineInspector() {
 
   const pipeline = tab.pipeline;
   const variables = Object.entries(pipeline.variables);
+
+  const isStarred = libraryPipelines.some(
+    (lp) => lp.name === pipeline.name,
+  );
+  const starredId = libraryPipelines.find(
+    (lp) => lp.name === pipeline.name,
+  )?.id ?? null;
 
   function handleAddVariable() {
     let name = "new_var";
@@ -48,10 +66,16 @@ export default function PipelineInspector() {
   return (
     <aside className="flex h-full flex-col bg-bg-2 overflow-y-auto">
       <div
-        className="flex h-[36px] items-center border-b border-line px-3 font-medium text-fg-2"
+        className="flex h-[36px] items-center justify-between border-b border-line px-3 font-medium text-fg-2"
         style={{ fontSize: "11.5px" }}
       >
-        Pipeline Inspector
+        <span>Pipeline Inspector</span>
+        <PipelineStarButton
+          isStarred={isStarred}
+          starredId={starredId}
+          pipeline={pipeline}
+          onLibraryChanged={onLibraryChanged}
+        />
       </div>
 
       <div className="flex flex-col gap-3 p-3" style={{ fontSize: "11.5px" }}>
@@ -106,6 +130,56 @@ export default function PipelineInspector() {
         </div>
       </div>
     </aside>
+  );
+}
+
+function PipelineStarButton({
+  isStarred,
+  starredId,
+  pipeline,
+  onLibraryChanged,
+}: {
+  isStarred: boolean;
+  starredId: string | null;
+  pipeline: { name: string } & Record<string, unknown>;
+  onLibraryChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function handleToggle() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      if (isStarred && starredId) {
+        await deleteLibraryPipeline(starredId);
+      } else {
+        const yaml = serializePipeline(pipeline as Parameters<typeof serializePipeline>[0]);
+        await saveLibraryPipeline(pipeline.name as string, yaml);
+      }
+      onLibraryChanged();
+    } catch {
+      // ignore
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const tooltip = isStarred ? "Remove from library" : "Star as template";
+
+  return (
+    <Tooltip content={tooltip}>
+      <button
+        onClick={handleToggle}
+        disabled={busy}
+        className="grid h-6 w-6 place-items-center rounded transition-colors hover:bg-bg-3 disabled:opacity-50"
+        title={tooltip}
+      >
+        <Star
+          size={14}
+          className={isStarred ? "fill-acc text-acc" : "fill-none text-fg-4"}
+        />
+      </button>
+    </Tooltip>
   );
 }
 
