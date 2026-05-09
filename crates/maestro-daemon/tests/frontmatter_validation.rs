@@ -257,4 +257,8 @@ async fn double_invalid_frontmatter_fails_node() {
     let reviewer = &state["nodes"]["reviewer"];
     assert_eq!(reviewer["status"], "failed");
     assert_eq!(reviewer["failure_reason"], "output validation failed");
+    let violations = reviewer["frontmatter_violations"].as_array().unwrap();
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0]["field"], "verdict");
+    assert!(violations[0]["reason"].as_str().unwrap().contains("MAYBE"));
 }

@@ -334,6 +334,19 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
               Failed — output validation failed after retry
             </span>
           </div>
+          {node.frontmatter_violations && node.frontmatter_violations.length > 0 && (
+            <ul
+              className="mt-0.5 flex flex-col gap-0.5 pl-5 font-mono text-st-failed"
+              style={{ fontSize: "10px" }}
+              data-testid="frontmatter-violation-list"
+            >
+              {node.frontmatter_violations.map((v, i) => (
+                <li key={i}>
+                  {v.port}.{v.field}: {v.reason}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       ) : node.status === "failed" ? (
         <div className="flex items-center gap-2 border-b border-st-failed/30 bg-st-failed-bg px-3 py-2">

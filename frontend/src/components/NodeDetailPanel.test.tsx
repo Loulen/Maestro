@@ -174,6 +174,46 @@ describe("NodeDetailPanel", () => {
       ).toHaveTextContent("output validation failed after retry");
     });
 
+    it("shows offending fields in exhausted banner when violations present", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({
+              status: "failed",
+              failure_reason: "output validation failed",
+              frontmatter_violations: [
+                { port: "review", field: "verdict", reason: "value 'MAYBE' not in allowed values" },
+                { port: "review", field: "score", reason: "expected int, got 'high'" },
+              ],
+            })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      const list = screen.getByTestId("frontmatter-violation-list");
+      expect(list).toBeInTheDocument();
+      expect(list.children).toHaveLength(2);
+      expect(list).toHaveTextContent("review.verdict");
+      expect(list).toHaveTextContent("review.score");
+    });
+
+    it("does not show violation list when no violations present", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({
+              status: "failed",
+              failure_reason: "output validation failed",
+            })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(
+        screen.queryByTestId("frontmatter-violation-list"),
+      ).not.toBeInTheDocument();
+    });
+
     it("shows generic failed banner for other failure reasons", () => {
       render(
         <TooltipProvider>
