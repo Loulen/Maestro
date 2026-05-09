@@ -2,17 +2,22 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, Sparkles, X } from "lucide-react";
 import type { PipelineListEntry } from "../types";
 import { createRun, fetchPipelines } from "../api";
+import type { LibraryPipelineEntry } from "../api";
 import { useEditStore } from "../stores/editStore";
+
+const LIB_PREFIX = "__lib__";
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onCreated: (runId: string) => void;
+  libraryPipelines: LibraryPipelineEntry[];
 }
 
-export default function NewRunModal({ open, onClose, onCreated }: Props) {
+export default function NewRunModal({ open, onClose, onCreated, libraryPipelines }: Props) {
   const [pipelines, setPipelines] = useState<PipelineListEntry[]>([]);
   const [selectedPipeline, setSelectedPipeline] = useState("");
+  const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [varsOpen, setVarsOpen] = useState(false);
@@ -26,13 +31,16 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
       .then((list) => {
         if (cancelled) return;
         setPipelines(list);
-        if (list.length > 0) {
-          setSelectedPipeline((prev) => prev || list[0].name);
-        }
       })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [open]);
+
+  const shouldAutoSelect = open && libraryPipelines.length > 0 && !selectedPipeline && !selectedLibraryId;
+  if (shouldAutoSelect) {
+    setSelectedPipeline(libraryPipelines[0].name);
+    setSelectedLibraryId(libraryPipelines[0].id);
+  }
 
   const currentPipeline = useMemo(
     () => pipelines.find((p) => p.name === selectedPipeline),
@@ -56,12 +64,20 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
   }, [overrides, currentPipeline]);
 
   const handlePipelineChange = useCallback(
-    (name: string) => {
-      setSelectedPipeline(name);
+    (value: string) => {
+      if (value.startsWith(LIB_PREFIX)) {
+        const libId = value.slice(LIB_PREFIX.length);
+        const libEntry = libraryPipelines.find((p) => p.id === libId);
+        setSelectedPipeline(libEntry?.name ?? "");
+        setSelectedLibraryId(libId);
+      } else {
+        setSelectedPipeline(value);
+        setSelectedLibraryId(null);
+      }
       setOverrides({});
       setVarsOpen(false);
     },
-    [],
+    [libraryPipelines],
   );
 
   const flushPendingSaves = useEditStore((s) => s.flushPendingSaves);
@@ -71,24 +87,27 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
   }, []);
 
   const handleLaunch = useCallback(async () => {
-    if (!currentPipeline || !input.trim()) return;
+    if ((!currentPipeline && !selectedLibraryId) || !input.trim()) return;
     setSubmitting(true);
     setError(null);
 
     const variables: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(overrides)) {
-      const decl = currentPipeline.variables[key];
-      if (!decl) continue;
-      if (val === String(decl.default)) continue;
-      variables[key] = parseVariableValue(val, decl.var_type);
+    if (currentPipeline) {
+      for (const [key, val] of Object.entries(overrides)) {
+        const decl = currentPipeline.variables[key];
+        if (!decl) continue;
+        if (val === String(decl.default)) continue;
+        variables[key] = parseVariableValue(val, decl.var_type);
+      }
     }
 
     try {
       await flushPendingSaves();
       const resp = await createRun({
-        pipeline: currentPipeline.name,
+        pipeline: selectedPipeline,
         input: input.trim(),
         variables,
+        pipeline_id: selectedLibraryId ?? undefined,
       });
       onCreated(resp.run_id);
       setInput("");
@@ -99,7 +118,7 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
     } finally {
       setSubmitting(false);
     }
-  }, [currentPipeline, input, overrides, onCreated, onClose, flushPendingSaves]);
+  }, [currentPipeline, selectedPipeline, selectedLibraryId, input, overrides, onCreated, onClose, flushPendingSaves]);
 
   const repoPipelines = useMemo(
     () => pipelines.filter((p) => p.scope === "repo"),
@@ -147,9 +166,18 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
             <select
               className="w-full rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none"
               style={{ fontSize: "12px" }}
-              value={selectedPipeline}
+              value={selectedLibraryId ? `${LIB_PREFIX}${selectedLibraryId}` : selectedPipeline}
               onChange={(e) => handlePipelineChange(e.target.value)}
             >
+              {libraryPipelines.length > 0 && (
+                <optgroup label="★ Starred templates">
+                  {libraryPipelines.map((p) => (
+                    <option key={`lib-${p.id}`} value={`${LIB_PREFIX}${p.id}`}>
+                      {p.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
               {repoPipelines.length > 0 && (
                 <optgroup label="Repo pipelines">
                   {repoPipelines.map((p) => (
@@ -168,12 +196,17 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
                   ))}
                 </optgroup>
               )}
-              {pipelines.length === 0 && (
+              {libraryPipelines.length === 0 && pipelines.length === 0 && (
                 <option value="" disabled>
-                  No pipelines found
+                  No pipelines found. Star a template from the info panel to make it launchable.
                 </option>
               )}
             </select>
+            {libraryPipelines.length === 0 && pipelines.length > 0 && (
+              <span className="text-fg-4" style={{ fontSize: "10px" }}>
+                Star a template from the info panel to make it launchable.
+              </span>
+            )}
           </div>
 
           {/* Input textarea */}
@@ -278,7 +311,7 @@ export default function NewRunModal({ open, onClose, onCreated }: Props) {
           </button>
           <button
             onClick={handleLaunch}
-            disabled={submitting || !selectedPipeline || !input.trim()}
+            disabled={submitting || (!selectedPipeline && !selectedLibraryId) || !input.trim()}
             className="flex items-center gap-1.5 rounded-md bg-acc px-3 py-1.5 font-medium text-[#04140d] transition-colors hover:bg-acc-dim disabled:opacity-40"
             style={{ fontSize: "11.5px" }}
           >

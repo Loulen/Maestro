@@ -3,6 +3,7 @@ import { useDaemonSocket } from "./hooks/useDaemonSocket";
 import type { ConnectionStatus } from "./hooks/useDaemonSocket";
 import { useResizableLayout } from "./hooks/useResizableLayout";
 import { useLibrary } from "./hooks/useLibrary";
+import { useLibraryPipelines } from "./hooks/useLibraryPipelines";
 import { fetchRuns, fetchRun } from "./api";
 import type { RunListEntry, RunState } from "./types";
 import UnifiedLeftPanel from "./components/UnifiedLeftPanel";
@@ -79,6 +80,7 @@ function useSelectedRun() {
 export default function App() {
   const { status, subscribe } = useDaemonSocket();
   const { entries: libraryEntries, refresh: refreshLibrary } = useLibrary();
+  const { entries: libraryPipelines, refresh: refreshLibraryPipelines } = useLibraryPipelines();
   const { runs, refresh: refreshRuns } = useRuns();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const { run: selectedRun, select: selectRun, refresh: refreshRun } = useSelectedRun();
@@ -235,7 +237,12 @@ export default function App() {
                 {selection.kind === "none" && isEditingRun && selectedRun && (
                   <RunInfoSidebar run={selectedRun} />
                 )}
-                {selection.kind === "none" && !isEditingRun && <PipelineInspector />}
+                {selection.kind === "none" && !isEditingRun && (
+                  <PipelineInspector
+                    libraryPipelines={libraryPipelines}
+                    onLibraryChanged={refreshLibraryPipelines}
+                  />
+                )}
               </>
             ) : (
               <>
@@ -277,6 +284,7 @@ export default function App() {
         open={newRunModalOpen}
         onClose={() => setNewRunModalOpen(false)}
         onCreated={handleRunCreated}
+        libraryPipelines={libraryPipelines}
       />
     </div>
     </TooltipProvider>

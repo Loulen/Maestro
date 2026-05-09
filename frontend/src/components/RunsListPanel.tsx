@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Plus, Star, Trash2 } from "lucide-react";
 import type { RunListEntry, RunStatus } from "../types";
-import { cleanupRun } from "../api";
+import { cleanupRun, deleteLibraryPipeline } from "../api";
+import type { LibraryEntry, LibraryPipelineEntry } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
 
 const STATUS_STYLES: Record<RunStatus, { dot: string; bg: string }> = {
@@ -18,6 +19,9 @@ interface Props {
   selectedRunId: string | null;
   onSelectRun: (runId: string) => void;
   onNewRun: () => void;
+  libraryPipelines: LibraryPipelineEntry[];
+  libraryNodes: LibraryEntry[];
+  onLibraryPipelinesChanged: () => void;
 }
 
 export default function RunsListPanel({
@@ -25,8 +29,12 @@ export default function RunsListPanel({
   selectedRunId,
   onSelectRun,
   onNewRun,
+  libraryPipelines,
+  libraryNodes,
+  onLibraryPipelinesChanged,
 }: Props) {
   const [confirmCleanup, setConfirmCleanup] = useState<string | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(true);
 
   async function handleCleanup(runId: string) {
     try {
@@ -112,6 +120,29 @@ export default function RunsListPanel({
         })}
       </div>
 
+      {/* Library section */}
+      <div className="border-t border-line">
+        <button
+          type="button"
+          className="flex w-full items-center gap-1.5 px-3 py-2 text-left font-medium text-fg-2 transition-colors hover:bg-bg-3/50"
+          style={{ fontSize: "11.5px" }}
+          onClick={() => setLibraryOpen(!libraryOpen)}
+        >
+          <ChevronDown
+            size={12}
+            className={`text-fg-3 transition-transform ${libraryOpen ? "" : "-rotate-90"}`}
+          />
+          Library
+        </button>
+        {libraryOpen && (
+          <LibrarySection
+            pipelines={libraryPipelines}
+            nodes={libraryNodes}
+            onPipelinesChanged={onLibraryPipelinesChanged}
+          />
+        )}
+      </div>
+
       {confirmCleanup && (
         <CleanupConfirmModal
           onConfirm={() => handleCleanup(confirmCleanup)}
@@ -119,5 +150,77 @@ export default function RunsListPanel({
         />
       )}
     </aside>
+  );
+}
+
+function LibrarySection({
+  pipelines,
+  nodes,
+  onPipelinesChanged,
+}: {
+  pipelines: LibraryPipelineEntry[];
+  nodes: LibraryEntry[];
+  onPipelinesChanged: () => void;
+}) {
+  return (
+    <div className="pb-2" style={{ fontSize: "11px" }}>
+      {/* Pipeline templates */}
+      <div className="px-3 py-1 font-medium text-fg-3" style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        Pipeline templates
+      </div>
+      {pipelines.length === 0 ? (
+        <div className="px-3 py-1.5 text-fg-4" style={{ fontSize: "10.5px" }}>
+          No starred templates yet
+        </div>
+      ) : (
+        pipelines.map((p) => (
+          <div
+            key={p.id}
+            className="group flex items-center gap-2 px-3 py-1.5 text-fg-2"
+          >
+            <Star size={10} className="shrink-0 fill-acc text-acc" />
+            <span className="min-w-0 flex-1 truncate">{p.name}</span>
+            <span className="text-fg-4" style={{ fontSize: "9px" }}>
+              {p.node_count}n
+            </span>
+            <button
+              className="hidden shrink-0 text-fg-4 transition-colors hover:text-st-failed group-hover:inline-flex"
+              title="Remove from library"
+              onClick={async () => {
+                try {
+                  await deleteLibraryPipeline(p.id);
+                  onPipelinesChanged();
+                } catch { /* ignore */ }
+              }}
+            >
+              <Trash2 size={10} />
+            </button>
+          </div>
+        ))
+      )}
+
+      {/* Reusable nodes */}
+      <div className="mt-2 px-3 py-1 font-medium text-fg-3" style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        Reusable nodes
+      </div>
+      {nodes.length === 0 ? (
+        <div className="px-3 py-1.5 text-fg-4" style={{ fontSize: "10.5px" }}>
+          No saved nodes yet
+        </div>
+      ) : (
+        nodes.map((n) => (
+          <div
+            key={n.name}
+            className="group flex items-center gap-2 px-3 py-1.5 text-fg-2"
+          >
+            <Star size={10} className="shrink-0 fill-acc text-acc" />
+            <span className="min-w-0 flex-1 truncate">{n.name}</span>
+            <span className="text-fg-4" style={{ fontSize: "9px" }}>
+              {n.type}
+            </span>
+          </div>
+        ))
+      )}
+    </div>
   );
 }
