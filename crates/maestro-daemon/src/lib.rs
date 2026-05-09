@@ -7522,9 +7522,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn library_full_flow() {
-        use std::sync::Mutex as StdMutex;
-        static LIB_TEST_LOCK: StdMutex<()> = StdMutex::new(());
-        let _guard = LIB_TEST_LOCK.lock().unwrap();
+        let _guard = crate::library_store::HOME_TEST_LOCK.lock().unwrap();
 
         let tmp = std::env::temp_dir().join(format!("maestro-lib-http-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -7714,12 +7712,7 @@ edges: []
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn library_save_works_without_pipeline_on_disk() {
-        // Regression: POST /library used to read the source pipeline YAML
-        // from disk, forcing the UI to save the pipeline before adding a
-        // node to the library. The endpoint now takes the node spec inline.
-        use std::sync::Mutex as StdMutex;
-        static LIB_TEST_LOCK: StdMutex<()> = StdMutex::new(());
-        let _guard = LIB_TEST_LOCK.lock().unwrap();
+        let _guard = crate::library_store::HOME_TEST_LOCK.lock().unwrap();
 
         let tmp = std::env::temp_dir().join(format!("maestro-lib-nopipe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

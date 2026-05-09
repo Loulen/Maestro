@@ -198,12 +198,14 @@ pub fn sync_state(node: &pipeline::NodeDef, prompt: &str) -> SyncState {
 }
 
 #[cfg(test)]
+pub(crate) static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use super::HOME_TEST_LOCK as TEST_LOCK;
 
     fn with_temp_home<F: FnOnce()>(f: F) {
         let _guard = TEST_LOCK.lock().unwrap();
