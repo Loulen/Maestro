@@ -329,21 +329,19 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete }: EditCanvasProps) {
     const id = generateNodeId();
     const name = DEFAULT_NODE_NAMES[type] ?? "node";
 
-    const newNode: NodeDef = type === "merge"
-      ? {
-          id,
-          name,
-          type,
+    const view = { x: 200, y: 80 + pipeline.nodes.length * 140 };
+    let newNode: NodeDef;
+    switch (type) {
+      case "merge":
+        newNode = {
+          id, name, type, interactive: false, view,
           inputs: [{ name: "branches", repeated: true, side: "left" }],
           outputs: [{ name: "merged", repeated: false, side: "right" }],
-          interactive: false,
-          view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
-        }
-      : type === "loop"
-      ? {
-          id,
-          name,
-          type,
+        };
+        break;
+      case "loop":
+        newNode = {
+          id, name, type, interactive: false, view, max_iter: 5,
           inputs: [
             { name: "in", repeated: false, side: "left" },
             { name: "break", repeated: false, side: "left" },
@@ -352,21 +350,22 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete }: EditCanvasProps) {
             { name: "body", repeated: false, side: "right" },
             { name: "done", repeated: false, side: "right" },
           ],
-          interactive: false,
-          view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
-          max_iter: 5,
-        }
-      : {
-          id,
-          name,
-          type,
-          inputs: [{ name: "in", repeated: false, side: "left" }],
-          outputs: type === "switch"
-            ? [{ name: "default", repeated: false, side: "right" }]
-            : [{ name: "out", repeated: false, side: "right" }],
-          interactive: false,
-          view: { x: 200, y: 80 + pipeline.nodes.length * 140 },
         };
+        break;
+      case "switch":
+        newNode = {
+          id, name, type, interactive: false, view,
+          inputs: [{ name: "in", repeated: false, side: "left" }],
+          outputs: [{ name: "default", repeated: false, side: "right" }],
+        };
+        break;
+      default:
+        newNode = {
+          id, name, type, interactive: false, view,
+          inputs: [{ name: "in", repeated: false, side: "left" }],
+          outputs: [{ name: "out", repeated: false, side: "right" }],
+        };
+    }
     addNodeToStore(newNode);
   };
 

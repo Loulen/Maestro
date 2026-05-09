@@ -453,13 +453,6 @@ pub fn lint_missing_merge(pipeline: &PipelineDef) -> Vec<Diagnostic> {
         .map(|n| n.id.as_str())
         .collect();
 
-    // For each non-CM, non-Merge target node, count how many distinct CM nodes
-    // feed into it (directly or transitively through non-CM, non-Merge nodes).
-    // If >= 2 CM nodes converge without a Merge in between, flag it.
-    //
-    // Simpler heuristic: for each target node, count how many of its upstream
-    // edges come from code-mutating sources (directly). If >= 2 and the target
-    // is not a Merge node, emit diagnostic.
     let mut target_cm_sources: HashMap<&str, Vec<&str>> = HashMap::new();
 
     for edge in &pipeline.edges {

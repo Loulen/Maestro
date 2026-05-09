@@ -2333,8 +2333,6 @@ async fn node_done(
         return handle_merge_resolver_done(&state, &run_id, &worktree_dir, &pre_run_state).await;
     }
 
-    let keep_conflict = false;
-
     match find_node_type(&pre_run_state, &node_id) {
         Some("code-mutating") | Some("merge") => {
             let sub_wt_dir = sub_worktree_path(&state.repo_root, &run_id, &node_id, iter);
@@ -2347,7 +2345,7 @@ async fn node_done(
                 &sub_branch,
                 &node_id,
                 iter,
-                keep_conflict,
+                false,
             ) {
                 Ok(r) => r,
                 Err(e) => {
