@@ -21,6 +21,11 @@ export interface ConflictData {
   diagnostics: string[];
 }
 
+export interface SaveErrorData {
+  message: string;
+  line?: number;
+}
+
 export interface OpenPipeline {
   id: string;
   scope: string;
@@ -31,6 +36,7 @@ export interface OpenPipeline {
   externalDirty: boolean;
   runId?: string;
   conflict?: ConflictData;
+  saveError?: SaveErrorData;
 }
 
 interface EditState {
@@ -73,6 +79,7 @@ interface EditState {
   // Persistence
   save: (id: string) => Promise<void>;
   flushPendingSaves: () => Promise<void>;
+  clearSaveError: (id: string) => void;
 
   // Hot-reload
   reloadPipeline: (id: string) => Promise<void>;
@@ -438,18 +445,35 @@ export const useEditStore = create<EditState>((set, get) => ({
       }
       set((s) => ({
         openTabs: s.openTabs.map((t) =>
-          t.id === id ? { ...t, dirty: false } : t,
+          t.id === id ? { ...t, dirty: false, saveError: undefined } : t,
         ),
         lastSavedAt: { ...s.lastSavedAt, [id]: Date.now() },
       }));
-    } catch {
-      // ignore save errors
+    } catch (err: unknown) {
+      const raw = err as Record<string, unknown> | null;
+      const message =
+        typeof raw?.message === "string" ? raw.message : "Save failed";
+      const line =
+        typeof raw?.line === "number" ? raw.line : undefined;
+      set((s) => ({
+        openTabs: s.openTabs.map((t) =>
+          t.id === id ? { ...t, saveError: { message, line } } : t,
+        ),
+      }));
     }
   },
 
   flushPendingSaves: async () => {
     const dirtyTabs = get().openTabs.filter((t) => t.dirty);
     await Promise.all(dirtyTabs.map((t) => get().save(t.id)));
+  },
+
+  clearSaveError: (id: string) => {
+    set((s) => ({
+      openTabs: s.openTabs.map((t) =>
+        t.id === id ? { ...t, saveError: undefined } : t,
+      ),
+    }));
   },
 
   reloadPipeline: async (id: string) => {

@@ -910,6 +910,7 @@ edges:
                 side: Some(PortSide::Left),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             outputs: vec![Port {
                 name: "out".into(),
@@ -917,6 +918,7 @@ edges:
                 side: Some(PortSide::Right),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             interactive: false,
             view: None,
@@ -936,6 +938,7 @@ edges:
                 side: Some(PortSide::Left),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             outputs: vec![Port {
                 name: "merged".into(),
@@ -943,6 +946,7 @@ edges:
                 side: Some(PortSide::Right),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             interactive: false,
             view: None,
@@ -962,6 +966,7 @@ edges:
                 side: Some(PortSide::Left),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             outputs: vec![Port {
                 name: "out".into(),
@@ -969,6 +974,7 @@ edges:
                 side: Some(PortSide::Right),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             interactive: false,
             view: None,

@@ -50,6 +50,7 @@ mod tests {
                 side: Some(PortSide::Left),
                 frontmatter: None,
                 when: None,
+                description: None,
             }],
             outputs,
             interactive: false,
@@ -66,6 +67,7 @@ mod tests {
             side: Some(PortSide::Right),
             frontmatter: None,
             when: Some(yaml(when_yaml)),
+            description: None,
         }
     }
 
@@ -76,6 +78,7 @@ mod tests {
             side: Some(PortSide::Right),
             frontmatter: None,
             when: None,
+            description: None,
         }
     }
 

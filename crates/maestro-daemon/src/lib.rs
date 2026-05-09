@@ -791,6 +791,19 @@ async fn get_pipeline(
     .into_response()
 }
 
+fn parse_error_to_structured(e: &pipeline::ParseError) -> (String, Option<usize>) {
+    match e {
+        pipeline::ParseError::InvalidYaml(yaml_err) => {
+            let loc = yaml_err.location();
+            let line = loc.map(|l| l.line());
+            (format!("{yaml_err}"), line)
+        }
+        pipeline::ParseError::MissingField(field) => {
+            (format!("missing required field: {field}"), None)
+        }
+    }
+}
+
 async fn save_pipeline(
     State(state): State<Arc<AppState>>,
     AxumPath(pipeline_id): AxumPath<String>,
@@ -802,18 +815,20 @@ async fn save_pipeline(
     }
 
     if let Err(e) = pipeline::parse_pipeline(&req.yaml) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("invalid YAML: {e}") })),
-        )
-            .into_response();
+        let (message, line) = parse_error_to_structured(&e);
+        let mut body =
+            serde_json::json!({ "error": format!("invalid YAML: {e}"), "message": message });
+        if let Some(l) = line {
+            body["line"] = serde_json::json!(l);
+        }
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
 
     mark_self_write(&state.recent_writes, &path);
     if let Err(e) = std::fs::write(&path, &req.yaml) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("write failed: {e}") })),
+            Json(serde_json::json!({ "error": format!("write failed: {e}"), "message": format!("write failed: {e}") })),
         )
             .into_response();
     }
@@ -6044,6 +6059,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_pipeline_returns_structured_error_with_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "struct-err");
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "yaml": "{{invalid yaml:::",
+            "prompts": {}
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/pipelines/struct-err")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("message").is_some(),
+            "response must have 'message'"
+        );
+        assert!(
+            !json["message"].as_str().unwrap().is_empty(),
+            "message must be non-empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_pipeline_missing_name_returns_structured_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_test_pipeline(tmp.path(), "no-name");
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let body = serde_json::json!({
+            "yaml": "version: \"1.0\"\nnodes: []\n",
+            "prompts": {}
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/pipelines/no-name")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json.get("message").is_some(),
+            "response must have 'message'"
+        );
+    }
+
+    #[tokio::test]
     async fn save_pipeline_writes_prompts_under_canonical_path() {
         let tmp = tempfile::tempdir().unwrap();
         write_test_pipeline(tmp.path(), "prompt-save");
@@ -7618,6 +7709,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 }],
                 outputs: vec![Port {
                     name: "pass".into(),
@@ -7625,6 +7717,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: Some(serde_yaml::from_str("iter: { lt: \"$max_iter_review\" }").unwrap()),
+                    description: None,
                 }],
                 interactive: false,
                 view: None,
@@ -7666,6 +7759,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 }],
                 outputs: vec![],
                 interactive: false,

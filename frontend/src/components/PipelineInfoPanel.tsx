@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { Star, Info, Terminal, X, FileText, Code } from "lucide-react";
 import { Tooltip } from "./ui/tooltip";
 import { SectionHead } from "./InspectorPrimitives";
@@ -16,6 +16,8 @@ interface Props {
   libraryPipelines: LibraryPipelineEntry[];
   onLibraryChanged: () => void;
   onClose: () => void;
+  initialTab?: TabId;
+  scrollToLine?: number;
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -34,6 +36,8 @@ export default function PipelineInfoPanel({
   libraryPipelines,
   onLibraryChanged,
   onClose,
+  initialTab,
+  scrollToLine,
 }: Props) {
   const pipelineName = run?.pipeline_name ?? pipeline?.name ?? "Untitled";
   const variables = pipeline?.variables ?? {};
@@ -44,7 +48,7 @@ export default function PipelineInfoPanel({
   const isStarred = !!starredEntry;
 
   const hasManager = !!managerSession;
-  const [activeTab, setActiveTab] = useState<TabId>("info");
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "info");
   const resolvedTab = activeTab === "manager" && !hasManager ? "info" : activeTab;
 
   const tabs: { id: TabId; label: string; icon: typeof Info; show: boolean }[] = [
@@ -133,7 +137,7 @@ export default function PipelineInfoPanel({
       )}
 
       {resolvedTab === "yaml" && (
-        <YamlTab pipeline={pipeline} />
+        <YamlTab pipeline={pipeline} scrollToLine={scrollToLine} />
       )}
     </aside>
   );
@@ -230,11 +234,19 @@ function InfoTab({
   );
 }
 
-function YamlTab({ pipeline }: { pipeline: PipelineDef | null }) {
+function YamlTab({ pipeline, scrollToLine }: { pipeline: PipelineDef | null; scrollToLine?: number }) {
+  const preRef = useRef<HTMLPreElement>(null);
   const yaml = useMemo(
     () => (pipeline ? serializePipeline(pipeline) : ""),
     [pipeline],
   );
+
+  useEffect(() => {
+    if (scrollToLine == null || !preRef.current) return;
+    const lineHeight = 11 * 1.6;
+    const scrollTop = Math.max(0, (scrollToLine - 3) * lineHeight);
+    preRef.current.scrollTop = scrollTop;
+  }, [scrollToLine]);
 
   if (!pipeline) {
     return (
@@ -247,22 +259,29 @@ function YamlTab({ pipeline }: { pipeline: PipelineDef | null }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       <pre
+        ref={preRef}
         className="flex-1 overflow-auto p-3 font-mono text-fg-3 select-text"
         style={{ fontSize: "11px", lineHeight: "1.6", tabSize: 2 }}
         data-testid="info-yaml-content"
       >
-        {highlightYaml(yaml)}
+        {highlightYaml(yaml, scrollToLine)}
       </pre>
     </div>
   );
 }
 
-function highlightYaml(yaml: string): React.ReactNode {
+function highlightYaml(yaml: string, errorLine?: number): React.ReactNode {
   const lines = yaml.split("\n");
   return lines.map((line, i) => {
+    const lineNum = i + 1;
+    const isError = errorLine != null && lineNum === errorLine;
     const commentIdx = line.indexOf("#");
     return (
-      <span key={i}>
+      <span
+        key={i}
+        className={isError ? "bg-st-failed/20" : undefined}
+        data-line={lineNum}
+      >
         {commentIdx >= 0 ? (
           <>
             {highlightLine(line.slice(0, commentIdx))}

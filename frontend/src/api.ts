@@ -195,7 +195,14 @@ export async function saveRunPipeline(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ yaml, prompts }),
   });
-  if (!resp.ok) throw new Error(`PUT /runs/${runId}/pipeline failed: ${resp.status}`);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    const err: Record<string, unknown> = {
+      message: body?.message ?? body?.error ?? `PUT /runs/${runId}/pipeline failed: ${resp.status}`,
+    };
+    if (typeof body?.line === "number") err.line = body.line;
+    throw err;
+  }
 }
 
 // --- Pipeline CRUD ---
@@ -216,7 +223,14 @@ export async function savePipeline(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ yaml, prompts }),
   });
-  if (!resp.ok) throw new Error(`PUT /pipelines/${id} failed: ${resp.status}`);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    const err: Record<string, unknown> = {
+      message: body?.message ?? body?.error ?? `PUT /pipelines/${id} failed: ${resp.status}`,
+    };
+    if (typeof body?.line === "number") err.line = body.line;
+    throw err;
+  }
 }
 
 export async function createPipeline(

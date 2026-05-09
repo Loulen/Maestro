@@ -40,6 +40,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 })
                 .collect(),
             outputs: outputs
@@ -50,6 +51,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 })
                 .collect(),
             interactive: false,

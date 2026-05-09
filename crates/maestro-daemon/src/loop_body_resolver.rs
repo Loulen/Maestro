@@ -107,6 +107,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 })
                 .collect(),
             outputs: outputs
@@ -117,6 +118,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 })
                 .collect(),
             interactive: false,
@@ -138,6 +140,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 },
                 Port {
                     name: "break".into(),
@@ -145,6 +148,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 },
             ],
             outputs: vec![
@@ -154,6 +158,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 },
                 Port {
                     name: "done".into(),
@@ -161,6 +166,7 @@ mod tests {
                     side: None,
                     frontmatter: None,
                     when: None,
+                    description: None,
                 },
             ],
             interactive: false,
