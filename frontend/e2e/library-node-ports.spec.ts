@@ -111,7 +111,6 @@ test("save node to library preserves ports and frontmatter schema", async ({
 });
 
 test("instantiating from library restores ports and frontmatter", async ({
-  page,
   baseURL,
 }) => {
   // First ensure the library entry exists (from previous test or create via API)

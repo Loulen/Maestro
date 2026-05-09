@@ -1,4 +1,4 @@
-import type { PipelineListEntry, PipelineDetail, RunListEntry, RunState } from "./types";
+import type { PipelineListEntry, PipelineDetail, RunListEntry, RunState, PortDef, PortSide, FrontmatterFieldDecl } from "./types";
 
 const BASE = "";
 
@@ -238,8 +238,18 @@ export interface LibraryPort {
   name: string;
   repeated: boolean;
   side?: string;
-  frontmatter?: Record<string, { type: string; allowed?: string[] | null }> | null;
+  frontmatter?: Record<string, FrontmatterFieldDecl> | null;
   when?: Record<string, unknown> | null;
+}
+
+export function libraryPortToPortDef(port: LibraryPort, defaultSide: PortSide): PortDef {
+  return {
+    name: port.name,
+    repeated: port.repeated,
+    side: (port.side as PortSide) ?? defaultSide,
+    ...(port.frontmatter ? { frontmatter: port.frontmatter } : {}),
+    ...(port.when ? { when: port.when } : {}),
+  };
 }
 
 export interface LibraryEntry {
