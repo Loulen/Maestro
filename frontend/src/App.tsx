@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pencil } from "lucide-react";
 import { useDaemonSocket } from "./hooks/useDaemonSocket";
 import type { ConnectionStatus } from "./hooks/useDaemonSocket";
 import { useResizableLayout } from "./hooks/useResizableLayout";
 import { useLibrary } from "./hooks/useLibrary";
 import { fetchRuns, fetchRun } from "./api";
-import type { RunListEntry, RunState, EditScope } from "./types";
-import RunsListPanel from "./components/RunsListPanel";
+import type { RunListEntry, RunState } from "./types";
+import UnifiedLeftPanel from "./components/UnifiedLeftPanel";
 import DagCanvas from "./components/DagCanvas";
 import NodeDetailPanel from "./components/NodeDetailPanel";
 import NewRunModal from "./components/NewRunModal";
-import PipelinesListPanel from "./components/PipelinesListPanel";
 import EditCanvas from "./components/EditCanvas";
 import TabBar from "./components/TabBar";
 import NodeInspector from "./components/NodeInspector";
@@ -86,14 +84,10 @@ export default function App() {
   const { run: selectedRun, select: selectRun, refresh: refreshRun } = useSelectedRun();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [newRunModalOpen, setNewRunModalOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
-  const [editScope, setEditScope] = useState<EditScope>(null);
-  const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const mountedRef = useRef(false);
   const reloadPipeline = useEditStore((s) => s.reloadPipeline);
   const loadPipelines = useEditStore((s) => s.loadPipelines);
   const openRunPipeline = useEditStore((s) => s.openRunPipeline);
-  const closeRunPipeline = useEditStore((s) => s.closeRunPipeline);
   const selection = useEditStore((s) => s.selection);
   const openTabs = useEditStore((s) => s.openTabs);
   const editSave = useEditStore((s) => s.save);
@@ -104,6 +98,9 @@ export default function App() {
     ? editTab.pipeline.nodes.find((n) => n.id === selection.id)?.type ?? null
     : null;
 
+  const isEditingRun = editTab?.scope === "run";
+  const hasEditTab = editTab != null;
+
   useEffect(() => {
     if (!mountedRef.current) {
       mountedRef.current = true;
@@ -111,22 +108,14 @@ export default function App() {
     }
   }, [refreshRuns]);
 
-  const exitRunEdit = useCallback(() => {
-    if (editingRunId) {
-      closeRunPipeline(editingRunId);
-    }
-    setEditScope(null);
-    setEditingRunId(null);
-  }, [editingRunId, closeRunPipeline]);
-
   const handleSelectRun = useCallback(
-    (runId: string) => {
-      if (editScope === "run") exitRunEdit();
+    async (runId: string) => {
       setSelectedRunId(runId);
       selectRun(runId);
       setSelectedNodeId(null);
+      await openRunPipeline(runId);
     },
-    [selectRun, editScope, exitRunEdit],
+    [selectRun, openRunPipeline],
   );
 
   const handleRunCreated = useCallback(
@@ -137,22 +126,8 @@ export default function App() {
     [refreshRuns, handleSelectRun],
   );
 
-  const handleToggleRunEdit = useCallback(
-    async (runId: string) => {
-      if (editScope === "run" && editingRunId === runId) {
-        exitRunEdit();
-      } else {
-        await openRunPipeline(runId);
-        setEditScope("run");
-        setEditingRunId(runId);
-      }
-    },
-    [editScope, editingRunId, openRunPipeline, exitRunEdit],
-  );
-
   useEffect(() => {
-    const inEditMode = editMode || editScope === "run";
-    if (!inEditMode) return;
+    if (!hasEditTab) return;
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
@@ -161,7 +136,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [editMode, editScope, editActiveTabId, editSave]);
+  }, [hasEditTab, editActiveTabId, editSave]);
 
   useEffect(() => {
     return subscribe((msg) => {
@@ -186,45 +161,34 @@ export default function App() {
 
   const isArchived = selectedRun?.status === "archived";
 
-  const runLayout = useResizableLayout("run", PANEL_IDS, DEFAULT_SIZES);
-  const editLayout = useResizableLayout("edit", PANEL_IDS, DEFAULT_SIZES);
-  const layout = editMode ? editLayout : runLayout;
+  const layout = useResizableLayout("run", PANEL_IDS, DEFAULT_SIZES);
   const minSizePx = `${layout.minSizePx}px`;
+
+  const showRunDetail = !hasEditTab && selectedRun;
 
   return (
     <TooltipProvider>
     <div className="flex h-full flex-col bg-bg-1 text-fg">
-      <TopBar
-        editMode={editMode}
-        onToggleEditMode={() => {
-          if (editScope === "run") exitRunEdit();
-          setEditMode(!editMode);
-        }}
-      />
+      <TopBar />
       <main className="min-h-0 flex-1">
         <ResizablePanelGroup
           orientation="horizontal"
           defaultLayout={layout.defaultLayout}
           onLayoutChanged={layout.onLayoutChanged}
-          key={editMode ? "edit" : "run"}
         >
           <ResizablePanel defaultSize={layout.defaultLayout.left} minSize={minSizePx} id="left">
-            {editMode ? (
-              <PipelinesListPanel />
-            ) : (
-              <RunsListPanel
-                runs={runs}
-                selectedRunId={selectedRunId}
-                onSelectRun={handleSelectRun}
-                onNewRun={() => setNewRunModalOpen(true)}
-              />
-            )}
+            <UnifiedLeftPanel
+              runs={runs}
+              selectedRunId={selectedRunId}
+              onSelectRun={handleSelectRun}
+              onNewRun={() => setNewRunModalOpen(true)}
+            />
           </ResizablePanel>
 
           <ResizableHandle />
 
           <ResizablePanel defaultSize={layout.defaultLayout.center} id="center">
-            {editMode || editScope === "run" ? (
+            {hasEditTab ? (
               <div className="flex h-full min-w-0 flex-col">
                 <TabBar />
                 <EditCanvas
@@ -236,14 +200,17 @@ export default function App() {
                   }}
                 />
               </div>
-            ) : (
+            ) : showRunDetail ? (
               <div className="flex h-full min-w-0 flex-col">
                 <DagCanvas
                   run={selectedRun}
                   onSelectNode={setSelectedNodeId}
                   selectedNodeId={selectedNodeId}
-                  onToggleEdit={handleToggleRunEdit}
                 />
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center text-fg-4" style={{ fontSize: "12px" }}>
+                Select a run or open a pipeline to get started
               </div>
             )}
           </ResizablePanel>
@@ -251,7 +218,7 @@ export default function App() {
           <ResizableHandle />
 
           <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
-            {editMode || editScope === "run" ? (
+            {hasEditTab ? (
               <>
                 {selection.kind === "node" && editNodeType === "switch" && (
                   <SwitchInspector />
@@ -265,13 +232,10 @@ export default function App() {
                     onLibraryChanged={refreshLibrary}
                   />
                 )}
-                {selection.kind === "none" && editScope === "run" && selectedRun && (
-                  <RunEditSidebar
-                    run={selectedRun}
-                    onStopEditing={() => handleToggleRunEdit(selectedRun.run_id)}
-                  />
+                {selection.kind === "none" && isEditingRun && selectedRun && (
+                  <RunInfoSidebar run={selectedRun} />
                 )}
-                {selection.kind === "none" && editScope !== "run" && <PipelineInspector />}
+                {selection.kind === "none" && !isEditingRun && <PipelineInspector />}
               </>
             ) : (
               <>
@@ -319,18 +283,10 @@ export default function App() {
   );
 }
 
-function TopBar({
-  editMode,
-  onToggleEditMode,
-}: {
-  editMode: boolean;
-  onToggleEditMode: () => void;
-}) {
+function TopBar() {
   return (
     <header
-      className={`flex h-[44px] shrink-0 items-center gap-3 border-b border-line bg-bg-2 px-3 ${
-        editMode ? "shadow-[inset_0_2px_0_0_var(--color-edit-tint)]" : ""
-      }`}
+      className="flex h-[44px] shrink-0 items-center gap-3 border-b border-line bg-bg-2 px-3"
       style={{ fontSize: "12.5px" }}
     >
       <div className="flex items-center gap-2 border-r border-line pr-3 font-semibold tracking-tight text-fg">
@@ -348,43 +304,11 @@ function TopBar({
         Maestro
       </div>
 
-      <nav className="flex min-w-0 flex-1 items-center gap-1.5 text-fg-3" style={{ fontSize: "12.5px" }}>
-        <span
-          className={`rounded border px-1.5 py-0.5 ${
-            editMode
-              ? "border-edit-tint bg-edit-tint/10 text-edit-tint"
-              : "border-line-strong bg-bg-3 text-fg-2"
-          }`}
-          style={{ fontSize: "11px", fontWeight: 500 }}
-        >
-          {editMode ? "Edit" : "Run"}
-        </span>
-      </nav>
-
-      <div className="ml-auto flex items-center gap-1">
-        <button
-          onClick={onToggleEditMode}
-          className={`grid h-7 w-7 cursor-pointer place-items-center rounded-md border transition-colors ${
-            editMode
-              ? "border-edit-tint bg-edit-tint/10 text-edit-tint hover:bg-edit-tint/20"
-              : "border-transparent bg-transparent text-fg-3 hover:bg-bg-3 hover:text-fg"
-          }`}
-          title="Toggle edit mode"
-        >
-          <Pencil size={14} />
-        </button>
-      </div>
     </header>
   );
 }
 
-function RunEditSidebar({
-  run,
-  onStopEditing,
-}: {
-  run: RunState;
-  onStopEditing: () => void;
-}) {
+function RunInfoSidebar({ run }: { run: RunState }) {
   return (
     <aside className="flex h-full flex-col bg-bg-2" style={{ fontSize: "12px" }}>
       <div className="border-b border-line px-3 py-3">
@@ -392,16 +316,9 @@ function RunEditSidebar({
         <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "10px" }}>
           {run.run_id}
         </div>
-        <div className="mt-2 rounded border border-edit-tint/30 bg-edit-tint/5 px-2 py-1.5 text-edit-tint" style={{ fontSize: "10.5px" }}>
-          Editing run-scoped copy &middot; template unchanged
+        <div className="mt-2 rounded border border-line-strong bg-bg-3 px-2 py-1.5 text-fg-3" style={{ fontSize: "10.5px" }}>
+          Editing run-scoped pipeline &middot; changes sync to template
         </div>
-        <button
-          onClick={onStopEditing}
-          className="mt-2 cursor-pointer rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg-2"
-          style={{ fontSize: "10.5px" }}
-        >
-          Stop editing
-        </button>
       </div>
     </aside>
   );

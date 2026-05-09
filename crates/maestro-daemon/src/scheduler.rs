@@ -272,7 +272,7 @@ pub fn evaluate_outgoing_edges_with_context(
     actions
 }
 
-fn resolve_max_iter(
+pub fn resolve_max_iter(
     loop_node: &crate::pipeline::NodeDef,
     resolved_vars: &HashMap<String, serde_yaml::Value>,
 ) -> i64 {
@@ -1731,10 +1731,7 @@ mod tests {
             name: "loop-no-in".into(),
             version: None,
             variables: HashMap::new(),
-            nodes: vec![
-                make_start_node("start"),
-                make_loop_node("loop1", 5),
-            ],
+            nodes: vec![make_start_node("start"), make_loop_node("loop1", 5)],
             edges: vec![],
             auto_merge_resolver: true,
         };
