@@ -236,9 +236,11 @@ function deriveEditEdges(pipeline: PipelineDef): Edge[] {
 interface EditCanvasProps {
   libraryEntries: LibraryEntry[];
   onLibraryDelete: (name: string) => void;
+  infoOpen?: boolean;
+  onToggleInfo?: () => void;
 }
 
-function EditCanvasInner({ libraryEntries, onLibraryDelete }: EditCanvasProps) {
+function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleInfo }: EditCanvasProps) {
   const openTabs = useEditStore((s) => s.openTabs);
   const activeTabId = useEditStore((s) => s.activeTabId);
   const setSelection = useEditStore((s) => s.setSelection);
@@ -410,6 +412,8 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete }: EditCanvasProps) {
         onAddNode={handleAddNode}
         libraryEntries={libraryEntries}
         onLibraryDelete={onLibraryDelete}
+        infoOpen={infoOpen}
+        onToggleInfo={onToggleInfo}
       />
       {diagnostics.length > 0 && (
         <div className="absolute left-0 right-0 top-10 z-10">

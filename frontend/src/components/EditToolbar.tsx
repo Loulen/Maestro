@@ -1,4 +1,4 @@
-import { Plus, Repeat, GitBranch, GitMerge } from "lucide-react";
+import { Plus, Repeat, GitBranch, GitMerge, Info } from "lucide-react";
 import { ForEachIcon } from "./ForEachNode";
 import type { NodeType } from "../types";
 import type { LibraryEntry } from "../api";
@@ -9,9 +9,11 @@ interface Props {
   onAddNode: (type: NodeType) => void;
   libraryEntries: LibraryEntry[];
   onLibraryDelete: (name: string) => void;
+  infoOpen?: boolean;
+  onToggleInfo?: () => void;
 }
 
-export default function EditToolbar({ onAddNode, libraryEntries, onLibraryDelete }: Props) {
+export default function EditToolbar({ onAddNode, libraryEntries, onLibraryDelete, infoOpen, onToggleInfo }: Props) {
   return (
     <div
       className="absolute left-3 top-3 z-10 flex items-center gap-0.5 rounded-md border border-line bg-bg-2/90 p-1 backdrop-blur-sm shadow-lg"
@@ -70,6 +72,26 @@ export default function EditToolbar({ onAddNode, libraryEntries, onLibraryDelete
           <GitMerge size={14} />
         </button>
       </Tooltip>
+
+      {onToggleInfo && (
+        <>
+          <span className="mx-0.5 h-4 w-px bg-line" />
+
+          <Tooltip content="Pipeline info">
+            <button
+              data-testid="toolbar-info"
+              onClick={onToggleInfo}
+              className={`grid h-7 w-7 cursor-pointer place-items-center rounded transition-colors ${
+                infoOpen
+                  ? "bg-acc text-bg-0"
+                  : "text-fg-3 hover:bg-bg-4 hover:text-fg active:bg-acc active:text-bg-0"
+              }`}
+            >
+              <Info size={14} />
+            </button>
+          </Tooltip>
+        </>
+      )}
     </div>
   );
 }

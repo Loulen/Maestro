@@ -13,7 +13,7 @@ import {
   MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Trash2, Terminal } from "lucide-react";
+import { Trash2, Terminal, Info } from "lucide-react";
 import type { NodeStatus, NodeType, PipelineDef, PipelineDetail, RunState, RunStatus, PortBrief } from "../types";
 import { cleanupRun, attachManager, fetchRunPipeline, saveRunPipeline } from "../api";
 import { serializePipeline } from "../stores/editStore";
@@ -295,6 +295,8 @@ interface Props {
   run: RunState | null;
   onSelectNode: (nodeId: string | null) => void;
   selectedNodeId: string | null;
+  infoOpen?: boolean;
+  onToggleInfo?: () => void;
 }
 
 const START_NODE_OFFSET_X = START_NODE_OFFSET_X_PX;
@@ -703,6 +705,8 @@ function DagCanvasInner({
   run,
   onSelectNode,
   selectedNodeId,
+  infoOpen,
+  onToggleInfo,
 }: Props) {
   const [confirmCleanup, setConfirmCleanup] = useState(false);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -830,6 +834,23 @@ function DagCanvasInner({
           <span className="text-fg-3">{run.status}</span>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {onToggleInfo && (
+            <Tooltip content="Pipeline info">
+              <button
+                data-testid="toolbar-info"
+                onClick={onToggleInfo}
+                className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-1 transition-colors ${
+                  infoOpen
+                    ? "border-acc bg-acc/20 text-acc"
+                    : "border-line-strong bg-bg-3 text-fg-3 hover:bg-bg-4 hover:text-fg-2"
+                }`}
+                style={{ fontSize: "10px" }}
+              >
+                <Info size={10} />
+                Info
+              </button>
+            </Tooltip>
+          )}
           <Tooltip content="Attach a terminal to the Pipeline Manager agent for this run">
             <button
               onClick={() => attachManager(run.run_id).catch(() => {})}

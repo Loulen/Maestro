@@ -18,6 +18,7 @@ import LoopInspector from "./components/LoopInspector";
 import ForEachInspector from "./components/ForEachInspector";
 import MergeInspector from "./components/MergeInspector";
 import PipelineInspector from "./components/PipelineInspector";
+import PipelineInfoPanel from "./components/PipelineInfoPanel";
 import StartInspector from "./components/StartInspector";
 import EndInspector from "./components/EndInspector";
 import { TooltipProvider } from "./components/ui/tooltip";
@@ -88,6 +89,7 @@ export default function App() {
   const { run: selectedRun, select: selectRun, refresh: refreshRun } = useSelectedRun();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [newRunModalOpen, setNewRunModalOpen] = useState(false);
+  const [infoPanelOpen, setInfoPanelOpen] = useState(false);
   const mountedRef = useRef(false);
   const reloadPipeline = useEditStore((s) => s.reloadPipeline);
   const loadPipelines = useEditStore((s) => s.loadPipelines);
@@ -104,6 +106,10 @@ export default function App() {
 
   const isEditingRun = editTab?.scope === "run";
   const hasEditTab = editTab != null;
+
+  const handleToggleInfo = useCallback(() => {
+    setInfoPanelOpen((prev) => !prev);
+  }, []);
 
   useEffect(() => {
     if (!mountedRef.current) {
@@ -202,6 +208,8 @@ export default function App() {
                     await delLib(name);
                     refreshLibrary();
                   }}
+                  infoOpen={infoPanelOpen}
+                  onToggleInfo={handleToggleInfo}
                 />
               </div>
             ) : showRunDetail ? (
@@ -210,6 +218,8 @@ export default function App() {
                   run={selectedRun}
                   onSelectNode={setSelectedNodeId}
                   selectedNodeId={selectedNodeId}
+                  infoOpen={infoPanelOpen}
+                  onToggleInfo={handleToggleInfo}
                 />
               </div>
             ) : (
@@ -222,7 +232,15 @@ export default function App() {
           <ResizableHandle />
 
           <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
-            {hasEditTab ? (
+            {infoPanelOpen ? (
+              <PipelineInfoPanel
+                run={selectedRun}
+                pipeline={editTab?.pipeline ?? null}
+                libraryPipelines={libraryPipelines}
+                onLibraryChanged={refreshLibraryPipelines}
+                onClose={() => setInfoPanelOpen(false)}
+              />
+            ) : hasEditTab ? (
               <>
                 {selection.kind === "node" && editNodeType === "switch" && (
                   <SwitchInspector />
