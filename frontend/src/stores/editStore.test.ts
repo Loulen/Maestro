@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useEditStore } from "./editStore";
-import { savePipeline } from "../api";
+import { savePipeline, fetchPipeline } from "../api";
 import type { PipelineDef, NodeDef, EdgeDef } from "../types";
 
 vi.mock("../api", () => ({
@@ -476,5 +476,122 @@ describe("mutations set dirty without auto-saving", () => {
 
     await new Promise((r) => setTimeout(r, 2000));
     expect(mockSavePipeline).not.toHaveBeenCalled();
+  });
+});
+
+const mockFetchPipeline = vi.mocked(fetchPipeline);
+
+const EXTERNAL_PIPELINE: PipelineDef = {
+  name: "externally-modified",
+  version: "2.0",
+  variables: {},
+  nodes: [makeNode({ id: "ext-node", name: "External" })],
+  edges: [],
+};
+
+describe("reloadPipeline conflict detection", () => {
+  it("silently re-renders when tab is NOT dirty", async () => {
+    seedTab("my-pipe", false);
+
+    mockFetchPipeline.mockResolvedValueOnce({
+      id: "my-pipe",
+      scope: "repo",
+      path: "/test/my-pipe.yaml",
+      yaml: "",
+      pipeline: EXTERNAL_PIPELINE,
+      prompts: { "ext-node": "external prompt" },
+      diagnostics: [],
+    });
+
+    await useEditStore.getState().reloadPipeline("my-pipe");
+
+    const tab = useEditStore.getState().openTabs[0];
+    expect(tab.pipeline.name).toBe("externally-modified");
+    expect(tab.dirty).toBe(false);
+    expect(tab.externalDirty).toBe(true);
+    expect(tab.conflict).toBeUndefined();
+  });
+
+  it("sets conflict state instead of overwriting when tab IS dirty", async () => {
+    seedTab("my-pipe", true);
+
+    mockFetchPipeline.mockResolvedValueOnce({
+      id: "my-pipe",
+      scope: "repo",
+      path: "/test/my-pipe.yaml",
+      yaml: "",
+      pipeline: EXTERNAL_PIPELINE,
+      prompts: { "ext-node": "external prompt" },
+      diagnostics: ["diag1"],
+    });
+
+    await useEditStore.getState().reloadPipeline("my-pipe");
+
+    const tab = useEditStore.getState().openTabs[0];
+    // Canvas should NOT be overwritten
+    expect(tab.pipeline.name).toBe("test");
+    expect(tab.dirty).toBe(true);
+    // Conflict data should be stored
+    expect(tab.conflict).toBeDefined();
+    expect(tab.conflict!.pipeline.name).toBe("externally-modified");
+    expect(tab.conflict!.prompts["ext-node"]).toBe("external prompt");
+    expect(tab.conflict!.diagnostics).toEqual(["diag1"]);
+  });
+});
+
+describe("resolveConflict", () => {
+  it("'keep' discards external data and keeps canvas", () => {
+    seedTab("my-pipe", true);
+
+    // Simulate conflict state
+    useEditStore.setState((s) => ({
+      openTabs: s.openTabs.map((t) =>
+        t.id === "my-pipe"
+          ? {
+              ...t,
+              conflict: {
+                pipeline: EXTERNAL_PIPELINE,
+                prompts: { "ext-node": "ext" },
+                diagnostics: [],
+              },
+            }
+          : t,
+      ),
+    }));
+
+    useEditStore.getState().resolveConflict("my-pipe", "keep");
+
+    const tab = useEditStore.getState().openTabs[0];
+    expect(tab.conflict).toBeUndefined();
+    expect(tab.pipeline.name).toBe("test");
+    expect(tab.dirty).toBe(true);
+  });
+
+  it("'take' applies external data and clears dirty+conflict", () => {
+    seedTab("my-pipe", true);
+
+    useEditStore.setState((s) => ({
+      openTabs: s.openTabs.map((t) =>
+        t.id === "my-pipe"
+          ? {
+              ...t,
+              conflict: {
+                pipeline: EXTERNAL_PIPELINE,
+                prompts: { "ext-node": "ext" },
+                diagnostics: ["d1"],
+              },
+            }
+          : t,
+      ),
+    }));
+
+    useEditStore.getState().resolveConflict("my-pipe", "take");
+
+    const tab = useEditStore.getState().openTabs[0];
+    expect(tab.conflict).toBeUndefined();
+    expect(tab.pipeline.name).toBe("externally-modified");
+    expect(tab.prompts["ext-node"]).toBe("ext");
+    expect(tab.diagnostics).toEqual(["d1"]);
+    expect(tab.dirty).toBe(false);
   });
 });

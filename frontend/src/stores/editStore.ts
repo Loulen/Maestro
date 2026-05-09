@@ -15,6 +15,12 @@ export interface Selection {
   id: string | null;
 }
 
+export interface ConflictData {
+  pipeline: PipelineDef;
+  prompts: Record<string, string>;
+  diagnostics: string[];
+}
+
 export interface OpenPipeline {
   id: string;
   scope: string;
@@ -24,6 +30,7 @@ export interface OpenPipeline {
   dirty: boolean;
   externalDirty: boolean;
   runId?: string;
+  conflict?: ConflictData;
 }
 
 interface EditState {
@@ -69,6 +76,7 @@ interface EditState {
 
   // Hot-reload
   reloadPipeline: (id: string) => Promise<void>;
+  resolveConflict: (id: string, resolution: "keep" | "take") => void;
 }
 
 export function serializePipeline(p: PipelineDef): string {
@@ -447,6 +455,24 @@ export const useEditStore = create<EditState>((set, get) => ({
   reloadPipeline: async (id: string) => {
     try {
       const detail = await fetchPipeline(id);
+      const tab = get().openTabs.find((t) => t.id === id);
+      if (tab?.dirty) {
+        set((s) => ({
+          openTabs: s.openTabs.map((t) =>
+            t.id === id
+              ? {
+                  ...t,
+                  conflict: {
+                    pipeline: detail.pipeline,
+                    prompts: detail.prompts,
+                    diagnostics: detail.diagnostics ?? [],
+                  },
+                }
+              : t,
+          ),
+        }));
+        return;
+      }
       set((s) => ({
         openTabs: s.openTabs.map((t) =>
           t.id === id
@@ -471,5 +497,24 @@ export const useEditStore = create<EditState>((set, get) => ({
     } catch {
       // ignore
     }
+  },
+
+  resolveConflict: (id: string, resolution: "keep" | "take") => {
+    set((s) => ({
+      openTabs: s.openTabs.map((t) => {
+        if (t.id !== id || !t.conflict) return t;
+        if (resolution === "keep") {
+          return { ...t, conflict: undefined };
+        }
+        return {
+          ...t,
+          pipeline: t.conflict.pipeline,
+          prompts: t.conflict.prompts,
+          diagnostics: t.conflict.diagnostics,
+          dirty: false,
+          conflict: undefined,
+        };
+      }),
+    }));
   },
 }));

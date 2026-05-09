@@ -10,6 +10,7 @@ import UnifiedLeftPanel from "./components/UnifiedLeftPanel";
 import DagCanvas from "./components/DagCanvas";
 import NodeDetailPanel from "./components/NodeDetailPanel";
 import NewRunModal from "./components/NewRunModal";
+import ConflictModal from "./components/ConflictModal";
 import EditCanvas from "./components/EditCanvas";
 import TabBar from "./components/TabBar";
 import NodeInspector from "./components/NodeInspector";
@@ -100,6 +101,7 @@ export default function App() {
   const openTabs = useEditStore((s) => s.openTabs);
   const editSave = useEditStore((s) => s.save);
   const editActiveTabId = useEditStore((s) => s.activeTabId);
+  const resolveConflict = useEditStore((s) => s.resolveConflict);
 
   const editTab = openTabs.find((t) => t.id === editActiveTabId);
   const editNodeType = editTab && selection.kind === "node" && selection.id
@@ -224,6 +226,7 @@ export default function App() {
 
   const layout = useResizableLayout("run", PANEL_IDS, DEFAULT_SIZES);
   const minSizePx = `${layout.minSizePx}px`;
+  const conflictTab = openTabs.find((t) => t.conflict != null);
 
   const showRunDetail = !hasEditTab && selectedRun;
 
@@ -355,6 +358,16 @@ export default function App() {
         onClose={() => setNewRunModalOpen(false)}
         onCreated={handleRunCreated}
         libraryPipelines={libraryPipelines}
+      />
+      <ConflictModal
+        open={conflictTab != null}
+        pipelineId={conflictTab?.id ?? ""}
+        onKeep={() => {
+          if (conflictTab) resolveConflict(conflictTab.id, "keep");
+        }}
+        onTake={() => {
+          if (conflictTab) resolveConflict(conflictTab.id, "take");
+        }}
       />
     </div>
     </TooltipProvider>
