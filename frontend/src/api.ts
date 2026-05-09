@@ -234,11 +234,19 @@ export async function createPipeline(
 
 // --- Library API ---
 
+export interface LibraryPort {
+  name: string;
+  repeated: boolean;
+  side?: string;
+  frontmatter?: Record<string, { type: string; allowed?: string[] | null }> | null;
+  when?: Record<string, unknown> | null;
+}
+
 export interface LibraryEntry {
   name: string;
   type: string;
-  inputs: { name: string; repeated: boolean; side?: string }[];
-  outputs: { name: string; repeated: boolean; side?: string }[];
+  inputs: LibraryPort[];
+  outputs: LibraryPort[];
   interactive: boolean;
   max_iter?: number | null;
   branches?: number | null;
@@ -254,8 +262,8 @@ export async function fetchLibrary(): Promise<LibraryEntry[]> {
 export interface LibrarySaveSpec {
   name: string;
   type: string;
-  inputs: { name: string; repeated: boolean; side?: string }[];
-  outputs: { name: string; repeated: boolean; side?: string }[];
+  inputs: LibraryPort[];
+  outputs: LibraryPort[];
   interactive: boolean;
   prompt: string;
 }
@@ -281,8 +289,8 @@ export interface InstantiateResult {
   spec: {
     name: string;
     type: string;
-    inputs: { name: string; repeated: boolean; side?: string }[];
-    outputs: { name: string; repeated: boolean; side?: string }[];
+    inputs: LibraryPort[];
+    outputs: LibraryPort[];
     interactive: boolean;
   };
   prompt: string;
