@@ -248,6 +248,7 @@ mod tests {
             side: None,
             frontmatter: None,
             when: None,
+            description: None,
         }
     }
 
@@ -258,6 +259,7 @@ mod tests {
             side: None,
             frontmatter: None,
             when: None,
+            description: None,
         }
     }
 
@@ -268,6 +270,7 @@ mod tests {
             side: None,
             frontmatter: Some(schema),
             when: None,
+            description: None,
         }
     }
 

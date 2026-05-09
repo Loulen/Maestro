@@ -460,6 +460,82 @@ describe("deleteEdge resets ForEach over on in-port disconnection", () => {
   });
 });
 
+describe("save error storage", () => {
+  it("stores a structured save error on the tab when save fails", async () => {
+    seedTab("p1", true);
+    mockSavePipeline.mockImplementationOnce(() =>
+      Promise.reject({ message: "invalid YAML: missing field 'name'", line: 42 }),
+    );
+
+    await useEditStore.getState().save("p1");
+
+    const tab = useEditStore.getState().openTabs.find((t) => t.id === "p1");
+    expect(tab?.saveError).toBeDefined();
+    expect(tab?.saveError?.message).toBe("invalid YAML: missing field 'name'");
+    expect(tab?.saveError?.line).toBe(42);
+  });
+
+  it("keeps dirty flag true when save fails", async () => {
+    seedTab("p1", true);
+    mockSavePipeline.mockImplementationOnce(() =>
+      Promise.reject({ message: "fail" }),
+    );
+
+    await useEditStore.getState().save("p1");
+
+    const tab = useEditStore.getState().openTabs.find((t) => t.id === "p1");
+    expect(tab?.dirty).toBe(true);
+  });
+
+  it("clears save error on successful save", async () => {
+    seedTab("p1", true);
+    // First fail
+    mockSavePipeline.mockImplementationOnce(() =>
+      Promise.reject({ message: "fail" }),
+    );
+    await useEditStore.getState().save("p1");
+    expect(useEditStore.getState().openTabs[0].saveError).toBeDefined();
+
+    // Make dirty again and succeed
+    useEditStore.setState((s) => ({
+      openTabs: s.openTabs.map((t) => (t.id === "p1" ? { ...t, dirty: true } : t)),
+    }));
+    mockSavePipeline.mockImplementationOnce(() => Promise.resolve(undefined));
+    await useEditStore.getState().save("p1");
+
+    const tab = useEditStore.getState().openTabs.find((t) => t.id === "p1");
+    expect(tab?.saveError).toBeUndefined();
+  });
+
+  it("clearSaveError removes the error from the tab", () => {
+    seedTab("p1", true);
+    useEditStore.setState((s) => ({
+      openTabs: s.openTabs.map((t) =>
+        t.id === "p1" ? { ...t, saveError: { message: "fail", line: 1 } } : t,
+      ),
+    }));
+
+    useEditStore.getState().clearSaveError("p1");
+
+    const tab = useEditStore.getState().openTabs.find((t) => t.id === "p1");
+    expect(tab?.saveError).toBeUndefined();
+  });
+
+  it("stores error without line when line is not present", async () => {
+    seedTab("p1", true);
+    mockSavePipeline.mockImplementationOnce(() =>
+      Promise.reject({ message: "write failed: permission denied" }),
+    );
+
+    await useEditStore.getState().save("p1");
+
+    const tab = useEditStore.getState().openTabs.find((t) => t.id === "p1");
+    expect(tab?.saveError).toBeDefined();
+    expect(tab?.saveError?.message).toBe("write failed: permission denied");
+    expect(tab?.saveError?.line).toBeUndefined();
+  });
+});
+
 describe("mutations set dirty without auto-saving", () => {
   it("addNode sets dirty but does not trigger save", async () => {
     seedTab("p1", false);

@@ -2,6 +2,15 @@ import type { PipelineListEntry, PipelineDetail, RunListEntry, RunState, PortDef
 
 const BASE = "";
 
+async function throwStructuredSaveError(resp: Response, fallback: string): Promise<never> {
+  const body = await resp.json().catch(() => null);
+  const err: Record<string, unknown> = {
+    message: body?.message ?? body?.error ?? fallback,
+  };
+  if (typeof body?.line === "number") err.line = body.line;
+  throw err;
+}
+
 export async function fetchRuns(): Promise<RunListEntry[]> {
   const resp = await fetch(`${BASE}/runs`);
   if (!resp.ok) throw new Error(`GET /runs failed: ${resp.status}`);
@@ -195,7 +204,7 @@ export async function saveRunPipeline(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ yaml, prompts }),
   });
-  if (!resp.ok) throw new Error(`PUT /runs/${runId}/pipeline failed: ${resp.status}`);
+  if (!resp.ok) await throwStructuredSaveError(resp, `PUT /runs/${runId}/pipeline failed: ${resp.status}`);
 }
 
 // --- Pipeline CRUD ---
@@ -216,7 +225,7 @@ export async function savePipeline(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ yaml, prompts }),
   });
-  if (!resp.ok) throw new Error(`PUT /pipelines/${id} failed: ${resp.status}`);
+  if (!resp.ok) await throwStructuredSaveError(resp, `PUT /pipelines/${id} failed: ${resp.status}`);
 }
 
 export async function createPipeline(

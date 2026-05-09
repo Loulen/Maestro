@@ -11,6 +11,8 @@ import DagCanvas from "./components/DagCanvas";
 import NodeDetailPanel from "./components/NodeDetailPanel";
 import NewRunModal from "./components/NewRunModal";
 import ConflictModal from "./components/ConflictModal";
+import SaveErrorModal from "./components/SaveErrorModal";
+import type { TabId } from "./components/PipelineInfoPanel";
 import EditCanvas from "./components/EditCanvas";
 import TabBar from "./components/TabBar";
 import NodeInspector from "./components/NodeInspector";
@@ -93,6 +95,8 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [newRunModalOpen, setNewRunModalOpen] = useState(false);
   const [infoPanelOpen, setInfoPanelOpen] = useState(false);
+  const [infoPanelInitialTab, setInfoPanelInitialTab] = useState<TabId | undefined>(undefined);
+  const [infoPanelScrollToLine, setInfoPanelScrollToLine] = useState<number | undefined>(undefined);
   const mountedRef = useRef(false);
   const reloadPipeline = useEditStore((s) => s.reloadPipeline);
   const loadPipelines = useEditStore((s) => s.loadPipelines);
@@ -102,6 +106,7 @@ export default function App() {
   const editSave = useEditStore((s) => s.save);
   const editActiveTabId = useEditStore((s) => s.activeTabId);
   const resolveConflict = useEditStore((s) => s.resolveConflict);
+  const clearSaveError = useEditStore((s) => s.clearSaveError);
 
   const editTab = openTabs.find((t) => t.id === editActiveTabId);
   const editNodeType = editTab && selection.kind === "node" && selection.id
@@ -152,7 +157,13 @@ export default function App() {
   }
 
   const handleToggleInfo = useCallback(() => {
-    setInfoPanelOpen((prev) => !prev);
+    setInfoPanelOpen((prev) => {
+      if (!prev) {
+        setInfoPanelInitialTab(undefined);
+        setInfoPanelScrollToLine(undefined);
+      }
+      return !prev;
+    });
   }, []);
 
   const handleCloseInfo = useCallback(() => {
@@ -227,6 +238,19 @@ export default function App() {
   const layout = useResizableLayout("run", PANEL_IDS, DEFAULT_SIZES);
   const minSizePx = `${layout.minSizePx}px`;
   const conflictTab = openTabs.find((t) => t.conflict != null);
+  const saveErrorTab = openTabs.find((t) => t.saveError != null);
+
+  const handleDismissSaveError = useCallback(() => {
+    if (saveErrorTab) clearSaveError(saveErrorTab.id);
+  }, [saveErrorTab, clearSaveError]);
+
+  const handleViewYaml = useCallback(() => {
+    if (!saveErrorTab) return;
+    setInfoPanelInitialTab("yaml");
+    setInfoPanelScrollToLine(saveErrorTab.saveError?.line);
+    setInfoPanelOpen(true);
+    clearSaveError(saveErrorTab.id);
+  }, [saveErrorTab, clearSaveError]);
 
   const showRunDetail = !hasEditTab && selectedRun;
 
@@ -289,11 +313,14 @@ export default function App() {
           <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
             {infoPanelOpen ? (
               <PipelineInfoPanel
+                key={infoPanelInitialTab ?? "default"}
                 run={selectedRun}
                 pipeline={editTab?.pipeline ?? null}
                 libraryPipelines={libraryPipelines}
                 onLibraryChanged={refreshLibraryPipelines}
                 onClose={handleCloseInfo}
+                initialTab={infoPanelInitialTab}
+                scrollToLine={infoPanelScrollToLine}
               />
             ) : hasEditTab ? (
               <>
@@ -368,6 +395,12 @@ export default function App() {
         onTake={() => {
           if (conflictTab) resolveConflict(conflictTab.id, "take");
         }}
+      />
+      <SaveErrorModal
+        open={saveErrorTab != null}
+        error={saveErrorTab?.saveError ?? null}
+        onDismiss={handleDismissSaveError}
+        onViewYaml={handleViewYaml}
       />
     </div>
     </TooltipProvider>

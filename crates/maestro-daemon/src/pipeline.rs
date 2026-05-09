@@ -324,6 +324,7 @@ pub fn parse_pipeline(yaml: &str) -> Result<ParseResult, ParseError> {
                         side: Some(PortSide::Right),
                         frontmatter: None,
                         when: None,
+                        description: None,
                     });
                 }
             }
