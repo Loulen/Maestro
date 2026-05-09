@@ -13,7 +13,7 @@ import {
   MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Pencil, Trash2, Terminal } from "lucide-react";
+import { Trash2, Terminal } from "lucide-react";
 import type { NodeStatus, NodeType, PipelineDef, PipelineDetail, RunState, RunStatus, PortBrief } from "../types";
 import { cleanupRun, attachManager, fetchRunPipeline, saveRunPipeline } from "../api";
 import { serializePipeline } from "../stores/editStore";
@@ -291,7 +291,6 @@ interface Props {
   run: RunState | null;
   onSelectNode: (nodeId: string | null) => void;
   selectedNodeId: string | null;
-  onToggleEdit?: (runId: string) => void;
 }
 
 const START_NODE_OFFSET_X = START_NODE_OFFSET_X_PX;
@@ -621,7 +620,6 @@ function DagCanvasInner({
   run,
   onSelectNode,
   selectedNodeId,
-  onToggleEdit,
 }: Props) {
   const [confirmCleanup, setConfirmCleanup] = useState(false);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -763,18 +761,6 @@ function DagCanvasInner({
               Open Manager
             </button>
           </Tooltip>
-          {onToggleEdit && (
-            <Tooltip content="Edit the run-scoped pipeline copy without modifying the template">
-              <button
-                onClick={() => onToggleEdit(run.run_id)}
-                className="flex cursor-pointer items-center gap-1 rounded border border-edit-tint bg-edit-tint/10 px-2 py-1 text-edit-tint transition-colors hover:bg-edit-tint/20"
-                style={{ fontSize: "10px" }}
-              >
-                <Pencil size={10} />
-                Edit this run
-              </button>
-            </Tooltip>
-          )}
           {isTerminal && (
             <Tooltip content="Remove branches, worktrees, and artifacts for this run. Event log is preserved.">
               <button

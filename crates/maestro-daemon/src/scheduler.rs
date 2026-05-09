@@ -272,7 +272,7 @@ pub fn evaluate_outgoing_edges_with_context(
     actions
 }
 
-fn resolve_max_iter(
+pub fn resolve_max_iter(
     loop_node: &crate::pipeline::NodeDef,
     resolved_vars: &HashMap<String, serde_yaml::Value>,
 ) -> i64 {

@@ -5,6 +5,7 @@ mod event_log;
 mod frontmatter_parser;
 pub mod library_store;
 mod loop_body_resolver;
+mod mutation_validator;
 mod node_io_resolver;
 mod outputs_validator;
 mod pipeline;
@@ -113,6 +114,8 @@ struct CreateRunRequest {
     input: String,
     #[serde(default)]
     variables: HashMap<String, serde_yaml::Value>,
+    #[serde(default)]
+    pipeline_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -379,6 +382,12 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/library/{name}/instantiate",
             post(instantiate_from_library),
+        )
+        .route("/library/pipelines", get(list_library_pipelines))
+        .route("/library/pipelines", post(save_library_pipeline))
+        .route(
+            "/library/pipelines/{id}",
+            axum::routing::delete(delete_library_pipeline),
         )
         .fallback(static_handler)
         .with_state(state)
@@ -906,6 +915,48 @@ async fn instantiate_from_library(AxumPath(name): AxumPath<String>) -> Response 
     }
 }
 
+// --- Library pipeline endpoints ---
+
+async fn list_library_pipelines() -> Response {
+    Json(library_store::pipelines::list()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SaveLibraryPipelineRequest {
+    name: String,
+    yaml: String,
+}
+
+async fn save_library_pipeline(
+    State(_state): State<Arc<AppState>>,
+    Json(req): Json<SaveLibraryPipelineRequest>,
+) -> Response {
+    match library_store::pipelines::save(&req.name, &req.yaml) {
+        Ok(id) => {
+            let entry_list = library_store::pipelines::list();
+            let entry = entry_list.into_iter().find(|e| e.id == id);
+            (StatusCode::CREATED, Json(serde_json::json!({ "id": id, "entry": entry }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_library_pipeline(AxumPath(id): AxumPath<String>) -> Response {
+    match library_store::pipelines::delete(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "pipeline template not found").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 async fn delete_pipeline(
     State(state): State<Arc<AppState>>,
     AxumPath(pipeline_id): AxumPath<String>,
@@ -1398,15 +1449,32 @@ async fn create_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRunRequest>,
 ) -> Response {
-    let pipeline_path = resolve_pipeline_path(&state.repo_root, &req.pipeline);
-    let yaml = match std::fs::read_to_string(&pipeline_path) {
-        Ok(y) => y,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("cannot read pipeline: {e}") })),
-            )
-                .into_response();
+    let (yaml, pipeline_path) = if let Some(ref lib_id) = req.pipeline_id {
+        match library_store::pipelines::get_yaml(lib_id) {
+            Some(y) => {
+                let path = library_store::pipelines::get_path(lib_id)
+                    .unwrap_or_else(|| resolve_pipeline_path(&state.repo_root, &req.pipeline));
+                (y, path)
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("library pipeline template not found: {lib_id}") })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        let path = resolve_pipeline_path(&state.repo_root, &req.pipeline);
+        match std::fs::read_to_string(&path) {
+            Ok(y) => (y, path),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("cannot read pipeline: {e}") })),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -1722,10 +1790,69 @@ async fn save_run_pipeline(
         return (StatusCode::NOT_FOUND, "run-scoped pipeline not found").into_response();
     }
 
-    if let Err(e) = pipeline::parse_pipeline(&req.yaml) {
+    let new_pipeline = match pipeline::parse_pipeline(&req.yaml) {
+        Ok(r) => r.pipeline,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid YAML: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let old_yaml = match std::fs::read_to_string(&yaml_path) {
+        Ok(y) => y,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("read old pipeline: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let old_pipeline = match pipeline::parse_pipeline(&old_yaml) {
+        Ok(r) => r.pipeline,
+        Err(_) => {
+            // Old pipeline unparseable — skip validation, allow overwrite
+            new_pipeline.clone()
+        }
+    };
+
+    let events = match load_events(&state.db, &run_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("load events: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let run_state = match event_log::project(&events) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let rejections = mutation_validator::validate_run_mutation(
+        &old_pipeline,
+        &new_pipeline,
+        &run_state,
+    );
+    if !rejections.is_empty() {
+        let details: Vec<_> = rejections
+            .iter()
+            .map(|r| serde_json::json!({ "node_id": r.node_id, "reason": r.reason }))
+            .collect();
         return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": format!("invalid YAML: {e}") })),
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "mutation rejected", "rejections": details })),
         )
             .into_response();
     }
@@ -1751,8 +1878,56 @@ async fn save_run_pipeline(
         }
     }
 
-    info!("Run-scoped pipeline for {run_id} saved");
+    sync_run_pipeline_to_template(&state, &run_id, &run_state.pipeline_name, &req.yaml, &req.prompts);
+
+    info!("Run-scoped pipeline for {run_id} saved (validated + synced to template)");
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+fn sync_run_pipeline_to_template(
+    state: &AppState,
+    run_id: &str,
+    pipeline_name: &str,
+    yaml: &str,
+    prompts: &HashMap<String, String>,
+) {
+    let name = pipeline_name;
+
+    let template_path = resolve_pipeline_path(&state.repo_root, &name);
+    let tmp_path = template_path.with_extension("yaml.tmp");
+
+    if let Some(parent) = template_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    mark_self_write(&state.recent_writes, &template_path);
+
+    if let Err(e) = std::fs::write(&tmp_path, yaml) {
+        warn!("sync_run_pipeline_to_template: write tmp failed: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &template_path) {
+        warn!("sync_run_pipeline_to_template: rename failed: {e}");
+        let _ = std::fs::remove_file(&tmp_path);
+        return;
+    }
+
+    let template_prompts_dir = template_path
+        .parent()
+        .unwrap_or(&state.repo_root)
+        .join("prompts");
+    for (node_id, content) in prompts {
+        let prompt_path = template_prompts_dir.join(format!("{node_id}.md"));
+        if let Some(parent) = prompt_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        mark_self_write(&state.recent_writes, &prompt_path);
+        if let Err(e) = std::fs::write(&prompt_path, content) {
+            warn!("sync_run_pipeline_to_template: prompt sync failed for {node_id}: {e}");
+        }
+    }
+
+    info!("Synced run {run_id} pipeline to template at {}", template_path.display());
 }
 
 // --- Orphan sweep / reaper ---
