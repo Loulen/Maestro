@@ -213,8 +213,55 @@ export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: P
         </div>
       )}
 
-      {/* Failed banner */}
-      {node.status === "failed" && (
+      {/* Frontmatter retry pending banner (amber) */}
+      {node.status === "running" && (node.frontmatter_retries ?? 0) > 0 && (
+        <div
+          className="flex items-center gap-2 border-b border-st-await/30 bg-st-await-bg px-3 py-2"
+          data-testid="frontmatter-retry-banner"
+        >
+          <AlertCircle size={14} className="shrink-0 text-st-await" />
+          <span
+            className="text-st-await"
+            style={{ fontSize: "11.5px", fontWeight: 500 }}
+          >
+            Frontmatter mismatch — corrective message sent, awaiting retry
+          </span>
+        </div>
+      )}
+
+      {/* Failed banner — validation exhausted variant */}
+      {node.status === "failed" && node.failure_reason === "output validation failed" && (
+        <div
+          className="flex flex-col gap-1 border-b border-st-failed/30 bg-st-failed-bg px-3 py-2"
+          data-testid="frontmatter-exhausted-banner"
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle size={14} className="shrink-0 text-st-failed" />
+            <span
+              className="text-st-failed"
+              style={{ fontSize: "11.5px", fontWeight: 500 }}
+            >
+              Failed — output validation failed after retry
+            </span>
+          </div>
+          {node.frontmatter_violations && node.frontmatter_violations.length > 0 && (
+            <ul
+              className="mt-0.5 flex flex-col gap-0.5 pl-5 font-mono text-st-failed"
+              style={{ fontSize: "10px" }}
+              data-testid="frontmatter-violation-list"
+            >
+              {node.frontmatter_violations.map((v, i) => (
+                <li key={i}>
+                  {v.port}.{v.field}: {v.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* Failed banner — generic */}
+      {node.status === "failed" && node.failure_reason !== "output validation failed" && (
         <div className="flex items-center gap-2 border-b border-st-failed/30 bg-st-failed-bg px-3 py-2">
           <AlertCircle size={14} className="shrink-0 text-st-failed" />
           <span

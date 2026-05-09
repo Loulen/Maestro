@@ -159,6 +159,115 @@ describe("NodeDetailPanel", () => {
     });
   });
 
+  describe("FrontmatterRetryBanners", () => {
+    it("shows amber retry-pending banner when running with retries > 0", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({ status: "running", frontmatter_retries: 1 })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(screen.getByTestId("frontmatter-retry-banner")).toBeInTheDocument();
+      expect(screen.getByTestId("frontmatter-retry-banner")).toHaveTextContent(
+        "Frontmatter mismatch",
+      );
+    });
+
+    it("does not show retry banner when running with retries = 0", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({ status: "running", frontmatter_retries: 0 })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(
+        screen.queryByTestId("frontmatter-retry-banner"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("shows exhausted banner when failed with output validation reason", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({
+              status: "failed",
+              failure_reason: "output validation failed",
+            })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(
+        screen.getByTestId("frontmatter-exhausted-banner"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByTestId("frontmatter-exhausted-banner"),
+      ).toHaveTextContent("output validation failed after retry");
+    });
+
+    it("shows offending fields in exhausted banner when violations present", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({
+              status: "failed",
+              failure_reason: "output validation failed",
+              frontmatter_violations: [
+                { port: "review", field: "verdict", reason: "value 'MAYBE' not in allowed values" },
+                { port: "review", field: "score", reason: "expected int, got 'high'" },
+              ],
+            })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      const list = screen.getByTestId("frontmatter-violation-list");
+      expect(list).toBeInTheDocument();
+      expect(list.children).toHaveLength(2);
+      expect(list).toHaveTextContent("review.verdict");
+      expect(list).toHaveTextContent("review.score");
+    });
+
+    it("does not show violation list when no violations present", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({
+              status: "failed",
+              failure_reason: "output validation failed",
+            })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(
+        screen.queryByTestId("frontmatter-violation-list"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("shows generic failed banner for other failure reasons", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({
+              status: "failed",
+              failure_reason: "some other error",
+            })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(
+        screen.queryByTestId("frontmatter-exhausted-banner"),
+      ).not.toBeInTheDocument();
+      expect(screen.getAllByText(/some other error/).length).toBeGreaterThan(0);
+    });
+  });
+
   describe("PromptSection", () => {
     it("renders Initial Prompt section collapsed by default", () => {
       render(

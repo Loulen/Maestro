@@ -49,6 +49,7 @@ pub enum EventKind {
     LoopBreakReceived,
     LoopMaxReached,
     LoopDone,
+    FrontmatterRetryPending,
     PipelineModified,
     RunCompleted,
     RunFailed,
@@ -107,6 +108,10 @@ pub struct NodeState {
     pub failure_reason: Option<String>,
     #[serde(default)]
     pub iterations: Vec<IterationInfo>,
+    #[serde(default)]
+    pub frontmatter_retries: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontmatter_violations: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +315,8 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                             completed_at: None,
                             failure_reason: None,
                             iterations: Vec::new(),
+                            frontmatter_retries: 0,
+                            frontmatter_violations: Vec::new(),
                         });
                     node.status = NodeStatus::Running;
                     node.iter = iter;
@@ -353,12 +360,22 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                                 .get("reason")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
+                            if let Some(arr) = payload.get("violations").and_then(|v| v.as_array()) {
+                                node.frontmatter_violations = arr.clone();
+                            }
                         }
                         let iter = event.iter.unwrap_or(node.iter);
                         if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
                             it.status = NodeStatus::Failed;
                             it.completed_at = Some(event.ts.clone());
                         }
+                    }
+                }
+            }
+            EventKind::FrontmatterRetryPending => {
+                if let Some(ref node_id) = event.node_id {
+                    if let Some(node) = state.nodes.get_mut(node_id) {
+                        node.frontmatter_retries += 1;
                     }
                 }
             }
@@ -653,6 +670,39 @@ mod tests {
         let node = &state.nodes["worker"];
         assert_eq!(node.status, NodeStatus::Failed);
         assert_eq!(node.failure_reason.as_deref(), Some("could not complete"));
+        assert!(node.frontmatter_violations.is_empty());
+    }
+
+    #[test]
+    fn projects_frontmatter_violations_on_failed_node() {
+        let violations = serde_json::json!([
+            { "port": "review", "field": "verdict", "reason": "value 'MAYBE' not in allowed" },
+            { "port": "review", "field": "score", "reason": "expected int" },
+        ]);
+        let events = vec![
+            make_event(EventKind::RunStarted, None, None),
+            make_event(EventKind::NodeStarted, Some("reviewer"), Some(1)),
+            make_event_with_payload(
+                EventKind::NodeFailed,
+                Some("reviewer"),
+                serde_json::json!({
+                    "reason": "output validation failed",
+                    "violations": violations,
+                }),
+            ),
+            make_event(EventKind::RunFailed, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["reviewer"];
+        assert_eq!(node.status, NodeStatus::Failed);
+        assert_eq!(
+            node.failure_reason.as_deref(),
+            Some("output validation failed")
+        );
+        assert_eq!(node.frontmatter_violations.len(), 2);
+        assert_eq!(node.frontmatter_violations[0]["field"], "verdict");
+        assert_eq!(node.frontmatter_violations[1]["field"], "score");
     }
 
     #[test]

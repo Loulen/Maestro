@@ -85,6 +85,8 @@ mod tests {
             completed_at: None,
             failure_reason: None,
             iterations: Vec::new(),
+            frontmatter_retries: 0,
+            frontmatter_violations: Vec::new(),
         }
     }
 
@@ -97,6 +99,8 @@ mod tests {
             completed_at: Some("t1".into()),
             failure_reason: None,
             iterations: Vec::new(),
+            frontmatter_retries: 0,
+            frontmatter_violations: Vec::new(),
         }
     }
 
