@@ -24,14 +24,13 @@ use tracing::{error, info, warn};
 /// Validate the Origin header against the daemon's own address to prevent
 /// DNS-rebinding attacks. Returns `true` if the origin is acceptable.
 pub fn check_origin(headers: &HeaderMap, daemon_port: u16) -> bool {
-    let origin = match headers.get("origin") {
-        Some(v) => match v.to_str() {
-            Ok(s) => s,
-            Err(_) => return false,
-        },
-        // No Origin header — e.g. same-origin requests, curl, or non-browser
-        // clients. Allow these; the browser always sends Origin on WS upgrade.
-        None => return true,
+    // No Origin header — e.g. same-origin requests, curl, or non-browser
+    // clients. Allow these; the browser always sends Origin on WS upgrade.
+    let Some(origin_header) = headers.get("origin") else {
+        return true;
+    };
+    let Ok(origin) = origin_header.to_str() else {
+        return false;
     };
 
     let origin_lower = origin.to_lowercase();

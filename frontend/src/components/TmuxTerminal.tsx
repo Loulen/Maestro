@@ -165,6 +165,19 @@ export default function TmuxTerminal({
   const isActive =
     status === "running" || status === "awaiting_user";
 
+  let dotClass: string;
+  let statusLabel: string;
+  if (!connected) {
+    dotClass = "bg-fg-5";
+    statusLabel = "disconnected";
+  } else if (isActive) {
+    dotClass = "animate-pulse bg-st-running";
+    statusLabel = "attached · live";
+  } else {
+    dotClass = "bg-st-done";
+    statusLabel = "connected";
+  }
+
   return (
     <div
       className={`flex flex-col overflow-hidden ${expanded ? "flex-1" : ""}`}
@@ -176,15 +189,7 @@ export default function TmuxTerminal({
         style={{ fontSize: "11px" }}
         data-testid="term-toolbar"
       >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${
-            connected && isActive
-              ? "animate-pulse bg-st-running"
-              : connected
-                ? "bg-st-done"
-                : "bg-fg-5"
-          }`}
-        />
+        <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
         <span className="font-mono text-fg-4" style={{ fontSize: "10px" }}>
           {session}
         </span>
@@ -196,7 +201,7 @@ export default function TmuxTerminal({
           }`}
           style={{ fontSize: "9px" }}
         >
-          {connected ? (isActive ? "attached · live" : "connected") : "disconnected"}
+          {statusLabel}
         </span>
         <span className="flex-1" />
         {onExpand && (
