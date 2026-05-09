@@ -17,13 +17,14 @@ import type { LibraryEntry } from "../api";
 import { useEditStore } from "../stores/editStore";
 import { generateNodeId } from "../lib/nanoid";
 import { TYPE_LABELS, TYPE_COLORS } from "../nodeStyles";
-import TriangleHandle from "./TriangleHandle";
+import PortRow from "./PortRow";
 import { SwitchEditNode } from "./SwitchNode";
 import { LoopEditNode } from "./LoopNode";
 import { ForEachEditNode } from "./ForEachNode";
 import { MergeEditNode } from "./MergeNode";
 import EditToolbar from "./EditToolbar";
 import LintBanner from "./LintBanner";
+import DragConnectionLine from "./DragConnectionLine";
 
 interface EditNodeData {
   label: string;
@@ -48,16 +49,19 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
       }`}
       style={{ minWidth: 160, fontSize: "12px" }}
     >
-      {data.inputs.map((port, i) => (
-        <TriangleHandle
-          key={`in-${port.name}`}
-          id={port.name}
-          kind="input"
-          side={port.side}
-          index={i}
-          total={data.inputs.length}
-        />
-      ))}
+      <div className="flex flex-col gap-0.5 mb-1">
+        {data.inputs.map((port, i) => (
+          <PortRow
+            key={`in-${port.name}`}
+            portName={port.name}
+            kind="input"
+            side={port.side}
+            index={i}
+            total={data.inputs.length}
+            description={port.description}
+          />
+        ))}
+      </div>
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 shrink-0 rounded-full bg-st-pending" />
         <span className="font-medium text-fg">{data.label}</span>
@@ -79,16 +83,19 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
       <div className="mt-0.5 font-mono text-fg-4" style={{ fontSize: "9px" }}>
         {data.nodeId}
       </div>
-      {data.outputs.map((port, i) => (
-        <TriangleHandle
-          key={`out-${port.name}`}
-          id={port.name}
-          kind="output"
-          side={port.side}
-          index={i}
-          total={data.outputs.length}
-        />
-      ))}
+      <div className="mt-1 flex flex-col gap-0.5">
+        {data.outputs.map((port, i) => (
+          <PortRow
+            key={`out-${port.name}`}
+            portName={port.name}
+            kind="output"
+            side={port.side}
+            index={i}
+            total={data.outputs.length}
+            description={port.description}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -189,8 +196,8 @@ function deriveEditNodes(pipeline: PipelineDef): Node[] {
         label: n.name ?? n.id,
         nodeId: n.id,
         nodeType: n.type,
-        inputs: n.inputs.map((p) => ({ name: p.name, side: p.side ?? "left" })),
-        outputs: n.outputs.map((p) => ({ name: p.name, side: p.side ?? "right" })),
+        inputs: n.inputs.map((p) => ({ name: p.name, side: p.side ?? "left", description: p.description })),
+        outputs: n.outputs.map((p) => ({ name: p.name, side: p.side ?? "right", description: p.description })),
         interactive: n.interactive,
       },
     };
@@ -439,6 +446,7 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
         onNodeDragStop={onNodeDragStop}
         onNodeContextMenu={handleNodeContextMenu}
         onEdgeContextMenu={handleEdgeContextMenu}
+        connectionLineComponent={DragConnectionLine}
         fitView
         proOptions={{ hideAttribution: true }}
         className="bg-bg-1"
