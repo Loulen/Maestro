@@ -2,7 +2,7 @@ import type { NodeProps, Node } from "@xyflow/react";
 import type { NodeStatus, PortSide } from "../types";
 import { useEditStore } from "../stores/editStore";
 import { STATUS_BORDER, STATUS_BG, STATUS_DOT } from "../nodeStyles";
-import TriangleHandle from "./TriangleHandle";
+import PortPill from "./PortPill";
 import PortRow from "./PortRow";
 import { NodeTypeIcon } from "./NodeTypeIcon";
 
@@ -145,10 +145,11 @@ export function SwitchRunNode({ data }: NodeProps<Node<SwitchRunData>>) {
                   else
                 </span>
               )}
-              <TriangleHandle
+              <PortPill
                 id={branch.name}
                 kind="output"
                 side={branch.side}
+                label={branch.name}
                 index={i}
                 total={data.branches.length}
               />

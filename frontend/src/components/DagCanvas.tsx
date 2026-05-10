@@ -50,7 +50,7 @@ import { STATUS_BORDER, STATUS_BG, STATUS_DOT } from "../nodeStyles";
 import { NodeTypeIcon, CodeDocMarker } from "./NodeTypeIcon";
 import { computeBodySubgraph } from "../loopBodySubgraph";
 import CleanupConfirmModal from "./CleanupConfirmModal";
-import TriangleHandle from "./TriangleHandle";
+import PortPill from "./PortPill";
 import PortRow from "./PortRow";
 import { SwitchRunNode } from "./SwitchNode";
 import { LoopRunNode } from "./LoopNode";
@@ -159,11 +159,12 @@ function EndNode({ data }: NodeProps<Node<EndNodeData>>) {
       }}
     >
       {inputs.map((port, i) => (
-        <TriangleHandle
+        <PortPill
           key={`in-${port.name}`}
           id={port.name}
           kind="input"
           side={port.side}
+          label={port.name}
           index={i}
           total={inputs.length}
         />
@@ -193,11 +194,12 @@ function StartNode({ data }: NodeProps<Node<StartNodeData>>) {
     >
       <Play data-testid="node-icon-start" size={14} />
       {outputs.map((port, i) => (
-        <TriangleHandle
+        <PortPill
           key={`out-${port.name}`}
           id={port.name}
           kind="output"
           side={port.side}
+          label={port.name}
           index={i}
           total={outputs.length}
         />

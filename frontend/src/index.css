@@ -130,6 +130,64 @@ body {
   }
 }
 
+/* Port pill — capsule straddling the node border.
+   Override xyflow's default Handle styling. */
+.react-flow__handle.port-pill {
+  width: auto;
+  height: 18px;
+  border-radius: 9px;
+}
+.port-pill {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  padding: 0 7px;
+  background: var(--color-bg-3);
+  border: 1px solid var(--color-line-strong);
+  border-radius: 9px;
+  color: var(--color-fg-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  z-index: 2;
+  pointer-events: auto;
+}
+.port-pill .pp-chev {
+  width: 8px;
+  height: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--color-fg-3);
+}
+.port-pill .pp-chev svg {
+  display: block;
+}
+
+.port-pill.side-left {
+  left: 0;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+.port-pill.side-right {
+  left: 100%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  flex-direction: row-reverse;
+}
+.port-pill.side-top {
+  top: 0;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.port-pill.side-bottom {
+  top: 100%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
 .artifact-markdown {
   font-family: var(--font-sans);
   font-size: 12px;
