@@ -188,6 +188,15 @@ body {
   transform: translate(-50%, -50%);
 }
 
+/* Inspector scope — amber accent (refs docs/design/project/winners.css §3) */
+.panel-r {
+  --color-acc: var(--color-st-await);
+  --color-acc-dim: #d97706;
+  --color-acc-bg: rgba(245, 158, 11, 0.12);
+  --color-acc-border: rgba(245, 158, 11, 0.34);
+  --color-primary-foreground: #1a0f00;
+}
+
 .artifact-markdown {
   font-family: var(--font-sans);
   font-size: 12px;
