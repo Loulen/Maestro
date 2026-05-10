@@ -1,24 +1,22 @@
 interface Props {
   onConfirm: () => void;
   onCancel: () => void;
-  isLive?: boolean;
 }
 
-export default function CleanupConfirmModal({
-  onConfirm,
-  onCancel,
-  isLive = false,
-}: Props) {
+export default function ForgetRunModal({ onConfirm, onCancel }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-[360px] rounded-lg border border-line bg-bg-2 p-4 shadow-lg">
+      <div className="w-[400px] rounded-lg border border-line bg-bg-2 p-4 shadow-lg">
         <h3 className="font-medium text-fg" style={{ fontSize: "13px" }}>
-          {isLive ? "Stop and Cleanup Run" : "Cleanup Run"}
+          Forget Run Permanently
         </h3>
         <p className="mt-2 text-fg-3" style={{ fontSize: "12px" }}>
-          {isLive
-            ? "This will kill all active node sessions, then remove worktrees and artifacts. Event history is kept. Proceed?"
-            : "This will remove worktrees and artifacts. Event history is kept. Proceed?"}
+          This will permanently delete the event log for this run. The run will
+          no longer appear anywhere and the manager will lose any post-mortem
+          context for it.
+        </p>
+        <p className="mt-2 text-fg-3" style={{ fontSize: "12px", fontWeight: 500 }}>
+          This cannot be undone.
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <button
@@ -33,7 +31,7 @@ export default function CleanupConfirmModal({
             className="cursor-pointer rounded-md bg-st-failed px-3 py-1.5 text-white transition-colors hover:bg-st-failed/80"
             style={{ fontSize: "11.5px" }}
           >
-            {isLive ? "Stop & Cleanup" : "Cleanup"}
+            Forget
           </button>
         </div>
       </div>

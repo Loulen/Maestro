@@ -290,6 +290,7 @@ const nodeTypes = {
 };
 
 const TERMINAL_STATUSES: RunStatus[] = ["completed", "failed", "halted"];
+const LIVE_STATUSES: RunStatus[] = ["running", "awaiting_user"];
 
 interface Props {
   run: RunState | null;
@@ -803,6 +804,8 @@ function DagCanvasInner({
   }
 
   const isTerminal = TERMINAL_STATUSES.includes(run.status);
+  const isLive = LIVE_STATUSES.includes(run.status);
+  const canCleanup = isTerminal || isLive;
 
   async function handleCleanup() {
     try {
@@ -865,15 +868,21 @@ function DagCanvasInner({
               Open Manager
             </button>
           </Tooltip>
-          {isTerminal && (
-            <Tooltip content="Remove branches, worktrees, and artifacts for this run. Event log is preserved.">
+          {canCleanup && (
+            <Tooltip
+              content={
+                isLive
+                  ? "Stop running sessions, then remove branches, worktrees, and artifacts. Event log is preserved."
+                  : "Remove branches, worktrees, and artifacts for this run. Event log is preserved."
+              }
+            >
               <button
                 onClick={() => setConfirmCleanup(true)}
                 className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg-2"
                 style={{ fontSize: "10px" }}
               >
                 <Trash2 size={10} />
-                Cleanup
+                {isLive ? "Stop & Cleanup" : "Cleanup"}
               </button>
             </Tooltip>
           )}
@@ -899,6 +908,7 @@ function DagCanvasInner({
 
       {confirmCleanup && (
         <CleanupConfirmModal
+          isLive={isLive}
           onConfirm={handleCleanup}
           onCancel={() => setConfirmCleanup(false)}
         />

@@ -186,6 +186,13 @@ export async function cleanupRun(runId: string): Promise<void> {
   if (!resp.ok) throw new Error(`POST /runs/${runId}/commands failed: ${resp.status}`);
 }
 
+export async function forgetRun(runId: string): Promise<void> {
+  const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error(`DELETE /runs/${runId} failed: ${resp.status}`);
+}
+
 // --- Run-scoped pipeline ---
 
 export async function fetchRunPipeline(runId: string): Promise<PipelineDetail> {
