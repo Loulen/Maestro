@@ -1,0 +1,675 @@
+/* winners.css — integration of picked component hypotheses into Maestro
+   ----------------------------------------------------------------------
+   Node card    : H1  solid stroke (motion-free cadre on 4 sides)
+   Port         : P2  capsule pill straddling the card edge, label + chevron
+   Inspector
+     port row   : I1  hairline rows (no card, divider between)
+     output     : O3  tab-head card (outdented header, body anchored below)
+     field row  : F1  type-driven row, enum expands inline
+     branch     : S1  AND-rail (vertical rule + sideways AND label)
+   Inspector scope uses amber accent (var(--st-await)) instead of emerald.
+*/
+
+/* ========================================================================
+   1 · Node card · H1 solid stroke
+   ====================================================================== */
+
+.node{
+  /* Tighten existing card to the H1 idiom: motion-free border, status drives
+     the stroke color across all 4 sides; no left ribbon. */
+  border: 1.5px solid var(--st-pending);
+  background: var(--bg-2);
+  box-shadow: none;
+}
+.node.pending        { border-color: var(--line-strong); }
+.node.running        { border-color: var(--st-running); }
+.node.awaiting_user  { border-color: var(--st-await); }
+.node.done           { border-color: var(--st-done); }
+.node.failed         { border-color: var(--st-failed); }
+.node.blocked        { border-color: var(--st-blocked); }
+
+/* drop any latent left-ribbon */
+.node::before,
+.node::after{ content: none !important; }
+
+/* Selection — emerald outer ring, status border stays readable inside */
+.node.selected{
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3.5px var(--acc);
+}
+
+/* Failed dominant badge */
+.node.failed{ position: relative; }
+.node.failed::after{
+  content: "";
+  display: block;
+  position: absolute;
+  top: -7px; right: -7px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--st-failed);
+  border: 2px solid var(--bg-1);
+  box-shadow: 0 2px 6px rgba(239,68,68,0.4);
+  z-index: 3;
+}
+
+/* ========================================================================
+   2 · Port · P2 capsule pill
+   ====================================================================== */
+
+/* Hide the legacy triangle handle quietly */
+.tri-handle{ display: none !important; }
+
+/* PortPill is rendered fresh by dag.jsx (window.PortPill). It carries
+   a side class and a kind class. */
+.port-pill{
+  position: absolute;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 18px; padding: 0 7px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  z-index: 2;
+  pointer-events: auto;
+}
+.port-pill .pp-chev{
+  width: 8px; height: 8px;
+  display: grid; place-items: center;
+  color: var(--fg-3);
+}
+.port-pill .pp-chev svg{ display: block; }
+
+.port-pill.side-left   { left: 0;    top: 50%; transform: translate(-50%, -50%); }
+.port-pill.side-right  { left: 100%; top: 50%; transform: translate(-50%, -50%); flex-direction: row-reverse; }
+.port-pill.side-top    { top: 0;    left: 50%; transform: translate(-50%, -50%); }
+.port-pill.side-bottom { top: 100%; left: 50%; transform: translate(-50%, -50%); }
+
+/* Active port (running outgoing) — pill picks up the status color */
+.node.running .port-pill.kind-out{
+  background: rgba(59,130,246,0.14);
+  border-color: rgba(59,130,246,0.45);
+  color: #cfe2ff;
+}
+.node.running .port-pill.kind-out .pp-chev{ color: var(--st-running); }
+
+/* Hover drop target — only inputs on a hovered node light up. The class is
+   `is-drop` and is added by hosts where drag is mocked. */
+.port-pill.is-drop{
+  background: var(--acc-bg);
+  border-color: var(--acc-border);
+  color: var(--acc);
+}
+.port-pill.is-drop .pp-chev{ color: var(--acc); }
+
+/* ========================================================================
+   3 · Inspector scope — amber accent
+   ----------------------------------------------------------------------
+   Re-bind --acc family inside .panel-r so selection/focus/active in the
+   inspector reads amber. Status colors stay untouched.
+   ====================================================================== */
+
+.panel-r{
+  --acc: var(--st-await);
+  --acc-dim: #d97706;
+  --acc-bg: rgba(245, 158, 11, 0.12);
+  --acc-border: rgba(245, 158, 11, 0.34);
+}
+
+/* Amber primary button inside inspector */
+.panel-r .btn.primary{
+  background: var(--st-await);
+  color: #1a0f00;
+  border-color: var(--st-await);
+}
+.panel-r .btn.primary:hover{ background: var(--acc-dim); border-color: var(--acc-dim); }
+
+/* Toggle on-state */
+.panel-r .toggle.on{ background: var(--st-await); }
+
+/* ========================================================================
+   4 · Inspector port row · I1 hairline
+   ====================================================================== */
+
+/* Run mode — inputs/outputs list */
+.panel-r .p-sect .port-row{
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  grid-template-columns: none !important;   /* kill any v2 grid */
+}
+.panel-r .p-sect .port-row:last-of-type{ border-bottom: none; }
+.panel-r .p-sect .port-row .pdot{
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--fg-5);
+  flex-shrink: 0;
+}
+.panel-r .p-sect .port-row .pdot.ok{ background: var(--st-done); }
+.panel-r .p-sect .port-row .pdot.accumulating{
+  background: var(--st-await);
+  box-shadow: 0 0 0 2px rgba(245,158,11,0.18);
+}
+.panel-r .p-sect .port-row .pname{ font-weight: 500; font-size: 12.5px; }
+.panel-r .p-sect .port-row .ppath{
+  font-family: var(--font-mono);
+  font-size: 10.5px; color: var(--fg-4);
+  margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Side picker — amber on selection */
+.panel-r .side-picker .sp-btn.on{
+  background: var(--acc-bg);
+  border-color: var(--acc-border);
+  color: var(--st-await);
+}
+.panel-r .side-picker .sp-btn:focus{
+  outline: none;
+  box-shadow: 0 0 0 1px var(--st-await);
+}
+
+/* Inputs editor — flatten any v2 grid into hairline rows */
+.panel-r .p-sect .port-row[style*="grid-template-columns"]{
+  display: grid !important;
+  grid-template-columns: 6px 1fr auto auto !important;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 10px 2px;
+}
+
+/* Inputs inline focus ring picks up amber */
+.panel-r .input:focus,
+.panel-r .textarea:focus,
+.panel-r .select:focus{
+  outline: none;
+  border-color: var(--st-await);
+  box-shadow: 0 0 0 1px var(--st-await);
+  background: rgba(245,158,11,0.04);
+}
+
+/* ========================================================================
+   5 · Inspector output card · O3 tab head
+   ====================================================================== */
+
+.op-tab{
+  margin-bottom: 12px;
+  font-family: var(--font-sans);
+}
+.op-tab .op-head{
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px 8px 0 0;
+  border-bottom: none;
+  width: 92%;
+  margin-bottom: -1px;
+  position: relative;
+  z-index: 1;
+}
+.op-tab.collapsed .op-head{
+  border-radius: 8px;
+  width: 100%;
+  border-bottom: 1px solid var(--line-strong);
+}
+.op-tab .op-chev{
+  width: 18px; height: 18px;
+  display: grid; place-items: center;
+  color: var(--fg-3); cursor: pointer;
+  transition: transform 150ms;
+  border: none; background: transparent;
+  padding: 0;
+}
+.op-tab.collapsed .op-chev{ transform: rotate(-90deg); }
+.op-tab .op-name{
+  flex: 1; min-width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.op-tab .op-name:hover{ background: var(--bg-2); }
+.op-tab .op-name:focus{
+  outline: none; background: var(--bg-1);
+  border-color: var(--st-await);
+  box-shadow: 0 0 0 1px var(--st-await);
+}
+.op-tab .op-actions{ display: flex; align-items: center; gap: 6px; }
+.op-tab .op-del{
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+}
+.op-tab .op-del:hover{
+  color: var(--st-failed);
+  background: rgba(239,68,68,0.10);
+  border-color: rgba(239,68,68,0.30);
+}
+.op-tab .op-body{
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 0 8px 8px 8px;
+  padding: 10px 12px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+/* ========================================================================
+   6 · Inspector field row · F1 type-driven
+   ====================================================================== */
+
+.fld{
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+.fld .fld-name{
+  flex: 1 1 120px;
+  min-width: 100px;
+  background: transparent;
+  border: 1px solid transparent;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg);
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.fld .fld-name:hover{ background: var(--bg-2); }
+.fld .fld-name:focus{
+  outline: none; background: var(--bg-2);
+  border-color: var(--st-await);
+  box-shadow: 0 0 0 1px var(--st-await);
+}
+.fld .fld-type{
+  flex: 0 0 96px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  color: var(--fg-2);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.fld .fld-del{
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 4px; border: 1px solid transparent;
+  background: transparent; color: var(--fg-4); cursor: pointer;
+}
+.fld .fld-del:hover{
+  color: var(--st-failed);
+  background: rgba(239,68,68,0.10);
+  border-color: rgba(239,68,68,0.30);
+}
+
+.fld-enum{
+  flex: 1 1 100%;
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.fld-enum .fld-enum-h{
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--fg-4);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.fld-chips{
+  display: flex; gap: 5px; flex-wrap: wrap;
+}
+.fld-chip{
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 8px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+}
+.fld-add-row{
+  display: flex; gap: 6px;
+}
+.fld-add-row input{
+  flex: 1;
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  padding: 5px 8px;
+}
+.fld-add-row .fld-add-btn{
+  height: 26px; padding: 0 12px;
+  background: var(--acc-bg);
+  border: 1px solid var(--acc-border);
+  color: var(--st-await);
+  border-radius: 4px;
+  font-size: 11.5px; font-weight: 600;
+  cursor: pointer;
+}
+
+/* ========================================================================
+   7 · Switch branch · S1 AND rail
+   ====================================================================== */
+
+.sb-card{
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.sb-card .sb-head{
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-3);
+}
+.sb-card .sb-grip{
+  color: var(--fg-4);
+  cursor: grab;
+}
+.sb-card .sb-name{
+  flex: 1; min-width: 0;
+  background: transparent; border: 1px solid transparent;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px; font-weight: 600;
+  padding: 3px 6px; border-radius: 4px;
+}
+.sb-card .sb-name:focus{
+  outline: none; background: var(--bg-1);
+  border-color: var(--st-await);
+  box-shadow: 0 0 0 1px var(--st-await);
+}
+.sb-card .sb-del{
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 4px; border: 1px solid transparent;
+  background: transparent; color: var(--fg-4); cursor: pointer;
+}
+.sb-card .sb-del:hover{
+  color: var(--st-failed);
+  background: rgba(239,68,68,0.10);
+  border-color: rgba(239,68,68,0.30);
+}
+.sb-card .sb-body{
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--line);
+}
+.sb-card .sb-conds{
+  position: relative;
+  padding-left: 22px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.sb-card .sb-conds::before{
+  content: "";
+  position: absolute;
+  left: 8px; top: 4px; bottom: 4px;
+  width: 1.5px;
+  background: var(--line-strong);
+}
+.sb-card .sb-conds.multi::after{
+  content: "AND";
+  position: absolute;
+  left: -1px; top: 50%;
+  transform: translateY(-50%) rotate(-90deg);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--fg-4);
+  background: var(--bg-2);
+  padding: 2px 4px;
+}
+.sb-card .sb-conds.single::before,
+.sb-card .sb-conds.single::after{ display: none; }
+.sb-cond{
+  display: grid;
+  grid-template-columns: 1fr 70px 1fr 22px;
+  gap: 4px; align-items: center;
+}
+.sb-cond .input,
+.sb-cond .select{
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--fg);
+  padding: 5px 8px;
+}
+.sb-cond .input:focus,
+.sb-cond .select:focus{
+  outline: none;
+  border-color: var(--st-await);
+  box-shadow: 0 0 0 1px var(--st-await);
+}
+.sb-cond .sb-x{
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 4px; border: 1px solid transparent;
+  background: transparent; color: var(--fg-4); cursor: pointer;
+}
+
+.sb-default{
+  border-style: dashed;
+  background: var(--bg-1);
+}
+.sb-default .sb-head{
+  background: transparent;
+}
+.sb-default .sb-name{ font-style: italic; color: var(--fg-3); }
+.sb-default .sb-pin{
+  display: inline-flex; align-items: center;
+  height: 18px; padding: 0 6px;
+  border-radius: 9px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px; letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.sb-default .sb-body{
+  padding: 8px 12px 10px;
+  font-size: 11.5px; color: var(--fg-3);
+  font-family: var(--font-mono);
+}
+
+/* ========================================================================
+   8 · Component spotlights — frame inside design canvas
+   ====================================================================== */
+
+.spotlight-art{
+  width: 100%; height: 100%;
+  background:
+    radial-gradient(circle at 20px 20px, rgba(255,255,255,0.04) 1px, transparent 1.5px) 0 0/40px 40px,
+    var(--bg-1);
+  padding: 36px 40px;
+  display: flex; flex-direction: column; gap: 28px;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
+.spot-head{
+  display: flex; align-items: baseline; gap: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.spot-head .eyebrow{
+  font-family: var(--font-mono);
+  font-size: 10.5px; letter-spacing: 0.16em;
+  color: var(--fg-4); text-transform: uppercase;
+}
+.spot-head h2{
+  margin: 0; font-size: 17px; font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.spot-head .spot-sub{
+  font-size: 12.5px; color: var(--fg-3);
+  margin-left: auto; max-width: 380px;
+  line-height: 1.5; text-align: right;
+}
+.spot-grid{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  flex: 1; min-height: 0;
+}
+.spot-grid.three{
+  grid-template-columns: 1fr 1fr 1fr;
+}
+.spot-card{
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px 22px 22px;
+  display: flex; flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+.spot-card .sc-head{
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.spot-card .sc-tag{
+  font-family: var(--font-mono);
+  font-size: 10px; letter-spacing: 0.14em;
+  color: var(--fg-4); text-transform: uppercase;
+}
+.spot-card .sc-title{
+  font-size: 13px; font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.spot-card .sc-cap{
+  margin-left: auto;
+  font-size: 11.5px; color: var(--fg-3);
+  text-align: right;
+  max-width: 280px; line-height: 1.4;
+}
+.spot-card .sc-body{
+  flex: 1;
+  display: flex; flex-direction: column;
+  gap: 14px;
+  justify-content: flex-start;
+  align-items: stretch;
+}
+.spot-card .sc-row{
+  display: flex; flex-wrap: wrap; gap: 28px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.spot-card .sc-row:last-child{ border-bottom: none; }
+.spot-card .sc-row .sc-label{
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-4);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  flex: 0 0 100px;
+}
+.spot-card .sc-row .sc-stage{
+  display: flex; gap: 22px; flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Mini placeholder for the node card used in spotlights */
+.spot-node{
+  position: relative;
+  width: 200px; min-height: 64px;
+  background: var(--bg-2);
+  border: 1.5px solid var(--st-pending);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.spot-node.running        { border-color: var(--st-running); }
+.spot-node.awaiting_user  { border-color: var(--st-await); }
+.spot-node.done           { border-color: var(--st-done); }
+.spot-node.failed         { border-color: var(--st-failed); }
+.spot-node.selected{
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3.5px var(--acc);
+}
+.spot-node .sn-head{
+  display: flex; align-items: center; gap: 8px;
+}
+.spot-node .sn-icon{
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  color: var(--fg-2);
+}
+.spot-node .sn-name{
+  font-size: 12.5px; font-weight: 600;
+}
+.spot-node .sn-nid{
+  font-family: var(--font-mono);
+  font-size: 10px; color: var(--fg-4);
+}
+.spot-node .sn-meta{
+  font-family: var(--font-mono);
+  font-size: 10px; color: var(--fg-4);
+}
+.spot-node.failed::after{
+  content: "";
+  position: absolute;
+  top: -7px; right: -7px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: var(--st-failed);
+  border: 2px solid var(--bg-1);
+  box-shadow: 0 2px 6px rgba(239,68,68,0.4);
+}
+
+/* Inline label under a spotlight piece */
+.spot-cap{
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-5);
+  margin-top: 4px;
+}
+
+/* Spotlight inspector container — amber scope */
+.spot-inspector{
+  --acc: var(--st-await);
+  --acc-bg: rgba(245, 158, 11, 0.12);
+  --acc-border: rgba(245, 158, 11, 0.34);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  width: 320px;
+  display: flex; flex-direction: column;
+  gap: 10px;
+}

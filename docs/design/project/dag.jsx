@@ -40,19 +40,26 @@ function handleStyleFor(side, idx, total) {
   return {};
 }
 
-function TriHandle({ side = 'left', kind = 'in', active = false, style }) {
-  let points;
+function PortPill({ side = 'left', kind = 'in', label = '', active = false, style }) {
   const inward = (kind === 'in');
-  if (side === 'left')   points = inward ? "2,5 2,11 10,8" : "10,5 10,11 2,8";
-  if (side === 'right')  points = inward ? "10,5 10,11 2,8" : "2,5 2,11 10,8";
-  if (side === 'top')    points = inward ? "5,2 11,2 8,10" : "5,10 11,10 8,2";
-  if (side === 'bottom') points = inward ? "5,10 11,10 8,2" : "5,2 11,2 8,10";
+  let pts;
+  if (side === 'left')   pts = inward ? "2,2 6,5 2,8" : "6,2 2,5 6,8";
+  if (side === 'right')  pts = inward ? "6,2 2,5 6,8" : "2,2 6,5 2,8";
+  if (side === 'top')    pts = inward ? "2,2 5,6 8,2" : "2,6 5,2 8,6";
+  if (side === 'bottom') pts = inward ? "2,6 5,2 8,6" : "2,2 5,6 8,2";
   return (
-    <span className={"tri-handle side-" + side + (active ? ' active' : '')} style={style}>
-      <svg width="13" height="13" viewBox="0 0 13 13"><polygon className="tri" points={points}/></svg>
+    <span className={"port-pill side-" + side + " kind-" + kind + (active ? ' active' : '')} style={style}>
+      <span className="pp-chev">
+        <svg width="8" height="8" viewBox="0 0 8 10"><polyline points={pts}
+          stroke="currentColor" strokeWidth="1.4" fill="none"
+          strokeLinecap="round" strokeLinejoin="round"/></svg>
+      </span>
+      <span className="pp-label">{label}</span>
     </span>
   );
 }
+// keep TriHandle as alias so any external use still works
+const TriHandle = PortPill;
 
 function Node({ node, selected, onSelect }) {
   const { id, nid, name, type, status, x, y, iter, ports = {} } = node;
@@ -95,7 +102,7 @@ function Node({ node, selected, onSelect }) {
         </span>
       </div>
       {handles.map((h, i) => (
-        <TriHandle key={h.kind + '-' + h.port} side={h.side} kind={h.kind} active={h.active} style={h.style}/>
+        <PortPill key={h.kind + '-' + h.port} side={h.side} kind={h.kind} label={h.port} active={h.active} style={h.style}/>
       ))}
     </div>
   );

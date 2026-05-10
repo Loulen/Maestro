@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="stylesheet" href="styles.css"/>
 <link rel="stylesheet" href="styles-v2.css"/>
+<link rel="stylesheet" href="winners.css"/>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -38,6 +39,7 @@
 <script type="text/babel" src="loop-node.jsx"></script>
 <script type="text/babel" src="screens.jsx"></script>
 <script type="text/babel" src="screens-v2.jsx"></script>
+<script type="text/babel" src="spotlights.jsx"></script>
 
 <script type="text/babel" data-presets="env,react">
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
@@ -54,7 +56,7 @@ function MaestroApp() {
     const r = document.documentElement;
     r.style.setProperty('--acc', t.accent);
     r.style.setProperty('--acc-dim', t.accent);
-    r.style.setProperty('--st-running', t.accent === '#10b981' ? '#3b82f6' : t.accent);
+    r.style.setProperty('--st-running', '#3b82f6');
     if (t.background === '#000000') {
       r.style.setProperty('--bg-1', '#000000'); r.style.setProperty('--bg-0', '#000000');
       r.style.setProperty('--bg-2', '#0a0a0c'); r.style.setProperty('--bg-3', '#141418');
@@ -112,6 +114,17 @@ function MaestroApp() {
           </DCArtboard>
           <DCArtboard id="s12-schema-enum" label="12 · Spotlight · output schema · enum row" width={ART_W} height={ART_H}>
             <ScreenS12/>
+          </DCArtboard>
+        </DCSection>
+        <DCSection id="winners" title="Component spotlights — picked winners" subtitle="H1 node cadre · P2 port pill · O3 output card · F1 field row · S1 AND-rail branches · I1 hairline inspector port row · amber inspector accent">
+          <DCArtboard id="w1-nodes" label="W1 · Node card · H1 status × type matrix" width={ART_W} height={ART_H}>
+            <SpotNodes/>
+          </DCArtboard>
+          <DCArtboard id="w2-ports" label="W2 · Port row · P2 capsule pill" width={ART_W} height={ART_H}>
+            <SpotPorts/>
+          </DCArtboard>
+          <DCArtboard id="w3-inspector" label="W3 · Inspector · O3 output + F1 field + S1 branches" width={ART_W} height={ART_H}>
+            <SpotInspector/>
           </DCArtboard>
         </DCSection>
         <DCSection id="carryover" title="Carry-overs" subtitle="Out-of-scope screens kept as-is from the previous iteration">
