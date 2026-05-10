@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { X } from "lucide-react";
 import type { FrontmatterFieldDecl } from "../types";
 
@@ -151,7 +151,6 @@ function AllowedChipList({
   onChange: (values: string[]) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
 
   function addValue() {
     const trimmed = draft.trim();
@@ -187,7 +186,6 @@ function AllowedChipList({
       )}
       <div className="fld-add-row">
         <input
-          ref={inputRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
