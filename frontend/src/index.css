@@ -234,7 +234,7 @@ body {
   border-color: var(--color-st-await);
   box-shadow: 0 0 0 1px var(--color-st-await);
 }
-.sb-card .sb-del {
+.sb-card .sb-icon-btn {
   width: 22px;
   height: 22px;
   display: grid;
@@ -245,7 +245,7 @@ body {
   color: var(--color-fg-4);
   cursor: pointer;
 }
-.sb-card .sb-del:hover {
+.sb-card .sb-icon-btn:hover {
   color: var(--color-st-failed);
   background: rgba(239, 68, 68, 0.10);
   border-color: rgba(239, 68, 68, 0.30);

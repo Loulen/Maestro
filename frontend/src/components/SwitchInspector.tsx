@@ -277,7 +277,9 @@ function BranchCard({
     );
   }
 
-  const condsClass = rows.length === 0 ? null : rows.length === 1 ? "single" : "multi";
+  let condsClass: string | null = null;
+  if (rows.length === 1) condsClass = "single";
+  else if (rows.length > 1) condsClass = "multi";
 
   return (
     <div
@@ -287,12 +289,12 @@ function BranchCard({
       <div className="sb-head">
         <span className="sb-grip"><GripVertical size={14} /></span>
         {onMoveUp && (
-          <button onClick={onMoveUp} className="sb-del" title="Move up">
+          <button onClick={onMoveUp} className="sb-icon-btn" title="Move up">
             <ChevronUp size={14} />
           </button>
         )}
         {onMoveDown && (
-          <button onClick={onMoveDown} className="sb-del" title="Move down">
+          <button onClick={onMoveDown} className="sb-icon-btn" title="Move down">
             <ChevronDown size={14} />
           </button>
         )}
@@ -304,7 +306,7 @@ function BranchCard({
           spellCheck={false}
         />
         <SidePicker value={branch.side ?? "right"} onChange={onUpdateSide} />
-        <button onClick={onDelete} className="sb-del" title="Delete branch">
+        <button onClick={onDelete} className="sb-icon-btn" title="Delete branch">
           <Trash2 size={14} />
         </button>
       </div>
