@@ -3,10 +3,19 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Layer 3b — xterm.js wheel-scroll (refs #73, ADR 0005).
-// Verifies:
-// 1. Wheel-up on the inline terminal scrolls the xterm buffer (history visible).
-// 2. Wheel events do NOT produce arrow-key sequences in the TTY.
+// Layer 3b — xterm.js wheel-scroll regression (refs #73, ADR 0005).
+//
+// The bug being guarded against: in alt-screen + Application Cursor Mode
+// (DECCKM) — the standard mode for any TUI we host (Claude Code, vim, less) —
+// xterm.js's own viewport wheel handler translates mouse-wheel events into
+// arrow-key escape sequences (`ESC O A` / `ESC O B`) and pushes them straight
+// to the PTY via `term.onData`. From the user's POV the terminal scrolls the
+// wrong thing (cursor inside the underlying app) and there is no way to read
+// scrollback. The fix registers our own wheel listener in **capture** phase
+// on the container so it preempts xterm's viewport handler, calls
+// `stopImmediatePropagation`, and either scrolls the xterm normal-screen
+// buffer or — in alt-screen mode where there is no scrollback — does nothing
+// (silent suppression).
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = path.resolve(__dirname, "..", "..");
@@ -27,17 +36,20 @@ nodes:
 edges: []
 `;
 
-// Shell script that emits numbered marker lines then waits for input,
-// logging any received keystrokes so we can assert no arrow-key escapes arrived.
-const MARKER_SCRIPT = `exec sh -c '
-  i=1; while [ $i -le 80 ]; do echo "MARKER_LINE_$i"; i=$((i+1)); done
-  echo "OUTPUT_DONE"
-  # Read stdin and log any bytes received (arrow keys show as escape sequences)
-  while IFS= read -r line; do echo "KEYSTROKE:$line"; done
+// Shell script that switches the PTY into alt-screen (`ESC[?1049h`) and
+// Application Cursor Mode (`ESC[?1h`), then idles. This is the exact mode
+// configuration where the xterm.js wheel→arrow-key path activates; without
+// these escapes (the previous fixture used a plain `sh` loop) xterm.js just
+// scrolls its own normal-screen scrollback and the regression hides.
+const ALT_SCREEN_SCRIPT = `exec sh -c '
+  printf "\\033[?1049h\\033[?1h"
+  i=1; while [ $i -le 80 ]; do printf "MARKER_LINE_%d\\r\\n" "$i"; i=$((i+1)); done
+  printf "OUTPUT_DONE\\r\\n"
+  sleep 30
 '`;
 
 test.beforeAll(async () => {
-  process.env.MAESTRO_TMUX_CMD_OVERRIDE = MARKER_SCRIPT;
+  process.env.MAESTRO_TMUX_CMD_OVERRIDE = ALT_SCREEN_SCRIPT;
   await fs.mkdir(PIPELINE_DIR, { recursive: true });
   await fs.writeFile(PIPELINE_PATH, SEED_YAML);
 });
@@ -47,10 +59,32 @@ test.afterAll(async () => {
   delete process.env.MAESTRO_TMUX_CMD_OVERRIDE;
 });
 
-test("wheel-up scrolls xterm buffer to show earlier output", async ({
+test("wheel inside alt-screen xterm does not leak arrow-key bytes to the PTY", async ({
   page,
   baseURL,
 }) => {
+  // Capture every byte the page writes to any WebSocket. Installed via
+  // addInitScript so the patch runs before the xterm WebSocket is created.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __wsBytes: number[] };
+    w.__wsBytes = [];
+    const origSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (
+      data: string | ArrayBufferLike | Blob | ArrayBufferView,
+    ) {
+      let bytes: number[] | null = null;
+      if (data instanceof ArrayBuffer) {
+        bytes = Array.from(new Uint8Array(data));
+      } else if (ArrayBuffer.isView(data)) {
+        bytes = Array.from(
+          new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+        );
+      }
+      if (bytes) w.__wsBytes.push(...bytes);
+      return origSend.call(this, data);
+    };
+  });
+
   await page.goto("/");
   await expect(page.getByText("Daemon: connected")).toBeVisible({
     timeout: 10_000,
@@ -79,7 +113,8 @@ test("wheel-up scrolls xterm buffer to show earlier output", async ({
     timeout: 5_000,
   });
 
-  // Wait for output to finish rendering
+  // Wait for the script's marker output to render — this also confirms the
+  // PTY successfully entered alt-screen.
   await expect(async () => {
     const text = await page.evaluate(() => {
       const rows = document.querySelector(
@@ -90,41 +125,64 @@ test("wheel-up scrolls xterm buffer to show earlier output", async ({
     expect(text).toContain("OUTPUT_DONE");
   }).toPass({ timeout: 8_000 });
 
-  // Capture text visible before scrolling (should be near the end)
-  const textBefore = await page.evaluate(() => {
-    const rows = document.querySelector(
-      '[data-testid="xterm-container"] .xterm-rows',
-    );
-    return rows?.textContent ?? "";
+  // Drop everything sent before the wheel so we only assert on wheel-induced
+  // traffic (the resize handshake and any keystrokes during navigation are
+  // irrelevant to this test).
+  await page.evaluate(() => {
+    (window as unknown as { __wsBytes: number[] }).__wsBytes.length = 0;
   });
-  expect(textBefore).toContain("MARKER_LINE_80");
 
-  // Scroll up via wheel event on the xterm container
-  await xtermContainer.dispatchEvent("wheel", {
-    deltaY: -500,
+  // Real user wheels land on the deepest xterm element, not on the outer
+  // container. Dispatching here is what exercises xterm.js's viewport handler
+  // (the one that used to emit the arrow-key escapes). The previous test
+  // dispatched on the outer container, which bypassed xterm's handler entirely
+  // and so silently passed even when the regression was live.
+  const wheelTarget = page.locator(
+    '[data-testid="xterm-container"] .xterm-screen, [data-testid="xterm-container"] .xterm-viewport',
+  ).first();
+  await expect(wheelTarget).toBeVisible({ timeout: 3_000 });
+
+  for (let i = 0; i < 5; i++) {
+    await wheelTarget.dispatchEvent("wheel", {
+      deltaY: -100,
+      bubbles: true,
+      cancelable: true,
+    });
+  }
+  await wheelTarget.dispatchEvent("wheel", {
+    deltaY: 500,
+    bubbles: true,
+    cancelable: true,
   });
   await page.waitForTimeout(300);
 
-  // After scrolling up, earlier marker lines should be visible
-  const textAfter = await page.evaluate(() => {
-    const rows = document.querySelector(
-      '[data-testid="xterm-container"] .xterm-rows',
-    );
-    return rows?.textContent ?? "";
-  });
-  expect(textAfter).toContain("MARKER_LINE_1");
+  // ESC O A = [27, 79, 65] = up arrow under DECCKM
+  // ESC O B = [27, 79, 66] = down arrow under DECCKM
+  // Either appearing in the WS stream means xterm.js's wheel→arrow-key
+  // translation reached the PTY — i.e. the regression is back.
+  const bytes = (await page.evaluate(
+    () => (window as unknown as { __wsBytes: number[] }).__wsBytes,
+  )) as number[];
 
-  // Verify no arrow-key keystrokes were sent to the TTY
-  await page.waitForTimeout(500);
-  const finalText = await page.evaluate(() => {
-    const rows = document.querySelector(
-      '[data-testid="xterm-container"] .xterm-rows',
-    );
-    return rows?.textContent ?? "";
-  });
-  expect(finalText).not.toContain("KEYSTROKE:");
+  const containsSequence = (haystack: number[], needle: number[]): boolean => {
+    outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) {
+        if (haystack[i + j] !== needle[j]) continue outer;
+      }
+      return true;
+    }
+    return false;
+  };
 
-  // Cleanup tmux session
+  expect(
+    containsSequence(bytes, [27, 79, 65]),
+    "wheel-up emitted ESC O A (up arrow) to the PTY — xterm.js wheel handler ran",
+  ).toBe(false);
+  expect(
+    containsSequence(bytes, [27, 79, 66]),
+    "wheel-down emitted ESC O B (down arrow) to the PTY — xterm.js wheel handler ran",
+  ).toBe(false);
+
   const sessionName = `maestro-${run_id}-scroller-iter-1`;
   const { execSync } = await import("node:child_process");
   try {
