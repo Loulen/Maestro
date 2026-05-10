@@ -26,7 +26,7 @@ import { MergeEditNode } from "./MergeNode";
 import EditToolbar from "./EditToolbar";
 import LintBanner from "./LintBanner";
 import DragConnectionLine from "./DragConnectionLine";
-import { DragHighlightProvider, useDragHighlightNode } from "./DragHighlightContext";
+import { DragHighlightProvider, useIsDropTarget } from "./DragHighlightContext";
 
 interface EditNodeData {
   label: string;
@@ -41,8 +41,7 @@ interface EditNodeData {
 function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
   const selection = useEditStore((s) => s.selection);
   const isSelected = selection.kind === "node" && selection.id === id;
-  const dragHighlightNodeId = useDragHighlightNode();
-  const isDropTarget = dragHighlightNodeId === id;
+  const isDropTarget = useIsDropTarget(id);
   const iconColor =
     data.nodeType === "start" ? "text-acc"
     : data.nodeType === "end" ? "text-st-blocked"

@@ -4,6 +4,6 @@ const DragHighlightCtx = createContext<string | null>(null);
 
 export const DragHighlightProvider = DragHighlightCtx.Provider;
 
-export function useDragHighlightNode(): string | null {
-  return useContext(DragHighlightCtx);
+export function useIsDropTarget(nodeId: string): boolean {
+  return useContext(DragHighlightCtx) === nodeId;
 }

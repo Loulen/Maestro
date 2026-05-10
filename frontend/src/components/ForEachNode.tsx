@@ -5,7 +5,7 @@ import { STATUS_DOT } from "../nodeStyles";
 import { NodeCard } from "./NodeCard";
 import PortRow from "./PortRow";
 import { NodeTypeIcon } from "./NodeTypeIcon";
-import { useDragHighlightNode } from "./DragHighlightContext";
+import { useIsDropTarget } from "./DragHighlightContext";
 
 interface ForEachPort {
   name: string;
@@ -35,8 +35,7 @@ export const ForEachIcon = () => (
 export function ForEachEditNode({ data, id }: NodeProps<Node<ForEachEditData>>) {
   const selection = useEditStore((s) => s.selection);
   const isSelected = selection.kind === "node" && selection.id === id;
-  const dragHighlightNodeId = useDragHighlightNode();
-  const isDropTarget = dragHighlightNodeId === id;
+  const isDropTarget = useIsDropTarget(id);
 
   const inputs = data.ports.filter((p) => p.kind === "input");
   const outputs = data.ports.filter((p) => p.kind === "output");
