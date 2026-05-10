@@ -115,6 +115,68 @@ pub fn manager_session_name(run_id: &str) -> String {
     format!("maestro-mgr-{run_id}")
 }
 
+/// Run `tmux <args>` with a fresh pty as the client's stdio.
+///
+/// Why: when the daemon calls `Command::new("tmux").output()`, tmux client
+/// inherits piped FDs (no tty). It still creates the session, but the child
+/// pane process inherits a degraded terminal environment that causes
+/// `claude` to detect `/dev/tty` as ENXIO mid-run and self-SIGKILL after
+/// 10–50 s. Wrapping the client invocation in a pty makes its stdio look
+/// like an interactive shell's, which fixes the symptom even though the
+/// exact mechanism inside claude is unidentified.
+fn run_tmux_via_pty(args: &[&std::ffi::OsStr]) -> Result<()> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .context("openpty failed")?;
+
+    let mut cmd = CommandBuilder::new("tmux");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    for (k, v) in std::env::vars_os() {
+        cmd.env(k, v);
+    }
+
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .context("spawn tmux via pty failed")?;
+
+    drop(pair.slave);
+
+    // Drain the pty's combined stdout/stderr in the background so the
+    // child can't block on a full output buffer. We only need this for
+    // diagnostics on failure.
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .context("clone pty reader failed")?;
+    let read_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
+    let exit = child.wait().context("tmux client wait failed")?;
+    drop(pair.master);
+    let output = read_handle.join().unwrap_or_default();
+
+    if !exit.success() {
+        let s = String::from_utf8_lossy(&output);
+        anyhow::bail!("tmux exited with {:?}: {}", exit, s.trim());
+    }
+    Ok(())
+}
+
 /// Spawn a detached tmux session for a NodeRun.
 pub fn spawn(
     session_name: &str,
@@ -132,17 +194,17 @@ pub fn spawn(
 
     let script = build_tmux_script(run_id, node_id, iter, daemon_port, &prompt_path);
 
-    let output = std::process::Command::new("tmux")
-        .args(["new-session", "-d", "-s", session_name, "-c"])
-        .arg(working_dir)
-        .arg(&script)
-        .output()
-        .context("failed to run tmux new-session")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("tmux new-session failed: {stderr}");
-    }
+    use std::ffi::OsStr;
+    run_tmux_via_pty(&[
+        OsStr::new("new-session"),
+        OsStr::new("-d"),
+        OsStr::new("-s"),
+        OsStr::new(session_name),
+        OsStr::new("-c"),
+        working_dir.as_os_str(),
+        OsStr::new(&script),
+    ])
+    .context("failed to run tmux new-session")?;
 
     info!("Spawned tmux session: {session_name}");
     Ok(())
@@ -159,17 +221,17 @@ pub fn resume(
 ) -> Result<()> {
     let script = build_resume_script(run_id, node_id, iter, daemon_port);
 
-    let output = std::process::Command::new("tmux")
-        .args(["new-session", "-d", "-s", session_name, "-c"])
-        .arg(working_dir)
-        .arg(&script)
-        .output()
-        .context("failed to run tmux new-session (resume)")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("tmux new-session (resume) failed: {stderr}");
-    }
+    use std::ffi::OsStr;
+    run_tmux_via_pty(&[
+        OsStr::new("new-session"),
+        OsStr::new("-d"),
+        OsStr::new("-s"),
+        OsStr::new(session_name),
+        OsStr::new("-c"),
+        working_dir.as_os_str(),
+        OsStr::new(&script),
+    ])
+    .context("failed to run tmux new-session (resume)")?;
 
     info!("Resumed tmux session: {session_name}");
     Ok(())
