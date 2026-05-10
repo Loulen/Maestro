@@ -1,1 +1,0 @@
-implémenteur simple, fais ce qu'on te dit sans trop réfléchir

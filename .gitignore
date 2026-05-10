@@ -27,6 +27,11 @@ Cargo.lock.*
 # Maestro per-run worktrees, sub-worktrees, prompts snapshots, artefacts
 .maestro/runs/
 
+# Maestro pipeline definitions and library are per-user state — pipelines
+# get edited live from the UI, library is per-user. Don't share via git.
+.maestro/pipelines/
+.maestro/library/
+
 # Playwright artefacts
 frontend/test-results/
 frontend/playwright-report/
