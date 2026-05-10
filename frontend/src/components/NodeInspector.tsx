@@ -3,7 +3,7 @@ import { Star } from "lucide-react";
 import { useEditStore } from "../stores/editStore";
 import type { NodeDef, NodeType, PortDef, PortSide } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
-import SidePicker from "./SidePicker";
+import InspectorPortRow from "./InspectorPortRow";
 import OutputSchemaEditor from "./OutputSchemaEditor";
 import { Tooltip } from "./ui/tooltip";
 import type { LibraryEntry } from "../api";
@@ -176,32 +176,38 @@ export default function NodeInspector({
 
         {/* Inputs */}
         <SectionHead title="Inputs" count={node.inputs.length} onAdd={() => handleAddPort("inputs")} />
-        {node.inputs.map((port, i) => (
-          <PortRow
-            key={i}
-            port={port}
-            highlighted={highlightedPort === port.name}
-            onUpdate={(updates) => handleUpdatePort("inputs", i, updates)}
-            onRemove={() => handleRemovePort("inputs", i)}
-          />
-        ))}
+        <div className="flex flex-col">
+          {node.inputs.map((port, i) => (
+            <InspectorPortRow
+              key={i}
+              port={port}
+              highlighted={highlightedPort === port.name}
+              isLast={i === node.inputs.length - 1}
+              onUpdate={(updates) => handleUpdatePort("inputs", i, updates)}
+              onRemove={() => handleRemovePort("inputs", i)}
+            />
+          ))}
+        </div>
 
         {/* Outputs */}
         <SectionHead title="Outputs" count={node.outputs.length} onAdd={() => handleAddPort("outputs")} />
-        {node.outputs.map((port, i) => (
-          <div key={i} className="flex flex-col gap-1">
-            <PortRow
-              port={port}
-              highlighted={highlightedPort === port.name}
-              onUpdate={(updates) => handleUpdatePort("outputs", i, updates)}
-              onRemove={() => handleRemovePort("outputs", i)}
-            />
-            <OutputSchemaEditor
-              schema={port.frontmatter}
-              onChange={(fm) => handleUpdatePort("outputs", i, { frontmatter: fm ?? null })}
-            />
-          </div>
-        ))}
+        <div className="flex flex-col">
+          {node.outputs.map((port, i) => (
+            <div key={i}>
+              <InspectorPortRow
+                port={port}
+                highlighted={highlightedPort === port.name}
+                isLast={i === node.outputs.length - 1}
+                onUpdate={(updates) => handleUpdatePort("outputs", i, updates)}
+                onRemove={() => handleRemovePort("outputs", i)}
+              />
+              <OutputSchemaEditor
+                schema={port.frontmatter}
+                onChange={(fm) => handleUpdatePort("outputs", i, { frontmatter: fm ?? null })}
+              />
+            </div>
+          ))}
+        </div>
       </div>
     </aside>
   );
@@ -245,59 +251,6 @@ function NameInput({
       className="w-full rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg outline-none focus:border-acc"
       placeholder={placeholder}
     />
-  );
-}
-
-function PortRow({
-  port,
-  highlighted,
-  onUpdate,
-  onRemove,
-}: {
-  port: PortDef;
-  highlighted?: boolean;
-  onUpdate: (updates: Partial<PortDef>) => void;
-  onRemove: () => void;
-}) {
-  return (
-    <div
-      data-port={port.name}
-      className={`flex items-center gap-1.5 rounded border px-2 py-1 transition-colors ${
-        highlighted ? "border-acc bg-acc-bg" : "border-line-soft bg-bg-3"
-      }`}
-    >
-      <span className="h-2 w-2 shrink-0 rounded-full bg-fg-4" />
-      <input
-        value={port.name}
-        onChange={(e) => onUpdate({ name: e.target.value })}
-        className="min-w-0 flex-1 bg-transparent text-fg outline-none"
-        style={{ fontSize: "11px" }}
-      />
-      <SidePicker
-        value={port.side ?? "left"}
-        onChange={(s) => onUpdate({ side: s })}
-      />
-      <Tooltip content="When checked, this port reads all iter-N/<port>.md files (glob), used for accumulating histories across loop iterations.">
-        <button
-          onClick={() => onUpdate({ repeated: !port.repeated })}
-          className={`cursor-pointer rounded px-1 py-px transition-colors ${
-            port.repeated
-              ? "bg-st-await-bg text-st-await"
-              : "text-fg-4 hover:text-fg-3"
-          }`}
-          style={{ fontSize: "9px" }}
-        >
-          repeated
-        </button>
-      </Tooltip>
-      <button
-        onClick={onRemove}
-        className="cursor-pointer text-fg-4 hover:text-st-failed"
-        style={{ fontSize: "10px" }}
-      >
-        ×
-      </button>
-    </div>
   );
 }
 
