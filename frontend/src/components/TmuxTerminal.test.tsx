@@ -73,7 +73,10 @@ interface MockTerminal {
   onBinary: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
   scrollLines: ReturnType<typeof vi.fn>;
-  buffer: { active: { baseY: number; viewportY: number }; normal: { baseY: number } };
+  buffer: {
+    active: { baseY: number; viewportY: number; type: "normal" | "alternate" };
+    normal: { baseY: number };
+  };
   rows: number;
 }
 
@@ -89,7 +92,7 @@ vi.mock("@xterm/xterm", () => ({
       dispose: vi.fn(),
       scrollLines: vi.fn(),
       buffer: {
-        active: { baseY: 50, viewportY: 25 },
+        active: { baseY: 50, viewportY: 25, type: "normal" },
         normal: { baseY: 50 },
       },
       rows: 24,
@@ -281,6 +284,50 @@ describe("TmuxTerminal", () => {
       }),
     );
 
+    expect(term.scrollLines).not.toHaveBeenCalled();
+  });
+
+  it("preempts inner xterm wheel handler via capture-phase listener", () => {
+    // Real wheel events fire on xterm's inner .xterm-screen / .xterm-viewport
+    // child, not on the outer container. xterm.js registers a wheel handler on
+    // its viewport that — in alt-screen + DECCKM — translates wheel into
+    // arrow-key escape bytes pushed straight to the PTY. Our handler must run
+    // *before* xterm's, which means capture phase on the container so that
+    // stopImmediatePropagation suppresses xterm's handler.
+    render(<TmuxTerminal session="test-session" />);
+    const container = screen.getByTestId("xterm-container");
+
+    const innerViewport = document.createElement("div");
+    container.appendChild(innerViewport);
+    const xtermInnerHandler = vi.fn();
+    innerViewport.addEventListener("wheel", xtermInnerHandler);
+
+    innerViewport.dispatchEvent(
+      new WheelEvent("wheel", {
+        deltaY: -100,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(xtermInnerHandler).not.toHaveBeenCalled();
+  });
+
+  it("suppresses wheel silently in alt-screen mode (no scrollback to scroll)", () => {
+    render(<TmuxTerminal session="test-session" />);
+    const container = screen.getByTestId("xterm-container");
+    const term = mockTerminalInstances[0];
+    term.buffer.active.type = "alternate";
+
+    const wheelEvent = new WheelEvent("wheel", {
+      deltaY: -100,
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(wheelEvent, "preventDefault");
+    container.dispatchEvent(wheelEvent);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
     expect(term.scrollLines).not.toHaveBeenCalled();
   });
 

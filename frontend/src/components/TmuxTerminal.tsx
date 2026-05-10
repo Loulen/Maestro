@@ -133,15 +133,29 @@ export default function TmuxTerminal({
       }
     });
 
-    // xterm.js in alt-screen mode forwards wheel as arrow-key escapes to the TTY.
+    // xterm.js's own viewport handler translates wheel into Application-Cursor
+    // arrow-key escapes (ESC O A / ESC O B) when the inner buffer is in
+    // alt-screen mode + DECCKM — which is the normal case for any TUI we host
+    // (Claude Code, vim, less, etc.). Real wheel events fire on .xterm-screen
+    // deep inside the container, so a bubble-phase listener here would arrive
+    // *after* xterm's handler has already pushed those bytes to the WS. We
+    // register in capture phase so we run first and can stopImmediatePropagation
+    // before xterm's handler sees the event.
     const handleWheel = (e: WheelEvent) => {
       if (e.ctrlKey || e.shiftKey || e.metaKey) return;
       e.preventDefault();
-      e.stopPropagation();
+      e.stopImmediatePropagation();
+      // Alt-screen has no scrollback for us to scroll into — xterm.js only
+      // accumulates scrollback from the normal buffer. Suppress silently in
+      // alt-screen mode (matches Ghostty / iTerm default).
+      if (term.buffer.active.type === "alternate") return;
       const lines = Math.round(e.deltaY / 25) || (e.deltaY > 0 ? 1 : -1);
       term.scrollLines(lines);
     };
-    container.addEventListener("wheel", handleWheel, { passive: false });
+    container.addEventListener("wheel", handleWheel, {
+      passive: false,
+      capture: true,
+    });
 
     // Resize observer
     const resizeObserver = new ResizeObserver(() => {
@@ -162,7 +176,7 @@ export default function TmuxTerminal({
     resizeObserver.observe(container);
 
     return () => {
-      container.removeEventListener("wheel", handleWheel);
+      container.removeEventListener("wheel", handleWheel, { capture: true });
       resizeObserver.disconnect();
       inputDisposable.dispose();
       binaryDisposable.dispose();
