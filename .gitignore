@@ -41,6 +41,7 @@ frontend/playwright/.cache/
 CLAUDE.md
 CLAUDE.local.md
 docs/agents/
+.claude/
 
 # Env files at any path
 .env
