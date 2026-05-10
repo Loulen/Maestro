@@ -12,6 +12,7 @@ interface PortRowProps {
   total: number;
   nodeType?: NodeType;
   description?: string | null;
+  isDrop?: boolean;
   children?: ReactNode;
 }
 
@@ -23,6 +24,7 @@ export default function PortRow({
   total,
   nodeType,
   description,
+  isDrop,
   children,
 }: PortRowProps) {
   const tooltipContent = nodeType
@@ -43,6 +45,7 @@ export default function PortRow({
           label={portName}
           index={index}
           total={total}
+          isDrop={isDrop}
         />
       </div>
     </Tooltip>

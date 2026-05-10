@@ -16,6 +16,7 @@ interface PortPillProps {
   label: string;
   index: number;
   total: number;
+  isDrop?: boolean;
 }
 
 export default function PortPill({
@@ -25,6 +26,7 @@ export default function PortPill({
   label,
   index,
   total,
+  isDrop,
 }: PortPillProps) {
   const type = kind === "input" ? "target" : "source";
   const position = SIDE_TO_POSITION[side];
@@ -41,7 +43,7 @@ export default function PortPill({
       id={id}
       type={type}
       position={position}
-      className={`port-pill side-${side} kind-${kind}`}
+      className={`port-pill side-${side} kind-${kind}${isDrop ? " is-drop" : ""}`}
       style={offsetStyle}
     >
       <span className="pp-chev">

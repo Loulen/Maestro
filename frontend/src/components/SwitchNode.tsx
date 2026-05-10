@@ -6,6 +6,7 @@ import { NodeCard } from "./NodeCard";
 import PortPill from "./PortPill";
 import PortRow from "./PortRow";
 import { NodeTypeIcon } from "./NodeTypeIcon";
+import { useDragHighlightNode } from "./DragHighlightContext";
 
 interface SwitchBranch {
   name: string;
@@ -24,6 +25,8 @@ interface SwitchEditData {
 export function SwitchEditNode({ data, id }: NodeProps<Node<SwitchEditData>>) {
   const selection = useEditStore((s) => s.selection);
   const isSelected = selection.kind === "node" && selection.id === id;
+  const dragHighlightNodeId = useDragHighlightNode();
+  const isDropTarget = dragHighlightNodeId === id;
 
   return (
     <NodeCard status="pending" selected={isSelected} style={{ minWidth: 140, fontSize: "12px" }}>
@@ -35,6 +38,7 @@ export function SwitchEditNode({ data, id }: NodeProps<Node<SwitchEditData>>) {
           index={0}
           total={1}
           nodeType="switch"
+          isDrop={isDropTarget}
         />
       </div>
       <div className="flex items-center gap-2">

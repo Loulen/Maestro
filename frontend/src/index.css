@@ -188,6 +188,17 @@ body {
   transform: translate(-50%, -50%);
 }
 
+/* Drop-target highlight — amber, only on input pills of hovered node
+   (refs docs/design/project/winners.css §2, .port-pill.is-drop) */
+.port-pill.is-drop {
+  background: var(--color-st-await-bg);
+  border-color: rgba(245, 158, 11, 0.34);
+  color: var(--color-st-await);
+}
+.port-pill.is-drop .pp-chev {
+  color: var(--color-st-await);
+}
+
 /* Inspector scope — amber accent (refs docs/design/project/winners.css §3) */
 .panel-r {
   --color-acc: var(--color-st-await);

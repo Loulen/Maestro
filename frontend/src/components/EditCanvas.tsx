@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   ReactFlow,
   Background,
@@ -26,6 +26,7 @@ import { MergeEditNode } from "./MergeNode";
 import EditToolbar from "./EditToolbar";
 import LintBanner from "./LintBanner";
 import DragConnectionLine from "./DragConnectionLine";
+import { DragHighlightProvider, useDragHighlightNode } from "./DragHighlightContext";
 
 interface EditNodeData {
   label: string;
@@ -40,6 +41,8 @@ interface EditNodeData {
 function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
   const selection = useEditStore((s) => s.selection);
   const isSelected = selection.kind === "node" && selection.id === id;
+  const dragHighlightNodeId = useDragHighlightNode();
+  const isDropTarget = dragHighlightNodeId === id;
   const iconColor =
     data.nodeType === "start" ? "text-acc"
     : data.nodeType === "end" ? "text-st-blocked"
@@ -57,6 +60,7 @@ function EditNode({ data, id }: NodeProps<Node<EditNodeData>>) {
             index={i}
             total={data.inputs.length}
             description={port.description}
+            isDrop={isDropTarget}
           />
         ))}
       </div>
@@ -260,6 +264,9 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
     edgeIndex?: number;
   } | null>(null);
   const reactFlowRef = useRef<HTMLDivElement>(null);
+  const [isDraggingEdge, setIsDraggingEdge] = useState(false);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const dragHighlightNodeId = isDraggingEdge ? hoveredNodeId : null;
 
   const tab = openTabs.find((t) => t.id === activeTabId);
   const pipeline = tab?.pipeline;
@@ -339,6 +346,14 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
     },
     [],
   );
+
+  const onConnectStart = useCallback(() => setIsDraggingEdge(true), []);
+  const onConnectEnd = useCallback(() => {
+    setIsDraggingEdge(false);
+    setHoveredNodeId(null);
+  }, []);
+  const onNodeMouseEnter = useCallback((_: ReactMouseEvent, node: Node) => setHoveredNodeId(node.id), []);
+  const onNodeMouseLeave = useCallback(() => setHoveredNodeId(null), []);
 
   const diagnostics = useMemo(() => {
     if (!tab) return [];
@@ -438,34 +453,40 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
         </div>
       )}
 
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        nodeTypes={nodeTypes}
-        onNodeClick={(_event, node) => {
-          setSelection({ kind: "node", id: node.id });
-          onCloseInfo?.();
-        }}
-        onEdgeClick={(_event, edge) => {
-          setSelection({ kind: "node", id: edge.source });
-          setScrollToPort(edge.sourceHandle ?? null);
-        }}
-        onPaneClick={() => setSelection({ kind: "none", id: null })}
-        onConnect={onConnect}
-        onNodeDragStop={onNodeDragStop}
-        onNodeContextMenu={handleNodeContextMenu}
-        onEdgeContextMenu={handleEdgeContextMenu}
-        connectionLineComponent={DragConnectionLine}
-        fitView
-        proOptions={{ hideAttribution: true }}
-        className="bg-bg-1"
-        nodesDraggable
-        nodesConnectable
-      >
-        <Background color="var(--color-line-soft)" gap={20} size={1} />
-      </ReactFlow>
+      <DragHighlightProvider value={dragHighlightNodeId}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          nodeTypes={nodeTypes}
+          onNodeClick={(_event, node) => {
+            setSelection({ kind: "node", id: node.id });
+            onCloseInfo?.();
+          }}
+          onEdgeClick={(_event, edge) => {
+            setSelection({ kind: "node", id: edge.source });
+            setScrollToPort(edge.sourceHandle ?? null);
+          }}
+          onPaneClick={() => setSelection({ kind: "none", id: null })}
+          onConnect={onConnect}
+          onConnectStart={onConnectStart}
+          onConnectEnd={onConnectEnd}
+          onNodeMouseEnter={onNodeMouseEnter}
+          onNodeMouseLeave={onNodeMouseLeave}
+          onNodeDragStop={onNodeDragStop}
+          onNodeContextMenu={handleNodeContextMenu}
+          onEdgeContextMenu={handleEdgeContextMenu}
+          connectionLineComponent={DragConnectionLine}
+          fitView
+          proOptions={{ hideAttribution: true }}
+          className="bg-bg-1"
+          nodesDraggable
+          nodesConnectable
+        >
+          <Background color="var(--color-line-soft)" gap={20} size={1} />
+        </ReactFlow>
+      </DragHighlightProvider>
 
       {contextMenu && (
         <ContextMenu

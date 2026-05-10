@@ -5,6 +5,7 @@ import { STATUS_DOT } from "../nodeStyles";
 import { NodeCard } from "./NodeCard";
 import PortRow from "./PortRow";
 import { NodeTypeIcon } from "./NodeTypeIcon";
+import { useDragHighlightNode } from "./DragHighlightContext";
 
 interface MergeEditData {
   label: string;
@@ -17,6 +18,8 @@ interface MergeEditData {
 export function MergeEditNode({ data, id }: NodeProps<Node<MergeEditData>>) {
   const selection = useEditStore((s) => s.selection);
   const isSelected = selection.kind === "node" && selection.id === id;
+  const dragHighlightNodeId = useDragHighlightNode();
+  const isDropTarget = dragHighlightNodeId === id;
 
   return (
     <NodeCard status="pending" selected={isSelected} style={{ minWidth: 140, fontSize: "12px" }}>
@@ -28,6 +31,7 @@ export function MergeEditNode({ data, id }: NodeProps<Node<MergeEditData>>) {
           index={0}
           total={1}
           nodeType="merge"
+          isDrop={isDropTarget}
         />
       </div>
       <div className="flex items-center gap-2">

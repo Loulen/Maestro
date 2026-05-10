@@ -104,4 +104,31 @@ describe("PortPill", () => {
     const handle = container.querySelector(".port-pill.side-bottom");
     expect(handle).toBeInTheDocument();
   });
+
+  it("applies is-drop class when isDrop is true", () => {
+    const { container } = render(
+      <PortPill id="in" kind="input" side="left" label="in" index={0} total={1} isDrop />,
+      { wrapper: Wrapper },
+    );
+    const handle = container.querySelector(".port-pill");
+    expect(handle?.classList.contains("is-drop")).toBe(true);
+  });
+
+  it("does not apply is-drop class when isDrop is false", () => {
+    const { container } = render(
+      <PortPill id="in" kind="input" side="left" label="in" index={0} total={1} isDrop={false} />,
+      { wrapper: Wrapper },
+    );
+    const handle = container.querySelector(".port-pill");
+    expect(handle?.classList.contains("is-drop")).toBe(false);
+  });
+
+  it("does not apply is-drop class by default", () => {
+    const { container } = render(
+      <PortPill id="in" kind="input" side="left" label="in" index={0} total={1} />,
+      { wrapper: Wrapper },
+    );
+    const handle = container.querySelector(".port-pill");
+    expect(handle?.classList.contains("is-drop")).toBe(false);
+  });
 });

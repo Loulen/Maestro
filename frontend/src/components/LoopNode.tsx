@@ -5,6 +5,7 @@ import { STATUS_DOT } from "../nodeStyles";
 import { NodeCard } from "./NodeCard";
 import PortRow from "./PortRow";
 import { NodeTypeIcon } from "./NodeTypeIcon";
+import { useDragHighlightNode } from "./DragHighlightContext";
 
 interface LoopPort {
   name: string;
@@ -23,6 +24,8 @@ interface LoopEditData {
 export function LoopEditNode({ data, id }: NodeProps<Node<LoopEditData>>) {
   const selection = useEditStore((s) => s.selection);
   const isSelected = selection.kind === "node" && selection.id === id;
+  const dragHighlightNodeId = useDragHighlightNode();
+  const isDropTarget = dragHighlightNodeId === id;
 
   const inputs = data.ports.filter((p) => p.kind === "input");
   const outputs = data.ports.filter((p) => p.kind === "output");
@@ -39,6 +42,7 @@ export function LoopEditNode({ data, id }: NodeProps<Node<LoopEditData>>) {
             index={i}
             total={inputs.length}
             nodeType="loop"
+            isDrop={isDropTarget}
           />
         ))}
       </div>
