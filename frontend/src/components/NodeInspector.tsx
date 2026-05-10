@@ -4,7 +4,7 @@ import { useEditStore } from "../stores/editStore";
 import type { NodeDef, NodeType, PortDef, PortSide } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
 import InspectorPortRow from "./InspectorPortRow";
-import OutputSchemaEditor from "./OutputSchemaEditor";
+import OutputPortCard from "./OutputPortCard";
 import { Tooltip } from "./ui/tooltip";
 import type { LibraryEntry } from "../api";
 import { saveToLibrary, deleteFromLibrary, instantiateFromLibrary, libraryPortToPortDef } from "../api";
@@ -193,19 +193,15 @@ export default function NodeInspector({
         <SectionHead title="Outputs" count={node.outputs.length} onAdd={() => handleAddPort("outputs")} />
         <div className="flex flex-col">
           {node.outputs.map((port, i) => (
-            <div key={i}>
-              <InspectorPortRow
-                port={port}
-                highlighted={highlightedPort === port.name}
-                isLast={i === node.outputs.length - 1}
-                onUpdate={(updates) => handleUpdatePort("outputs", i, updates)}
-                onRemove={() => handleRemovePort("outputs", i)}
-              />
-              <OutputSchemaEditor
-                schema={port.frontmatter}
-                onChange={(fm) => handleUpdatePort("outputs", i, { frontmatter: fm ?? null })}
-              />
-            </div>
+            <OutputPortCard
+              key={i}
+              port={port}
+              highlighted={highlightedPort === port.name}
+              onUpdate={(updates) => handleUpdatePort("outputs", i, updates)}
+              onRemove={() => handleRemovePort("outputs", i)}
+              schema={port.frontmatter}
+              onSchemaChange={(fm) => handleUpdatePort("outputs", i, { frontmatter: fm ?? null })}
+            />
           ))}
         </div>
       </div>

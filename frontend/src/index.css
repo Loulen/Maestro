@@ -208,6 +208,62 @@ body {
   --color-primary-foreground: #1a0f00;
 }
 
+/* Inspector output card — O3 tab head (refs docs/design/project/winners.css §5) */
+.op-tab {
+  margin-bottom: 12px;
+  font-family: var(--font-sans);
+}
+.op-tab .op-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--color-bg-3);
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px 8px 0 0;
+  border-bottom: none;
+  width: 92%;
+  margin-bottom: -1px;
+  position: relative;
+  z-index: 1;
+}
+.op-tab.collapsed .op-head {
+  border-radius: 8px;
+  width: 100%;
+  border-bottom: 1px solid var(--color-line-strong);
+}
+.op-tab .op-head .port-row {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.op-tab .op-chev {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  color: var(--color-fg-3);
+  cursor: pointer;
+  transition: transform 150ms;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.op-tab.collapsed .op-chev {
+  transform: rotate(-90deg);
+}
+.op-tab .op-body {
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-line-strong);
+  border-radius: 0 8px 8px 8px;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* Switch branch card — S1 AND rail (refs docs/design/project/winners.css §7) */
 .sb-card {
   background: var(--color-bg-2);
