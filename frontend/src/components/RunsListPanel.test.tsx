@@ -6,6 +6,7 @@ import type { RunListEntry } from "../types";
 
 vi.mock("../api", () => ({
   cleanupRun: vi.fn().mockResolvedValue(undefined),
+  forgetRun: vi.fn().mockResolvedValue(undefined),
   deleteLibraryPipeline: vi.fn().mockResolvedValue(undefined),
 }));
 

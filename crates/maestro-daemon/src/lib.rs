@@ -403,7 +403,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines", post(create_pipeline))
         .route("/runs", post(create_run))
         .route("/runs", get(list_runs))
-        .route("/runs/{run_id}", get(get_run))
+        .route(
+            "/runs/{run_id}",
+            get(get_run).delete(forget_run),
+        )
         .route("/runs/{run_id}/events", get(get_run_events))
         .route("/runs/{run_id}/nodes/{node_id}/done", post(node_done))
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
@@ -4105,6 +4108,66 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
         .into_response()
 }
 
+/// DELETE /runs/{run_id} — permanently forget an archived run.
+///
+/// Removes every event log row for the run. The run will no longer appear in
+/// listings, projections, or post-mortem queries. Only allowed once the run
+/// is `Archived` (i.e. `cleanup_run` has already torn down its worktrees and
+/// branches), so we never strand on-disk state by deleting events for a live
+/// run.
+async fn forget_run(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let events = match load_events(&state.db, &run_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+        }
+    };
+
+    let run_state = match event_log::project(&events) {
+        Some(s) => s,
+        None => {
+            return (StatusCode::NOT_FOUND, "run not found").into_response();
+        }
+    };
+
+    if run_state.status != event_log::RunStatus::Archived {
+        return (
+            StatusCode::CONFLICT,
+            "run must be archived (cleanup_run) before it can be forgotten",
+        )
+            .into_response();
+    }
+
+    if let Err(e) = sqlx::query("DELETE FROM events WHERE run_id = ?")
+        .bind(&run_id)
+        .execute(&state.db)
+        .await
+    {
+        error!("failed to delete events for {run_id}: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "event log error").into_response();
+    }
+
+    info!("Run {run_id} forgotten (event log purged)");
+
+    // Notify connected websocket clients so the runs list refreshes. We piggy-back
+    // on the pipeline-broadcast channel because the event channel only carries
+    // typed `event_log::Event` records — and we just deleted every event for
+    // this run, so there's nothing meaningful to project.
+    let _ = state.pipeline_tx.send(serde_json::json!({
+        "type": "run_forgotten",
+        "run_id": run_id,
+    }));
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "forgotten" })),
+    )
+        .into_response()
+}
+
 // --- WebSocket handler with event broadcasting ---
 
 async fn ws_handler(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
@@ -5057,6 +5120,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn forget_run_purges_events_when_archived() {
+        let state = test_state().await;
+        let run_id = "forget-test-1";
+        seed_completed_run(&state, run_id).await;
+
+        // Archive first
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/commands"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind": "cleanup_run"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Now forget
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["status"], "forgotten");
+
+        // Event log is empty for this run — projection now returns None
+        let events = load_events(&state.db, run_id).await.unwrap();
+        assert!(events.is_empty(), "event log must be empty after forget");
+        assert!(event_log::project(&events).is_none());
+    }
+
+    #[tokio::test]
+    async fn forget_run_rejects_live_run() {
+        let state = test_state().await;
+        let run_id = "forget-live";
+        seed_completed_run(&state, run_id).await;
+        // No cleanup — run is still in `Completed` status, not `Archived`.
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Events are NOT touched
+        let events = load_events(&state.db, run_id).await.unwrap();
+        assert!(!events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forget_nonexistent_run_returns_404() {
+        let state = test_state().await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/runs/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

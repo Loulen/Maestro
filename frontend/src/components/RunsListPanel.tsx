@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { ChevronDown, Plus, Star, Trash2 } from "lucide-react";
 import type { RunListEntry, RunStatus } from "../types";
-import { cleanupRun, deleteLibraryPipeline } from "../api";
+import { cleanupRun, deleteLibraryPipeline, forgetRun } from "../api";
 import type { LibraryEntry, LibraryPipelineEntry } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
+import ForgetRunModal from "./ForgetRunModal";
 
 const STATUS_STYLES: Record<RunStatus, { dot: string; bg: string }> = {
   running: { dot: "bg-st-running", bg: "bg-st-running-bg" },
@@ -33,7 +34,10 @@ export default function RunsListPanel({
   libraryNodes,
   onLibraryPipelinesChanged,
 }: Props) {
-  const [confirmCleanup, setConfirmCleanup] = useState<string | null>(null);
+  const [confirmCleanup, setConfirmCleanup] = useState<
+    { runId: string; status: RunStatus } | null
+  >(null);
+  const [confirmForget, setConfirmForget] = useState<string | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(true);
 
   async function handleCleanup(runId: string) {
@@ -43,6 +47,15 @@ export default function RunsListPanel({
       // event-driven refresh will pick up state change
     }
     setConfirmCleanup(null);
+  }
+
+  async function handleForget(runId: string) {
+    try {
+      await forgetRun(runId);
+    } catch {
+      // event-driven refresh will pick up state change
+    }
+    setConfirmForget(null);
   }
 
   return (
@@ -73,9 +86,8 @@ export default function RunsListPanel({
         {runs.map((run) => {
           const isSelected = run.run_id === selectedRunId;
           const { dot } = STATUS_STYLES[run.status] ?? STATUS_STYLES.running;
-          const isTerminal = run.status === "completed"
-            || run.status === "failed"
-            || run.status === "halted";
+          const isArchived = run.status === "archived";
+          const canCleanup = !isArchived;
 
           return (
             <button
@@ -85,7 +97,7 @@ export default function RunsListPanel({
                 isSelected
                   ? "bg-bg-3 text-fg"
                   : "text-fg-2 hover:bg-bg-3/50"
-              } ${run.status === "archived" ? "opacity-60" : ""}`}
+              } ${isArchived ? "opacity-60" : ""}`}
               style={{ fontSize: "11.5px" }}
             >
               <span
@@ -102,14 +114,31 @@ export default function RunsListPanel({
                   {run.run_id.slice(0, 20)}
                 </div>
               </div>
-              {isTerminal && (
+              {canCleanup && (
                 <span
                   role="button"
-                  title="Cleanup run"
+                  title={
+                    run.status === "running" || run.status === "awaiting_user"
+                      ? "Stop and archive run"
+                      : "Cleanup run"
+                  }
                   className="hidden shrink-0 cursor-pointer rounded p-0.5 text-fg-4 transition-colors hover:bg-bg-4 hover:text-fg-2 group-hover:inline-flex"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setConfirmCleanup(run.run_id);
+                    setConfirmCleanup({ runId: run.run_id, status: run.status });
+                  }}
+                >
+                  <Trash2 size={12} />
+                </span>
+              )}
+              {isArchived && (
+                <span
+                  role="button"
+                  title="Forget this run permanently (event log + metadata)"
+                  className="hidden shrink-0 cursor-pointer rounded p-0.5 text-fg-4 transition-colors hover:bg-bg-4 hover:text-st-failed group-hover:inline-flex"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmForget(run.run_id);
                   }}
                 >
                   <Trash2 size={12} />
@@ -145,8 +174,19 @@ export default function RunsListPanel({
 
       {confirmCleanup && (
         <CleanupConfirmModal
-          onConfirm={() => handleCleanup(confirmCleanup)}
+          isLive={
+            confirmCleanup.status === "running" ||
+            confirmCleanup.status === "awaiting_user"
+          }
+          onConfirm={() => handleCleanup(confirmCleanup.runId)}
           onCancel={() => setConfirmCleanup(null)}
+        />
+      )}
+
+      {confirmForget && (
+        <ForgetRunModal
+          onConfirm={() => handleForget(confirmForget)}
+          onCancel={() => setConfirmForget(null)}
         />
       )}
     </aside>

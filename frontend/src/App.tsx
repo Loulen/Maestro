@@ -328,6 +328,16 @@ export default function App() {
                   <InspectorTabs activeTab={inspectorTab} onTabChange={setInspectorTab}>
                     {inspectorTabContent()}
                   </InspectorTabs>
+                ) : selection.kind === "node" && editNodeType === "start" && isEditingRun && selectedRun?.start_node && selection.id ? (
+                  <StartInspector
+                    startNode={selectedRun.start_node}
+                    runId={selectedRun.run_id}
+                    nodeId={selection.id}
+                  />
+                ) : selection.kind === "node" && editNodeType === "end" && isEditingRun && selectedRun?.end_node ? (
+                  <EndInspector
+                    endNode={selectedRun.end_node}
+                  />
                 ) : selection.kind === "node" ? (
                   <NodeInspector
                     libraryEntries={libraryEntries}
