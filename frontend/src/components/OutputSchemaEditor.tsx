@@ -75,7 +75,7 @@ export default function OutputSchemaEditor({ schema, onChange }: Props) {
   }
 
   return (
-    <div className="flex flex-col gap-1" data-testid="output-schema-editor">
+    <div className="flex flex-col gap-2" data-testid="output-schema-editor">
       {entries.map((entry, i) => (
         <SchemaFieldRow
           key={i}
@@ -86,8 +86,7 @@ export default function OutputSchemaEditor({ schema, onChange }: Props) {
       ))}
       <button
         onClick={addField}
-        className="mt-0.5 cursor-pointer self-start rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-4 hover:text-fg-3"
-        style={{ fontSize: "10px" }}
+        className="fld-add-field"
         data-testid="add-schema-field"
       >
         + field
@@ -106,38 +105,34 @@ function SchemaFieldRow({
   onRemove: () => void;
 }) {
   return (
-    <div className="flex flex-col gap-1 rounded border border-line-soft bg-bg-3 px-2 py-1">
-      <div className="flex items-center gap-1.5">
-        <input
-          value={entry.name}
-          onChange={(e) => onUpdate({ name: e.target.value })}
-          className="min-w-0 flex-1 bg-transparent text-fg outline-none"
-          style={{ fontSize: "11px" }}
-          placeholder="field name"
-          data-testid="schema-field-name"
-        />
-        <select
-          value={entry.type}
-          onChange={(e) => onUpdate({ type: e.target.value as FieldType })}
-          className="cursor-pointer rounded border border-line-strong bg-bg-4 px-1 py-0.5 text-fg-3"
-          style={{ fontSize: "10px" }}
-          data-testid="schema-field-type"
-        >
-          {FIELD_TYPES.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={onRemove}
-          className="cursor-pointer text-fg-4 hover:text-st-failed"
-          style={{ fontSize: "10px" }}
-          data-testid="schema-field-remove"
-        >
-          ×
-        </button>
-      </div>
+    <div className="fld">
+      <input
+        value={entry.name}
+        onChange={(e) => onUpdate({ name: e.target.value })}
+        className="fld-name"
+        placeholder="field name"
+        data-testid="schema-field-name"
+      />
+      <select
+        value={entry.type}
+        onChange={(e) => onUpdate({ type: e.target.value as FieldType })}
+        className="fld-type"
+        data-testid="schema-field-type"
+      >
+        {FIELD_TYPES.map((t) => (
+          <option key={t} value={t}>
+            {t}
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={onRemove}
+        className="fld-del"
+        data-testid="schema-field-remove"
+        aria-label="Delete field"
+      >
+        <X size={12} />
+      </button>
       {entry.type === "enum" && (
         <AllowedChipList
           values={entry.allowed ?? []}
@@ -171,40 +166,47 @@ function AllowedChipList({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-1" data-testid="allowed-values">
-      {values.map((v, i) => (
-        <span
-          key={i}
-          className="inline-flex items-center gap-0.5 rounded bg-acc-bg px-1.5 py-0.5 text-acc"
-          style={{ fontSize: "10px" }}
-          data-testid="allowed-chip"
+    <div className="fld-enum" data-testid="allowed-values">
+      <span className="fld-enum-h">allowed</span>
+      {values.length > 0 && (
+        <div className="fld-chips">
+          {values.map((v, i) => (
+            <span key={i} className="fld-chip" data-testid="allowed-chip">
+              {v}
+              <button
+                onClick={() => removeValue(i)}
+                className="fld-chip-del"
+                data-testid="remove-allowed-chip"
+                aria-label={`Remove ${v}`}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="fld-add-row">
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addValue();
+            }
+          }}
+          placeholder="add value…"
+          data-testid="allowed-input"
+        />
+        <button
+          className="fld-add-btn"
+          onClick={addValue}
+          data-testid="add-allowed-btn"
         >
-          {v}
-          <button
-            onClick={() => removeValue(i)}
-            className="cursor-pointer text-acc/60 hover:text-acc"
-            data-testid="remove-allowed-chip"
-          >
-            <X size={10} />
-          </button>
-        </span>
-      ))}
-      <input
-        ref={inputRef}
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            addValue();
-          }
-        }}
-        onBlur={addValue}
-        className="min-w-[60px] flex-1 bg-transparent text-fg outline-none"
-        style={{ fontSize: "10px" }}
-        placeholder="add value…"
-        data-testid="allowed-input"
-      />
+          Add
+        </button>
+      </div>
     </div>
   );
 }
