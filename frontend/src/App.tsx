@@ -310,7 +310,7 @@ export default function App() {
 
           <ResizableHandle />
 
-          <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right">
+          <ResizablePanel defaultSize={layout.defaultLayout.right} minSize={minSizePx} id="right" className="panel-r">
             {infoPanelOpen ? (
               <PipelineInfoPanel
                 key={infoPanelInitialTab ?? "default"}
