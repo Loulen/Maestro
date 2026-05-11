@@ -52,6 +52,7 @@ interface Props {
   runId: string;
   isArchived?: boolean;
   nodeName?: string | null;
+  initialTerminalExpanded?: boolean;
 }
 
 interface ModalState {
@@ -60,13 +61,21 @@ interface ModalState {
   portKind: "input" | "output";
 }
 
-export default function NodeDetailPanel({ node, runId, isArchived, nodeName }: Props) {
+export default function NodeDetailPanel({
+  node,
+  runId,
+  isArchived,
+  nodeName,
+  initialTerminalExpanded,
+}: Props) {
   const [promptText, setPromptText] = useState<string | null>(null);
   const [inputs, setInputs] = useState<PortIO[]>([]);
   const [outputs, setOutputs] = useState<PortIO[]>([]);
   const [modal, setModal] = useState<ModalState | null>(null);
   const [missingOutputs, setMissingOutputs] = useState<string[] | null>(null);
-  const [terminalExpanded, setTerminalExpanded] = useState(false);
+  const [terminalExpanded, setTerminalExpanded] = useState(
+    initialTerminalExpanded ?? false,
+  );
   const [userSelectedIter, setUserSelectedIter] = useState<{
     nodeId: string;
     iter: number;

@@ -5,6 +5,7 @@ import { useResizableLayout } from "./hooks/useResizableLayout";
 import { useLibrary } from "./hooks/useLibrary";
 import { useLibraryPipelines } from "./hooks/useLibraryPipelines";
 import { fetchRuns, fetchRun } from "./api";
+import { pickLatestLiveNode } from "./lib/pickLatestLiveNode";
 import type { RunListEntry, RunState } from "./types";
 import UnifiedLeftPanel from "./components/UnifiedLeftPanel";
 import DagCanvas from "./components/DagCanvas";
@@ -36,6 +37,11 @@ import {
 
 const PANEL_IDS = ["left", "center", "right"];
 const DEFAULT_SIZES = { left: 15, center: 60, right: 25 };
+
+const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "running",
+  "awaiting_user",
+]);
 
 function useRuns() {
   const [runs, setRuns] = useState<RunListEntry[]>([]);
@@ -102,11 +108,17 @@ export default function App() {
   const loadPipelines = useEditStore((s) => s.loadPipelines);
   const openRunPipeline = useEditStore((s) => s.openRunPipeline);
   const selection = useEditStore((s) => s.selection);
+  const setSelection = useEditStore((s) => s.setSelection);
   const openTabs = useEditStore((s) => s.openTabs);
   const editSave = useEditStore((s) => s.save);
   const editActiveTabId = useEditStore((s) => s.activeTabId);
   const resolveConflict = useEditStore((s) => s.resolveConflict);
   const clearSaveError = useEditStore((s) => s.clearSaveError);
+  // Tracks the node id last filled in by auto-selection. Used to decide
+  // whether to start the terminal in fullsize for the current selection.
+  const [autoSelectedNodeId, setAutoSelectedNodeId] = useState<string | null>(
+    null,
+  );
 
   const editTab = openTabs.find((t) => t.id === editActiveTabId);
   const editNodeType = editTab && selection.kind === "node" && selection.id
@@ -129,10 +141,12 @@ export default function App() {
       if (isEditingRun && selectedRun && runNode) {
         return (
           <NodeDetailPanel
+            key={runNode.node_id}
             node={runNode}
             runId={selectedRun.run_id}
             isArchived={isArchived}
             nodeName={selectedRun.node_defs?.find((d) => d.id === selection.id)?.name}
+            initialTerminalExpanded={isAutoSelected}
           />
         );
       }
@@ -181,6 +195,27 @@ export default function App() {
       refreshRuns();
     }
   }, [refreshRuns]);
+
+  // On a live run with nothing selected, snap selection to the latest
+  // running (or awaiting_user) node so the user immediately sees its terminal.
+  // Re-fires whenever the user deselects on a still-live run.
+  useEffect(() => {
+    if (!selectedRun) return;
+    if (selection.kind === "node" && selection.id) return;
+    if (!LIVE_RUN_STATUSES.has(selectedRun.status)) return;
+    const nodeId = pickLatestLiveNode(selectedRun);
+    if (!nodeId) return;
+    setSelection({ kind: "node", id: nodeId });
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- bounded cascade: setSelection above takes the kind!="none" branch on the next run, so this effect won't re-fire and tag a second node.
+    setAutoSelectedNodeId(nodeId);
+  }, [selectedRun, selection.kind, selection.id, setSelection]);
+
+  // The marker only counts while it matches the current selection; once the
+  // user picks a different node manually, the comparison falls to false.
+  const isAutoSelected =
+    selection.kind === "node" &&
+    selection.id != null &&
+    selection.id === autoSelectedNodeId;
 
   const handleSelectRun = useCallback(
     async (runId: string) => {
@@ -371,10 +406,12 @@ export default function App() {
                 )}
                 {selectedNode && selectedRun && selectedNodeType !== "start" && selectedNodeType !== "end" && (
                   <NodeDetailPanel
+                    key={selectedNode.node_id}
                     node={selectedNode}
                     runId={selectedRun.run_id}
                     isArchived={isArchived}
                     nodeName={selectedRun.node_defs?.find((d) => d.id === selectedNodeId)?.name}
+                    initialTerminalExpanded={selectedNodeId != null && selectedNodeId === autoSelectedNodeId}
                   />
                 )}
                 {!selectedNode && selectedNodeType !== "start" && isArchived && selectedRun && (
