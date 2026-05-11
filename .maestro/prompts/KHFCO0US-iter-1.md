@@ -4,12 +4,12 @@ You are node `KHFCO0US` in pipeline `simple-bugfix`, iteration 1.
 
 ## Inputs
 
-- `in`: read `/home/llenoir/Documents/perso/Maestro/.maestro/runs/20260511-150548-0f72f03/worktree/.maestro/artifacts/HmuRVQBx/iter-1/body.md`
-- `hot_to_reproduce`: read `/home/llenoir/Documents/perso/Maestro/.maestro/runs/20260511-150548-0f72f03/worktree/.maestro/artifacts/9LvO3oid/iter-1/how_to_reproduce.md`
+- `in`: read `/home/llenoir/Documents/perso/Maestro/.maestro/runs/20260511-162244-25e636a/worktree/.maestro/artifacts/HmuRVQBx/iter-1/body.md`
+- `in`: read `/home/llenoir/Documents/perso/Maestro/.maestro/runs/20260511-162244-25e636a/worktree/.maestro/artifacts/_input.md`
 
 ## Outputs
 
-- `out`: write to `/home/llenoir/Documents/perso/Maestro/.maestro/runs/20260511-150548-0f72f03/worktree/.maestro/artifacts/KHFCO0US/iter-1/out.md`
+- `out`: write to `/home/llenoir/Documents/perso/Maestro/.maestro/runs/20260511-162244-25e636a/worktree/.maestro/artifacts/KHFCO0US/iter-1/out.md`
 
 ## Completion
 
@@ -25,3 +25,5 @@ maestro fail --reason "<description of the problem>"
 
 ---
 
+Implement the entire scope of what is asked by the user. 
+Do not defer any work, the scope of your work was already decided upstream.
