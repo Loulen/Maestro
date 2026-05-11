@@ -158,6 +158,42 @@ describe("NodeDetailPanel", () => {
       expect(screen.getByTestId("details-pane")).toBeInTheDocument();
       expect(screen.getByText("Mark complete")).toBeInTheDocument();
     });
+
+    it("starts in fullsize when initialTerminalExpanded is true", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({ status: "running" })}
+            runId="run-1"
+            initialTerminalExpanded
+          />
+        </TooltipProvider>,
+      );
+
+      const terminal = screen.getByTestId("tmux-terminal");
+      expect(terminal.getAttribute("data-expanded")).toBe("true");
+      expect(screen.getByTestId("terminal-fullsize")).toBeInTheDocument();
+      expect(screen.queryByTestId("details-pane")).not.toBeInTheDocument();
+    });
+
+    it("lets the user collapse the terminal even when it started expanded", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({ status: "running" })}
+            runId="run-1"
+            initialTerminalExpanded
+          />
+        </TooltipProvider>,
+      );
+
+      expect(screen.getByTestId("terminal-fullsize")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId("term-expand"));
+
+      expect(screen.queryByTestId("terminal-fullsize")).not.toBeInTheDocument();
+      expect(screen.getByTestId("details-pane")).toBeInTheDocument();
+    });
   });
 
   describe("IterSelector", () => {
