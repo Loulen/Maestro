@@ -20,6 +20,23 @@ export function normalizePipelineYaml(yaml: string): string {
     .join("\n");
 }
 
+// Prompts live in `<id>.prompts/<node_id>.md` on disk, separate from the
+// pipeline YAML. The YAML hash alone wouldn't notice prompt-only edits, so we
+// compare the prompt maps in parallel: any node whose canvas content differs
+// from the library copy counts as divergence (including missing-on-either-side
+// nodes — an empty string and an absent file are treated the same to avoid
+// false divergence right after a fresh save).
+function promptsEqual(
+  canvas: Record<string, string>,
+  library: Record<string, string>,
+): boolean {
+  const keys = new Set([...Object.keys(canvas), ...Object.keys(library)]);
+  for (const key of keys) {
+    if ((canvas[key] ?? "") !== (library[key] ?? "")) return false;
+  }
+  return true;
+}
+
 /// Look up a library entry first by stable id (preferred — survives renames),
 /// then by name as a fallback for the first time a tab encounters its library
 /// twin. Callers should lock-in the resolved id on the tab so future renames
@@ -29,11 +46,15 @@ export function computePipelineSyncState(
   entries: LibraryPipelineEntry[],
   pipelineName: string,
   libraryId?: string | null,
+  canvasPrompts?: Record<string, string>,
 ): { state: PipelineLibrarySyncState; entry: LibraryPipelineEntry | null } {
   const byId = libraryId ? entries.find((e) => e.id === libraryId) ?? null : null;
   const entry = byId ?? entries.find((e) => e.name === pipelineName) ?? null;
   if (!entry) return { state: "outline", entry: null };
-  if (normalizePipelineYaml(pipelineYaml) === normalizePipelineYaml(entry.yaml)) {
+  const yamlMatches =
+    normalizePipelineYaml(pipelineYaml) === normalizePipelineYaml(entry.yaml);
+  const promptsMatch = promptsEqual(canvasPrompts ?? {}, entry.prompts ?? {});
+  if (yamlMatches && promptsMatch) {
     return { state: "synced", entry };
   }
   return { state: "diverged", entry };
@@ -43,12 +64,13 @@ export function usePipelineLibraryState(
   pipeline: PipelineDef | null,
   entries: LibraryPipelineEntry[],
   libraryId?: string | null,
+  prompts?: Record<string, string>,
 ): { state: PipelineLibrarySyncState; entry: LibraryPipelineEntry | null } {
   return useMemo(() => {
     if (!pipeline) return { state: "outline", entry: null };
     const yaml = serializePipeline(pipeline);
-    return computePipelineSyncState(yaml, entries, pipeline.name, libraryId);
-  }, [pipeline, entries, libraryId]);
+    return computePipelineSyncState(yaml, entries, pipeline.name, libraryId, prompts);
+  }, [pipeline, entries, libraryId, prompts]);
 }
 
 export function useLibraryPipelines() {

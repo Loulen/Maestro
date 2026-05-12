@@ -58,8 +58,8 @@ describe("RunsListPanel Library section", () => {
 
   it("renders starred pipeline template entries", () => {
     const pipelines: LibraryPipelineEntry[] = [
-      { id: "review-pipeline", name: "Review Pipeline", scope: "repo", node_count: 5, modified: null, yaml: "" },
-      { id: "deploy-pipeline", name: "Deploy Pipeline", scope: "repo", node_count: 3, modified: null, yaml: "" },
+      { id: "review-pipeline", name: "Review Pipeline", scope: "repo", node_count: 5, modified: null, yaml: "", prompts: {} },
+      { id: "deploy-pipeline", name: "Deploy Pipeline", scope: "repo", node_count: 3, modified: null, yaml: "", prompts: {} },
     ];
     renderPanel({ libraryPipelines: pipelines });
 

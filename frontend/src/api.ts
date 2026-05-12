@@ -359,6 +359,7 @@ export interface LibraryPipelineEntry {
   node_count: number;
   modified: string | null;
   yaml: string;
+  prompts: Record<string, string>;
 }
 
 export async function fetchLibraryPipelines(): Promise<LibraryPipelineEntry[]> {

@@ -272,6 +272,31 @@ pub mod pipelines {
         pub node_count: usize,
         pub modified: Option<String>,
         pub yaml: String,
+        /// Per-node prompts mirrored from `<id>.prompts/<node_id>.md`. The frontend
+        /// needs these to detect divergence when only a prompt was edited — without
+        /// them the star would stay "synced" after a prompt-only change.
+        #[serde(default)]
+        pub prompts: HashMap<String, String>,
+    }
+
+    fn read_prompts_dir(prompts_dir: &Path) -> HashMap<String, String> {
+        let mut prompts = HashMap::new();
+        let Ok(read_dir) = std::fs::read_dir(prompts_dir) else {
+            return prompts;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(node_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                prompts.insert(node_id.to_string(), content);
+            }
+        }
+        prompts
     }
 
     fn list_scope(dir: &Path, scope: Scope) -> Vec<PipelineLibraryEntry> {
@@ -303,6 +328,7 @@ pub mod pipelines {
                         .format("%Y-%m-%dT%H:%M:%SZ")
                         .to_string()
                 });
+            let prompts = read_prompts_dir(&path.with_extension("prompts"));
             entries.push(PipelineLibraryEntry {
                 id,
                 name: parsed.pipeline.name.clone(),
@@ -310,6 +336,7 @@ pub mod pipelines {
                 node_count: parsed.pipeline.nodes.len(),
                 modified,
                 yaml: contents,
+                prompts,
             });
         }
         entries
@@ -1186,6 +1213,57 @@ mod tests {
             // The node removed from the second save must not linger on disk; otherwise it
             // would still be materialised into future run worktrees as a dead prompt file.
             assert!(!prompts_dir.join("ghost.md").exists());
+        });
+    }
+
+    #[test]
+    fn pipeline_library_list_returns_prompts() {
+        with_temp_repo(|repo| {
+            let yaml = sample_pipeline_yaml("Promptful");
+            let mut prompts = HashMap::new();
+            prompts.insert("planner".to_string(), "You are a planner.".to_string());
+            prompts.insert("end".to_string(), "Wrap up.".to_string());
+
+            pipelines::save(
+                repo,
+                None,
+                "Promptful",
+                &yaml,
+                &prompts,
+                pipelines::Scope::Repo,
+            )
+            .unwrap();
+
+            let all = pipelines::list(repo);
+            assert_eq!(all.len(), 1);
+            // Without these, the frontend cannot detect prompt-only divergence and
+            // the star stays "synced" after the user edits a node prompt.
+            assert_eq!(all[0].prompts.len(), 2);
+            assert_eq!(
+                all[0].prompts.get("planner").map(String::as_str),
+                Some("You are a planner."),
+            );
+            assert_eq!(all[0].prompts.get("end").map(String::as_str), Some("Wrap up."));
+        });
+    }
+
+    #[test]
+    fn pipeline_library_list_returns_empty_prompts_when_dir_missing() {
+        with_temp_repo(|repo| {
+            let yaml = sample_pipeline_yaml("Bare");
+            pipelines::save(
+                repo,
+                None,
+                "Bare",
+                &yaml,
+                &HashMap::new(),
+                pipelines::Scope::Repo,
+            )
+            .unwrap();
+
+            let all = pipelines::list(repo);
+            assert_eq!(all.len(), 1);
+            assert!(all[0].prompts.is_empty());
         });
     }
 

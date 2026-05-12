@@ -194,6 +194,7 @@ function EditCanvasInner({ libraryEntries, libraryPipelines, onLibraryDelete, on
     pipeline ?? null,
     libraryPipelines,
     tab?.libraryId ?? null,
+    tab?.prompts,
   );
   const setLibraryBinding = useEditStore((s) => s.setLibraryBinding);
 

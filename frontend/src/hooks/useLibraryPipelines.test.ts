@@ -5,7 +5,12 @@ import {
 } from "./useLibraryPipelines";
 import type { LibraryPipelineEntry } from "../api";
 
-function entry(name: string, yaml: string, id?: string): LibraryPipelineEntry {
+function entry(
+  name: string,
+  yaml: string,
+  id?: string,
+  prompts: Record<string, string> = {},
+): LibraryPipelineEntry {
   return {
     id: id ?? name.toLowerCase().replace(/\s+/g, "-"),
     name,
@@ -13,6 +18,7 @@ function entry(name: string, yaml: string, id?: string): LibraryPipelineEntry {
     node_count: 0,
     modified: null,
     yaml,
+    prompts,
   };
 }
 
@@ -98,5 +104,61 @@ describe("computePipelineSyncState", () => {
     );
     expect(result.state).toBe("synced");
     expect(result.entry?.id).toBe("my-id");
+  });
+
+  // Regression: editing a node prompt in a starred pipeline must mark the
+  // pipeline as diverged. Without prompt-aware comparison the YAML hash stays
+  // identical and the star incorrectly reads "synced".
+  it("returns diverged when YAMLs match but a node prompt differs", () => {
+    const yaml = "name: My Pipeline\nnodes:\n  - id: planner\n";
+    const libEntry = entry(
+      "My Pipeline",
+      yaml,
+      "my-pipeline",
+      { planner: "You are a planner." },
+    );
+    const result = computePipelineSyncState(
+      yaml,
+      [libEntry],
+      "My Pipeline",
+      "my-pipeline",
+      { planner: "You are an EDITED planner." },
+    );
+    expect(result.state).toBe("diverged");
+    expect(result.entry?.id).toBe("my-pipeline");
+  });
+
+  it("returns synced when YAMLs and prompts both match", () => {
+    const yaml = "name: My Pipeline\nnodes:\n  - id: planner\n";
+    const libEntry = entry(
+      "My Pipeline",
+      yaml,
+      "my-pipeline",
+      { planner: "You are a planner." },
+    );
+    const result = computePipelineSyncState(
+      yaml,
+      [libEntry],
+      "My Pipeline",
+      "my-pipeline",
+      { planner: "You are a planner." },
+    );
+    expect(result.state).toBe("synced");
+  });
+
+  // A missing key and an empty-string value are treated identically — otherwise
+  // freshly-saved pipelines whose backend prompts dir is absent would
+  // immediately show as diverged.
+  it("treats missing prompt keys as equivalent to empty strings", () => {
+    const yaml = "name: My Pipeline\nnodes:\n  - id: a\n";
+    const libEntry = entry("My Pipeline", yaml, "my-pipeline", {});
+    const result = computePipelineSyncState(
+      yaml,
+      [libEntry],
+      "My Pipeline",
+      "my-pipeline",
+      { a: "" },
+    );
+    expect(result.state).toBe("synced");
   });
 });

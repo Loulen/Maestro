@@ -92,7 +92,7 @@ describe("PipelineInspector", () => {
   it("does not show an inline star even when the pipeline is in the library", () => {
     seedTab({ id: "my-pipeline", scope: "repo" });
     const starred: LibraryPipelineEntry[] = [
-      { id: "my-pipeline", name: "My Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "" },
+      { id: "my-pipeline", name: "My Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "", prompts: {} },
     ];
     renderInspector(starred);
 
@@ -110,7 +110,7 @@ describe("PipelineInspector", () => {
       <TooltipProvider>
         <PipelineInspector
           libraryPipelines={[
-            { id: "my-pipeline", name: "My Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "" },
+            { id: "my-pipeline", name: "My Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "", prompts: {} },
           ]}
           onLibraryChanged={() => {}}
         />

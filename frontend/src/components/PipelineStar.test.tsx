@@ -54,7 +54,15 @@ const PIPELINE: PipelineDef = {
 };
 
 function libEntry(yaml = ""): LibraryPipelineEntry {
-  return { id: "my-pipeline", name: "My Pipeline", scope: "repo", node_count: 2, modified: null, yaml };
+  return {
+    id: "my-pipeline",
+    name: "My Pipeline",
+    scope: "repo",
+    node_count: 2,
+    modified: null,
+    yaml,
+    prompts: {},
+  };
 }
 
 function renderStar(props: {
