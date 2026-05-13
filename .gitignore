@@ -18,24 +18,21 @@ Cargo.lock.*
 .sandcastle/worktrees/
 .sandcastle/.env
 
-# Maestro runtime state (event log SQLite — never committed)
-.maestro/maestro.db
-.maestro/maestro.db-journal
-.maestro/maestro.db-wal
-.maestro/maestro.db-shm
-
-# Maestro per-run worktrees, sub-worktrees, prompts snapshots, artefacts
-.maestro/runs/
-
-# Maestro pipeline definitions and library are per-user state — pipelines
-# get edited live from the UI, library is per-user. Don't share via git.
-.maestro/pipelines/
-.maestro/library/
+# Maestro local state — runtime DB, per-run worktrees, pipelines, library,
+# prompt snapshots. All per-user; never committed.
+.maestro/
 
 # Playwright artefacts
 frontend/test-results/
 frontend/playwright-report/
 frontend/playwright/.cache/
+.playwright-mcp/
+
+# Local design prompt scratchpad — not shared
+design-prompts/
+
+# Reproduction / debugging screenshots dropped at the repo root
+/*.png
 
 # Personal agent context — not shared with the team
 CLAUDE.md
