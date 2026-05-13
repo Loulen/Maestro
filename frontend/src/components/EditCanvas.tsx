@@ -468,6 +468,7 @@ function EditCanvasInner({ libraryEntries, libraryPipelines, onLibraryDelete, on
           onNodeContextMenu={handleNodeContextMenu}
           onEdgeContextMenu={handleEdgeContextMenu}
           connectionLineComponent={DragConnectionLine}
+          deleteKeyCode={null}
           fitView
           proOptions={{ hideAttribution: true }}
           className="bg-bg-1"

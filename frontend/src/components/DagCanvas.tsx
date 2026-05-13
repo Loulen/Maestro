@@ -893,6 +893,7 @@ function DagCanvasInner({
         onEdgeClick={(_event, edge) => onSelectNode(edge.source)}
         onPaneClick={() => onSelectNode(null)}
         onNodeDragStop={onNodeDragStop}
+        deleteKeyCode={null}
         fitView
         proOptions={{ hideAttribution: true }}
         className="bg-bg-1"
