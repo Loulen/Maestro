@@ -34,18 +34,14 @@ pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> 
             })
             .collect();
 
-        if upstream.is_empty() {
+        let all_completed = upstream.iter().all(|src| {
+            run_state
+                .nodes
+                .get(*src)
+                .is_some_and(|n| n.status == NodeStatus::Completed)
+        });
+        if all_completed {
             ready.push(node.id.clone());
-        } else {
-            let all_completed = upstream.iter().all(|src| {
-                run_state
-                    .nodes
-                    .get(*src)
-                    .is_some_and(|n| n.status == NodeStatus::Completed)
-            });
-            if all_completed {
-                ready.push(node.id.clone());
-            }
         }
     }
 
@@ -98,14 +94,14 @@ pub fn compute_body_subgraph(
             continue;
         }
 
-        let current_node = pipeline.nodes.iter().find(|n| n.id == current);
-        if let Some(cn) = current_node {
-            if (cn.node_type == NodeType::Loop || cn.node_type == NodeType::ForEach)
-                && cn.id != loop_node_id
-            {
-                body.insert(current.to_string());
-                continue;
-            }
+        let is_nested_loop = pipeline
+            .nodes
+            .iter()
+            .find(|n| n.id == current)
+            .is_some_and(|n| n.node_type == NodeType::Loop || n.node_type == NodeType::ForEach);
+        if is_nested_loop {
+            body.insert(current.to_string());
+            continue;
         }
 
         if !body.insert(current.to_string()) {
@@ -146,16 +142,7 @@ pub fn compute_body_subgraph(
 pub fn downstream_subgraph(pipeline: &PipelineDef, node_id: &str) -> HashSet<String> {
     let mut visited = HashSet::new();
     visited.insert(node_id.to_string());
-    let mut queue = Vec::new();
-
-    for edge in &pipeline.edges {
-        if edge.source.node == node_id {
-            let target = &edge.target.node;
-            if visited.insert(target.clone()) {
-                queue.push(target.clone());
-            }
-        }
-    }
+    let mut queue = vec![node_id.to_string()];
 
     while let Some(current) = queue.pop() {
         for edge in &pipeline.edges {
