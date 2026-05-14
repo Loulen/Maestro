@@ -42,6 +42,23 @@ Review the code changes on branch `{{BRANCH}}` and improve code clarity, consist
 
 6. **Preserve functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
 
+7. **Visual check (frontend changes only)**: If the diff touches files under `frontend/`, verify the UI renders correctly:
+   1. Start the dev server: `cd frontend && npm run dev &` — wait for the "ready" message.
+   2. Use Chrome DevTools MCP to navigate to `http://localhost:5173` and take a screenshot.
+   3. Read the design source of truth in `docs/design/` (start with `docs/design/README.md`) and compare against the screenshot.
+   4. Flag any visual regressions: broken layout, missing elements, wrong colors/spacing, components that don't match the design spec.
+   5. If you find visual issues caused by the branch's changes, fix them and commit.
+   6. Skip this step if the diff only touches tests, configs, or non-rendered code.
+
+8. **Run layer 5 scenarios**: If the diff touches frontend or daemon code, run the scenarios that exercise the changed area. Follow the protocol in `docs/agents/run-scenario.md` exactly (setup checks → pilot browser → validate side-effects → emit verdict JSON).
+
+   Available scenarios:
+   - `docs/testing/scenarios/run-minimal.md` — happy path: create and execute a minimal pipeline run
+   - `docs/testing/scenarios/edit-and-save.md` — edit a pipeline and persist changes
+   - `docs/testing/scenarios/loop-and-switch-review-loop.md` — loop node and review loop flow
+
+   Run every scenario whose scope overlaps with the diff. If a scenario FAILs due to a regression introduced by this branch, fix the issue and re-run until it passes. If it FAILs for a pre-existing reason unrelated to this branch, note it in your commit message but do not attempt a fix.
+
 # EXECUTION
 
 If you find improvements to make:
