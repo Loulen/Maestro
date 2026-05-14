@@ -56,11 +56,16 @@ pub enum EventKind {
     ForEachEmpty,
     ForEachBreakReceived,
     ForEachDone,
+    NodeStopped,
+    NodeAutoCompleted,
+    NodeStale,
     PipelineLint,
     PipelineModified,
     RunCompleted,
     RunFailed,
     RunHalted,
+    RunPaused,
+    RunResumed,
     RunArchived,
     CommandIssued,
 }
@@ -84,6 +89,7 @@ pub enum RunStatus {
     Completed,
     Failed,
     Halted,
+    Paused,
     Archived,
 }
 
@@ -95,6 +101,8 @@ pub enum NodeStatus {
     AwaitingUser,
     Completed,
     Failed,
+    Stopped,
+    Stale,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,6 +399,49 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                     }
                 }
             }
+            EventKind::NodeStopped => {
+                if let Some(ref node_id) = event.node_id {
+                    if let Some(node) = state.nodes.get_mut(node_id) {
+                        node.status = NodeStatus::Stopped;
+                        node.completed_at = Some(event.ts.clone());
+                        if let Some(ref payload) = event.payload {
+                            node.failure_reason = payload
+                                .get("reason")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                        }
+                        let iter = event.iter.unwrap_or(node.iter);
+                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
+                            it.status = NodeStatus::Stopped;
+                            it.completed_at = Some(event.ts.clone());
+                        }
+                    }
+                }
+            }
+            EventKind::NodeAutoCompleted => {
+                if let Some(ref node_id) = event.node_id {
+                    if let Some(node) = state.nodes.get_mut(node_id) {
+                        node.status = NodeStatus::Completed;
+                        node.completed_at = Some(event.ts.clone());
+                        let iter = event.iter.unwrap_or(node.iter);
+                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
+                            it.status = NodeStatus::Completed;
+                            it.completed_at = Some(event.ts.clone());
+                        }
+                    }
+                }
+            }
+            EventKind::NodeStale => {
+                if let Some(ref node_id) = event.node_id {
+                    if let Some(node) = state.nodes.get_mut(node_id) {
+                        node.status = NodeStatus::Stale;
+                        let iter = event.iter.unwrap_or(node.iter);
+                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
+                            it.status = NodeStatus::Stale;
+                        }
+                    }
+                }
+            }
             EventKind::FrontmatterRetryPending => {
                 if let Some(ref node_id) = event.node_id {
                     if let Some(node) = state.nodes.get_mut(node_id) {
@@ -597,6 +648,16 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                         port.reason = reason.clone();
                         port.fired_at = Some(event.ts.clone());
                     }
+                }
+            }
+            EventKind::RunPaused => {
+                if state.status == RunStatus::Running || state.status == RunStatus::AwaitingUser {
+                    state.status = RunStatus::Paused;
+                }
+            }
+            EventKind::RunResumed => {
+                if state.status == RunStatus::Paused {
+                    state.status = RunStatus::Running;
                 }
             }
             EventKind::RunArchived => {
@@ -1831,5 +1892,226 @@ mod tests {
         let fe_state = &state.foreach_states["fe1"];
         assert!(fe_state.break_received);
         assert!(!fe_state.done);
+    }
+
+    // --- New event kinds and statuses (issue #112) ---
+
+    #[test]
+    fn node_stopped_sets_stopped_status() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "stop-test" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            {
+                let mut e = make_event(EventKind::NodeStopped, Some("worker"), Some(1));
+                e.payload = Some(serde_json::json!({ "reason": "user killed it" }));
+                e
+            },
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["worker"];
+        assert_eq!(node.status, NodeStatus::Stopped);
+        assert_eq!(node.failure_reason.as_deref(), Some("user killed it"));
+        assert!(node.completed_at.is_some());
+        assert_eq!(node.iterations[0].status, NodeStatus::Stopped);
+    }
+
+    #[test]
+    fn node_stopped_does_not_fail_the_run() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "stop-run-test" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            {
+                let mut e = make_event(EventKind::NodeStopped, Some("worker"), Some(1));
+                e.payload = Some(serde_json::json!({ "reason": "deliberate stop" }));
+                e
+            },
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(
+            state.status,
+            RunStatus::Running,
+            "NodeStopped must NOT transition the run to failed"
+        );
+    }
+
+    #[test]
+    fn node_auto_completed_sets_completed_status() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "auto-complete-test" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::NodeAutoCompleted, Some("worker"), Some(1)),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["worker"];
+        assert_eq!(node.status, NodeStatus::Completed);
+        assert!(node.completed_at.is_some());
+        assert_eq!(node.iterations[0].status, NodeStatus::Completed);
+    }
+
+    #[test]
+    fn node_stale_sets_stale_status() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "stale-test" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::NodeStale, Some("worker"), Some(1)),
+        ];
+
+        let state = project(&events).unwrap();
+        let node = &state.nodes["worker"];
+        assert_eq!(node.status, NodeStatus::Stale);
+        assert!(node.completed_at.is_none(), "stale nodes are not completed");
+        assert_eq!(node.iterations[0].status, NodeStatus::Stale);
+    }
+
+    #[test]
+    fn run_paused_sets_paused_status() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "pause-test" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::RunPaused, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Paused);
+    }
+
+    #[test]
+    fn run_resumed_returns_to_running() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "resume-test" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("worker"), Some(1)),
+            make_event(EventKind::RunPaused, None, None),
+            make_event(EventKind::RunResumed, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn run_paused_from_awaiting_user() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "pause-await" }),
+            ),
+            make_event(EventKind::NodeStarted, Some("griller"), Some(1)),
+            make_event(EventKind::NodeAwaitingUser, Some("griller"), Some(1)),
+            make_event(EventKind::RunPaused, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Paused);
+    }
+
+    #[test]
+    fn run_paused_noop_when_already_completed() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "p" }),
+            ),
+            make_event(EventKind::RunCompleted, None, None),
+            make_event(EventKind::RunPaused, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(
+            state.status,
+            RunStatus::Completed,
+            "RunPaused should not affect a completed run"
+        );
+    }
+
+    #[test]
+    fn run_resumed_noop_when_not_paused() {
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "p" }),
+            ),
+            make_event(EventKind::RunResumed, None, None),
+        ];
+
+        let state = project(&events).unwrap();
+        assert_eq!(
+            state.status,
+            RunStatus::Running,
+            "RunResumed on non-paused run is a no-op"
+        );
+    }
+
+    #[test]
+    fn event_kind_serialization_roundtrip() {
+        let kinds = vec![
+            EventKind::NodeStopped,
+            EventKind::NodeAutoCompleted,
+            EventKind::NodeStale,
+            EventKind::RunPaused,
+            EventKind::RunResumed,
+        ];
+        let expected_strings = vec![
+            "\"node_stopped\"",
+            "\"node_auto_completed\"",
+            "\"node_stale\"",
+            "\"run_paused\"",
+            "\"run_resumed\"",
+        ];
+        for (kind, expected) in kinds.into_iter().zip(expected_strings) {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            assert_eq!(serialized, expected);
+            let deserialized: EventKind = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, kind);
+        }
+    }
+
+    #[test]
+    fn node_status_serialization_roundtrip() {
+        let statuses = vec![NodeStatus::Stopped, NodeStatus::Stale];
+        let expected = vec!["\"stopped\"", "\"stale\""];
+        for (status, exp) in statuses.into_iter().zip(expected) {
+            let s = serde_json::to_string(&status).unwrap();
+            assert_eq!(s, exp);
+            let d: NodeStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(d, status);
+        }
+    }
+
+    #[test]
+    fn run_status_paused_serialization_roundtrip() {
+        let s = serde_json::to_string(&RunStatus::Paused).unwrap();
+        assert_eq!(s, "\"paused\"");
+        let d: RunStatus = serde_json::from_str(&s).unwrap();
+        assert_eq!(d, RunStatus::Paused);
     }
 }

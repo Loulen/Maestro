@@ -14,6 +14,7 @@ const STATUS_STYLES: Record<RunStatus, { dot: string }> = {
   completed: { dot: "bg-st-done" },
   failed: { dot: "bg-st-failed" },
   halted: { dot: "bg-st-blocked" },
+  paused: { dot: "bg-st-paused" },
   archived: { dot: "bg-st-archived" },
 };
 
@@ -156,7 +157,7 @@ export default function UnifiedLeftPanel({
                   <span
                     role="button"
                     title={
-                      run.status === "running" || run.status === "awaiting_user"
+                      run.status === "running" || run.status === "awaiting_user" || run.status === "paused"
                         ? "Stop and archive run"
                         : "Cleanup run"
                     }
@@ -339,7 +340,8 @@ export default function UnifiedLeftPanel({
         <CleanupConfirmModal
           isLive={
             confirmCleanup.status === "running" ||
-            confirmCleanup.status === "awaiting_user"
+            confirmCleanup.status === "awaiting_user" ||
+            confirmCleanup.status === "paused"
           }
           onConfirm={() => handleCleanup(confirmCleanup.runId)}
           onCancel={() => setConfirmCleanup(null)}

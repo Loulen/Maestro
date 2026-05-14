@@ -32,6 +32,8 @@ pub fn validate_run_mutation(
                 event_log::NodeStatus::Completed => "completed",
                 event_log::NodeStatus::Failed => "failed",
                 event_log::NodeStatus::AwaitingUser => "awaiting_user",
+                event_log::NodeStatus::Stopped => "stopped",
+                event_log::NodeStatus::Stale => "stale",
                 event_log::NodeStatus::Pending => unreachable!(),
             };
             rejections.push(MutationRejection {

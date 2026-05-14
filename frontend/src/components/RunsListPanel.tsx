@@ -12,6 +12,7 @@ const STATUS_STYLES: Record<RunStatus, { dot: string; bg: string }> = {
   completed: { dot: "bg-st-done", bg: "bg-st-done-bg" },
   failed: { dot: "bg-st-failed", bg: "bg-st-failed-bg" },
   halted: { dot: "bg-st-blocked", bg: "bg-st-blocked-bg" },
+  paused: { dot: "bg-st-paused", bg: "bg-st-paused-bg" },
   archived: { dot: "bg-st-archived", bg: "bg-st-archived-bg" },
 };
 
@@ -118,7 +119,7 @@ export default function RunsListPanel({
                 <span
                   role="button"
                   title={
-                    run.status === "running" || run.status === "awaiting_user"
+                    run.status === "running" || run.status === "awaiting_user" || run.status === "paused"
                       ? "Stop and archive run"
                       : "Cleanup run"
                   }
@@ -176,7 +177,8 @@ export default function RunsListPanel({
         <CleanupConfirmModal
           isLive={
             confirmCleanup.status === "running" ||
-            confirmCleanup.status === "awaiting_user"
+            confirmCleanup.status === "awaiting_user" ||
+            confirmCleanup.status === "paused"
           }
           onConfirm={() => handleCleanup(confirmCleanup.runId)}
           onCancel={() => setConfirmCleanup(null)}

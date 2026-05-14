@@ -65,6 +65,7 @@ const RUN_STATUS_DOTS: Record<RunStatus, string> = {
   completed: "bg-st-done",
   failed: "bg-st-failed",
   halted: "bg-st-blocked",
+  paused: "bg-st-paused",
   archived: "bg-st-archived",
 };
 
@@ -284,7 +285,7 @@ const nodeTypes = {
 };
 
 const TERMINAL_STATUSES: RunStatus[] = ["completed", "failed", "halted"];
-const LIVE_STATUSES: RunStatus[] = ["running", "awaiting_user"];
+const LIVE_STATUSES: RunStatus[] = ["running", "awaiting_user", "paused"];
 
 interface Props {
   run: RunState | null;

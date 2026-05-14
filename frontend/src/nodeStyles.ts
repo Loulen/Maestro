@@ -6,6 +6,8 @@ export const STATUS_BORDER: Record<NodeStatus, string> = {
   awaiting_user: "border-st-await",
   completed: "border-st-done",
   failed: "border-st-failed",
+  stopped: "border-st-stopped",
+  stale: "border-st-stale",
 };
 
 export const STATUS_BG: Record<NodeStatus, string> = {
@@ -14,6 +16,8 @@ export const STATUS_BG: Record<NodeStatus, string> = {
   awaiting_user: "bg-st-await-bg",
   completed: "bg-st-done-bg",
   failed: "bg-st-failed-bg",
+  stopped: "bg-st-stopped-bg",
+  stale: "bg-st-stale-bg",
 };
 
 export const STATUS_DOT: Record<NodeStatus, string> = {
@@ -22,6 +26,8 @@ export const STATUS_DOT: Record<NodeStatus, string> = {
   awaiting_user: "bg-st-await",
   completed: "bg-st-done",
   failed: "bg-st-failed",
+  stopped: "bg-st-stopped",
+  stale: "bg-st-stale",
 };
 
 export const SELECTION_RING_STYLE = {

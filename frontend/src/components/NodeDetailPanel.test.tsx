@@ -461,4 +461,65 @@ describe("NodeDetailPanel", () => {
       expect(screen.getByTestId("tmux-terminal")).toBeInTheDocument();
     });
   });
+
+  describe("New statuses (issue #112)", () => {
+    it("renders Stopped label in header", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel
+            node={makeNode({ status: "stopped", failure_reason: "user killed it" })}
+            runId="run-1"
+          />
+        </TooltipProvider>,
+      );
+      expect(screen.getByText("Stopped")).toBeInTheDocument();
+      expect(screen.getByText(/user killed it/)).toBeInTheDocument();
+    });
+
+    it("renders Stale label in header and stale banner", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.getByText("Stale")).toBeInTheDocument();
+      expect(screen.getByText(/agent idle/i)).toBeInTheDocument();
+    });
+
+    it("stale node shows Mark complete button", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.getByText("Mark complete")).toBeInTheDocument();
+    });
+
+    it("stopped node does not show Mark complete button", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stopped" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.queryByText("Mark complete")).not.toBeInTheDocument();
+    });
+
+    it("renders terminal for stopped node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stopped" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.getByTestId("tmux-terminal")).toBeInTheDocument();
+    });
+
+    it("renders terminal for stale node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.getByTestId("tmux-terminal")).toBeInTheDocument();
+    });
+  });
 });
