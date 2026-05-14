@@ -3,6 +3,7 @@ mod blackboard;
 mod condition;
 mod event_log;
 mod frontmatter_parser;
+pub mod graph_resolver;
 pub mod library_store;
 mod loop_body_resolver;
 #[allow(dead_code)]
@@ -403,10 +404,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines", post(create_pipeline))
         .route("/runs", post(create_run))
         .route("/runs", get(list_runs))
-        .route(
-            "/runs/{run_id}",
-            get(get_run).delete(forget_run),
-        )
+        .route("/runs/{run_id}", get(get_run).delete(forget_run))
         .route("/runs/{run_id}/events", get(get_run_events))
         .route("/runs/{run_id}/nodes/{node_id}/done", post(node_done))
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
@@ -2218,11 +2216,7 @@ fn sync_run_pipeline_to_template(
 
 // --- Orphan sweep / reaper ---
 
-async fn run_orphan_sweep(
-    db: &sqlx::SqlitePool,
-    socket: &str,
-    ttl: Duration,
-) -> Result<()> {
+async fn run_orphan_sweep(db: &sqlx::SqlitePool, socket: &str, ttl: Duration) -> Result<()> {
     let run_ids = load_all_run_ids(db).await?;
     let mut run_states: HashMap<String, event_log::RunState> = HashMap::new();
 

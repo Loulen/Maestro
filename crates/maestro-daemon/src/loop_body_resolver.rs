@@ -1,98 +1,9 @@
-use std::collections::HashSet;
-
-use crate::pipeline::{NodeType, PipelineDef};
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum BodyResolutionError {
-    #[error("loop node '{0}' not found in pipeline")]
-    LoopNotFound(String),
-    #[error("loop '{0}' has an empty body (body port wired to nothing)")]
-    EmptyBody(String),
-    #[error("loop '{0}' body has no exit path back to break or done")]
-    NoExitToBreakOrDone(String),
-}
-
-pub fn compute_body_subgraph(
-    pipeline: &PipelineDef,
-    loop_node_id: &str,
-) -> Result<HashSet<String>, BodyResolutionError> {
-    pipeline
-        .nodes
-        .iter()
-        .find(|n| {
-            n.id == loop_node_id
-                && (n.node_type == NodeType::Loop || n.node_type == NodeType::ForEach)
-        })
-        .ok_or_else(|| BodyResolutionError::LoopNotFound(loop_node_id.to_string()))?;
-
-    let body_targets: Vec<&str> = pipeline
-        .edges
-        .iter()
-        .filter(|e| e.source.node == loop_node_id && e.source.port == "body")
-        .map(|e| e.target.node.as_str())
-        .collect();
-
-    if body_targets.is_empty() {
-        return Err(BodyResolutionError::EmptyBody(loop_node_id.to_string()));
-    }
-
-    let mut body = HashSet::new();
-    let mut queue: Vec<&str> = body_targets.clone();
-
-    while let Some(current) = queue.pop() {
-        if current == loop_node_id {
-            continue;
-        }
-
-        let current_node = pipeline.nodes.iter().find(|n| n.id == current);
-        if let Some(cn) = current_node {
-            if (cn.node_type == NodeType::Loop || cn.node_type == NodeType::ForEach)
-                && cn.id != loop_node_id
-            {
-                body.insert(current.to_string());
-                continue;
-            }
-        }
-
-        if !body.insert(current.to_string()) {
-            continue;
-        }
-
-        for edge in &pipeline.edges {
-            if edge.source.node != current {
-                continue;
-            }
-            let target = edge.target.node.as_str();
-            if target == loop_node_id {
-                continue;
-            }
-            if !body.contains(target) {
-                queue.push(target);
-            }
-        }
-    }
-
-    let has_exit = pipeline.edges.iter().any(|e| {
-        body.contains(&e.source.node)
-            && e.target.node == loop_node_id
-            && (e.target.port == "break" || e.target.port == "done")
-    });
-
-    if !has_exit {
-        return Err(BodyResolutionError::NoExitToBreakOrDone(
-            loop_node_id.to_string(),
-        ));
-    }
-
-    Ok(body)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::graph_resolver::{compute_body_subgraph, BodyResolutionError};
     use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port};
     use pretty_assertions::assert_eq;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn make_node(id: &str, node_type: NodeType, inputs: &[&str], outputs: &[&str]) -> NodeDef {
         NodeDef {
@@ -192,8 +103,8 @@ mod tests {
         }
     }
 
-    fn make_pipeline(nodes: Vec<NodeDef>, edges: Vec<EdgeDef>) -> PipelineDef {
-        PipelineDef {
+    fn make_pipeline(nodes: Vec<NodeDef>, edges: Vec<EdgeDef>) -> crate::pipeline::PipelineDef {
+        crate::pipeline::PipelineDef {
             name: "test".into(),
             version: None,
             variables: HashMap::new(),
@@ -204,7 +115,6 @@ mod tests {
 
     #[test]
     fn linear_body_returns_all_nodes() {
-        // Loop.body → A → B → Switch → Loop.break
         let pipeline = make_pipeline(
             vec![
                 make_loop_node("loop1", 5),
@@ -227,9 +137,6 @@ mod tests {
 
     #[test]
     fn body_with_internal_switch_all_branches_stay() {
-        // Loop.body → impl → reviewer → Switch
-        // Switch.pass → Loop.break
-        // Switch.default → impl (back-loop within body)
         let pipeline = make_pipeline(
             vec![
                 make_loop_node("loop1", 5),
@@ -256,10 +163,6 @@ mod tests {
 
     #[test]
     fn nested_loops_outer_excludes_inner_body() {
-        // outer_loop.body → inner_loop (Loop node)
-        // inner_loop.body → inner_worker
-        // inner_worker → inner_loop.break
-        // inner_loop.done → outer_loop.break
         let pipeline = make_pipeline(
             vec![
                 make_loop_node("outer", 3),
@@ -275,14 +178,12 @@ mod tests {
         );
 
         let body = compute_body_subgraph(&pipeline, "outer").unwrap();
-        // inner Loop is treated as opaque — included but its transitive nodes are NOT
         let expected: HashSet<String> = ["inner"].iter().map(|s| s.to_string()).collect();
         assert_eq!(body, expected);
     }
 
     #[test]
     fn empty_body_returns_error() {
-        // Loop with body port not wired
         let pipeline = make_pipeline(vec![make_loop_node("loop1", 5)], vec![]);
 
         let result = compute_body_subgraph(&pipeline, "loop1");
@@ -291,7 +192,6 @@ mod tests {
 
     #[test]
     fn no_exit_returns_error() {
-        // Loop.body → A → B but B doesn't go back to break or done
         let pipeline = make_pipeline(
             vec![
                 make_loop_node("loop1", 5),

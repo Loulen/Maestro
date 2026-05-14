@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::condition;
 use crate::event_log::{NodeStatus, RunState};
-use crate::loop_body_resolver;
+use crate::graph_resolver;
 use crate::pipeline::{NodeType, PipelineDef};
 use crate::switch_router;
 
@@ -122,52 +122,6 @@ pub fn seed_pending_loops(
     }
 
     actions
-}
-
-pub fn ready_nodes(pipeline: &PipelineDef, run_state: &RunState) -> Vec<String> {
-    let mut ready = Vec::new();
-
-    for node in &pipeline.nodes {
-        if node.node_type == NodeType::Start
-            || node.node_type == NodeType::End
-            || node.node_type == NodeType::Loop
-            || node.node_type == NodeType::ForEach
-        {
-            continue;
-        }
-        if run_state.nodes.contains_key(&node.id) {
-            continue;
-        }
-
-        let upstream: HashSet<&str> = pipeline
-            .edges
-            .iter()
-            .filter(|e| e.target.node == node.id)
-            .map(|e| e.source.node.as_str())
-            .filter(|src| {
-                !pipeline
-                    .nodes
-                    .iter()
-                    .any(|n| n.id == *src && n.node_type == NodeType::Start)
-            })
-            .collect();
-
-        if upstream.is_empty() {
-            ready.push(node.id.clone());
-        } else {
-            let all_completed = upstream.iter().all(|src| {
-                run_state
-                    .nodes
-                    .get(*src)
-                    .is_some_and(|n| n.status == NodeStatus::Completed)
-            });
-            if all_completed {
-                ready.push(node.id.clone());
-            }
-        }
-    }
-
-    ready
 }
 
 #[cfg(test)]
@@ -384,7 +338,7 @@ pub fn evaluate_loop_body_completion(
         None => return actions,
     };
 
-    let body_nodes = match loop_body_resolver::compute_body_subgraph(pipeline, loop_node_id) {
+    let body_nodes = match graph_resolver::compute_body_subgraph(pipeline, loop_node_id) {
         Ok(nodes) => nodes,
         Err(_) => return actions,
     };
@@ -566,7 +520,7 @@ pub fn evaluate_foreach_body_completion(
         _ => return actions,
     };
 
-    let body_nodes = match loop_body_resolver::compute_body_subgraph(pipeline, foreach_node_id) {
+    let body_nodes = match graph_resolver::compute_body_subgraph(pipeline, foreach_node_id) {
         Ok(nodes) => nodes,
         Err(_) => return actions,
     };
@@ -641,6 +595,7 @@ fn check_all_upstream_completed(
 mod tests {
     use super::*;
     use crate::event_log::NodeState;
+    use crate::graph_resolver::ready_nodes;
     use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port};
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;

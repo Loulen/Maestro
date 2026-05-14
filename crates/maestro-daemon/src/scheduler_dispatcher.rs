@@ -1,6 +1,6 @@
 use crate::event_log::{NodeStatus, RunState};
+use crate::graph_resolver;
 use crate::pipeline::PipelineDef;
-use crate::scheduler;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadySpawn {
@@ -9,7 +9,7 @@ pub struct ReadySpawn {
 }
 
 pub fn compute_ready_to_spawn(pipeline: &PipelineDef, run_state: &RunState) -> Vec<ReadySpawn> {
-    scheduler::ready_nodes(pipeline, run_state)
+    graph_resolver::ready_nodes(pipeline, run_state)
         .into_iter()
         .filter(|node_id| match run_state.nodes.get(node_id) {
             None => true,

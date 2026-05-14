@@ -68,7 +68,16 @@ fn tmux_has_session(socket: &str, session: &str) -> bool {
 
 fn create_fake_tmux_session(socket: &str, name: &str) {
     let _ = std::process::Command::new("tmux")
-        .args(["-L", socket, "new-session", "-d", "-s", name, "sleep", "300"])
+        .args([
+            "-L",
+            socket,
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "sleep",
+            "300",
+        ])
         .output();
 }
 
