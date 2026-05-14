@@ -1979,7 +1979,7 @@ async fn get_run_events(
     Json(events).into_response()
 }
 
-// --- Diff endpoints (refs #116) ---
+// --- Diff endpoints ---
 
 async fn run_diff(
     State(state): State<Arc<AppState>>,
@@ -2008,6 +2008,15 @@ async fn run_diff(
                 .into_response();
         }
     };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
+            return (StatusCode::NOT_FOUND, "run branch not found").into_response();
+        }
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+            .into_response();
+    }
 
     let diff = String::from_utf8_lossy(&output.stdout);
     (StatusCode::OK, diff.into_owned()).into_response()

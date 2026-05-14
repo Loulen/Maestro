@@ -397,7 +397,7 @@ export async function saveLibraryPipeline(
   return resp.json();
 }
 
-// --- Diff API (refs #116) ---
+// --- Diff API ---
 
 export async function fetchRunDiff(runId: string): Promise<string> {
   const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/diff`);

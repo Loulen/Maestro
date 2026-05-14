@@ -15,12 +15,10 @@ export default function DiffSection({ run }: Props) {
 
   const codeMutatingNodes = useMemo(() => {
     if (!run) return [];
-    return run.node_defs
-      .filter((nd) => nd.node_type === "code-mutating")
-      .filter((nd) => {
-        const ns = run.nodes[nd.id];
-        return ns && ns.status === "completed";
-      });
+    return run.node_defs.filter((nd) => {
+      const ns = run.nodes[nd.id];
+      return nd.node_type === "code-mutating" && ns?.status === "completed";
+    });
   }, [run]);
 
   useEffect(() => {
@@ -68,22 +66,21 @@ export default function DiffSection({ run }: Props) {
             </select>
           )}
 
-          {loading ? (
+          {loading && (
             <div className="text-fg-4" style={{ fontSize: "11px" }}>
               Loading…
             </div>
-          ) : diff ? (
+          )}
+          {!loading && diff && (
             <pre
               className="overflow-auto rounded bg-bg-1 p-2 font-mono text-fg-3 select-text"
               style={{ fontSize: "10.5px", lineHeight: "1.5", maxHeight: "400px" }}
             >
               {renderDiff(diff)}
             </pre>
-          ) : (
-            <div
-              className="text-fg-4"
-              style={{ fontSize: "11px" }}
-            >
+          )}
+          {!loading && !diff && (
+            <div className="text-fg-4" style={{ fontSize: "11px" }}>
               No changes
             </div>
           )}
