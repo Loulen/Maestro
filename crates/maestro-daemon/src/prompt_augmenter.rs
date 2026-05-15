@@ -56,7 +56,7 @@ pub fn resolve_input_paths(ctx: &AugmentContext<'_>) -> Vec<InputResolution> {
             .any(|n| n.id == *source_node && n.node_type == crate::pipeline::NodeType::Start);
 
         let path = if is_start {
-            ctx.artifacts_dir.join("_input").join("output.md")
+            crate::blackboard::input_path(ctx.artifacts_dir)
         } else if repeated {
             ctx.artifacts_dir
                 .join(source_node)
@@ -64,11 +64,12 @@ pub fn resolve_input_paths(ctx: &AugmentContext<'_>) -> Vec<InputResolution> {
                 .join(&edge.source.port)
                 .join("output.md")
         } else {
-            ctx.artifacts_dir
-                .join(source_node)
-                .join(format!("iter-{}", ctx.iter))
-                .join(&edge.source.port)
-                .join("output.md")
+            crate::blackboard::artifact_path(
+                ctx.artifacts_dir,
+                source_node,
+                ctx.iter,
+                &edge.source.port,
+            )
         };
 
         inputs.push(InputResolution {
@@ -81,7 +82,7 @@ pub fn resolve_input_paths(ctx: &AugmentContext<'_>) -> Vec<InputResolution> {
     if inputs.is_empty() && ctx.node.inputs.iter().any(|p| p.name == "task") {
         inputs.push(InputResolution {
             port_name: "task".into(),
-            path: ctx.artifacts_dir.join("_input").join("output.md"),
+            path: crate::blackboard::input_path(ctx.artifacts_dir),
             repeated: false,
         });
     }
@@ -95,12 +96,12 @@ pub fn resolve_output_paths(ctx: &AugmentContext<'_>) -> Vec<OutputDeclaration> 
         .iter()
         .map(|port| OutputDeclaration {
             port_name: port.name.clone(),
-            path: ctx
-                .artifacts_dir
-                .join(&ctx.node.id)
-                .join(format!("iter-{}", ctx.iter))
-                .join(&port.name)
-                .join("output.md"),
+            path: crate::blackboard::artifact_path(
+                ctx.artifacts_dir,
+                &ctx.node.id,
+                ctx.iter,
+                &port.name,
+            ),
         })
         .collect()
 }

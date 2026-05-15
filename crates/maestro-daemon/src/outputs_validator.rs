@@ -56,11 +56,7 @@ pub fn validate(
                 missing.push(port.name.clone());
             }
         } else {
-            let path = artifacts_dir
-                .join(node_id)
-                .join(format!("iter-{iter}"))
-                .join(&port.name)
-                .join("output.md");
+            let path = crate::blackboard::artifact_path(artifacts_dir, node_id, iter, &port.name);
             if !path.exists() {
                 missing.push(port.name.clone());
             }
@@ -93,11 +89,7 @@ fn validate_frontmatter_schemas(
             _ => continue,
         };
 
-        let path = artifacts_dir
-            .join(node_id)
-            .join(format!("iter-{iter}"))
-            .join(&port.name)
-            .join("output.md");
+        let path = crate::blackboard::artifact_path(artifacts_dir, node_id, iter, &port.name);
 
         let fields = match frontmatter_parser::parse_frontmatter_from_file(&path) {
             Ok(f) => f,

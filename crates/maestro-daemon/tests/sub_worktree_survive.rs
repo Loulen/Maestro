@@ -204,7 +204,7 @@ async fn cleanup_run_removes_surviving_sub_worktrees() {
     // Write a code change and mark done
     std::fs::write(sub_wt_dir.join("implementation.rs"), "fn main() {}\n").unwrap();
 
-    let port_dir2 = daemon
+    let port_dir = daemon
         .repo_root()
         .join(".maestro/runs")
         .join(&run_id)
@@ -212,8 +212,8 @@ async fn cleanup_run_removes_surviving_sub_worktrees() {
         .join(NODE_ID)
         .join("iter-1")
         .join("summary");
-    std::fs::create_dir_all(&port_dir2).unwrap();
-    std::fs::write(port_dir2.join("output.md"), "# Summary\nDone.\n").unwrap();
+    std::fs::create_dir_all(&port_dir).unwrap();
+    std::fs::write(port_dir.join("output.md"), "# Summary\nDone.\n").unwrap();
 
     let resp = reqwest::Client::new()
         .post(format!(

@@ -1711,11 +1711,8 @@ fn resolve_source_frontmatter(
 
     let mut fields = HashMap::new();
     for port in &node.outputs {
-        let artifact_path = artifacts_dir
-            .join(completed_node_id)
-            .join(format!("iter-{iter}"))
-            .join(&port.name)
-            .join("output.md");
+        let artifact_path =
+            blackboard::artifact_path(artifacts_dir, completed_node_id, iter, &port.name);
         if let Ok(port_fields) = frontmatter_parser::parse_frontmatter_from_file(&artifact_path) {
             for (k, v) in port_fields {
                 fields.insert(k, v);

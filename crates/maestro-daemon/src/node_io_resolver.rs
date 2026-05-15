@@ -55,17 +55,18 @@ pub fn resolve(pipeline: &PipelineDef, artifacts_dir: &Path, node_id: &str, iter
                 let source_dir = artifacts_dir.join(&edge.source.node);
                 files.extend(glob_repeated(&source_dir, &edge.source.port));
             } else {
-                let path = artifacts_dir
-                    .join(&edge.source.node)
-                    .join(format!("iter-{iter}"))
-                    .join(&edge.source.port)
-                    .join("output.md");
+                let path = crate::blackboard::artifact_path(
+                    artifacts_dir,
+                    &edge.source.node,
+                    iter,
+                    &edge.source.port,
+                );
                 files.push(file_info(artifacts_dir, &path));
             }
         }
 
         if !found_edge && input_port.name == "task" {
-            let path = artifacts_dir.join("_input").join("output.md");
+            let path = crate::blackboard::input_path(artifacts_dir);
             files.push(file_info(artifacts_dir, &path));
         }
 
@@ -78,11 +79,8 @@ pub fn resolve(pipeline: &PipelineDef, artifacts_dir: &Path, node_id: &str, iter
 
     let mut outputs: Vec<PortIO> = Vec::new();
     for output_port in &node.outputs {
-        let path = artifacts_dir
-            .join(node_id)
-            .join(format!("iter-{iter}"))
-            .join(&output_port.name)
-            .join("output.md");
+        let path =
+            crate::blackboard::artifact_path(artifacts_dir, node_id, iter, &output_port.name);
         let info = file_info_with_frontmatter(artifacts_dir, &path);
         outputs.push(PortIO {
             port: output_port.name.clone(),

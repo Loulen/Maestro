@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
 pub fn port_dir(artifacts_dir: &Path, node_id: &str, iter: i64, port_name: &str) -> PathBuf {
     artifacts_dir
         .join(node_id)
@@ -8,7 +7,6 @@ pub fn port_dir(artifacts_dir: &Path, node_id: &str, iter: i64, port_name: &str)
         .join(port_name)
 }
 
-#[allow(dead_code)]
 pub fn artifact_path(artifacts_dir: &Path, node_id: &str, iter: i64, port_name: &str) -> PathBuf {
     port_dir(artifacts_dir, node_id, iter, port_name).join("output.md")
 }
@@ -18,7 +16,6 @@ pub fn artifact_exists(artifacts_dir: &Path, node_id: &str, iter: i64, port_name
     artifact_path(artifacts_dir, node_id, iter, port_name).exists()
 }
 
-#[allow(dead_code)]
 pub fn input_path(artifacts_dir: &Path) -> PathBuf {
     artifacts_dir.join("_input").join("output.md")
 }
