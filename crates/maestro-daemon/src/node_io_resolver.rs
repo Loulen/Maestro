@@ -202,7 +202,9 @@ fn list_image_files(artifacts_dir: &Path, port_dir: &Path) -> Vec<FileInfo> {
     };
     let mut files: Vec<FileInfo> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_file()) && pipeline::is_image_file(&e.path()))
+        .filter(|e| {
+            e.file_type().ok().is_some_and(|ft| ft.is_file()) && pipeline::is_image_file(&e.path())
+        })
         .map(|e| {
             let path = e.path();
             let size = std::fs::metadata(&path).ok().map(|m| m.len());

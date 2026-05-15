@@ -108,6 +108,7 @@ pub fn start_node(params: &StartNodeParams<'_>) -> StartNodeResult {
         daemon_url: &format!("http://localhost:{}", params.daemon_port),
         foreach_context: None,
         source_worktree_dir: has_sub_worktree.then_some(working_dir.as_path()),
+        input_images: Vec::new(),
     };
 
     let full_prompt = crate::prompt_augmenter::build_full_prompt(&aug_ctx, &role_prompt);
@@ -457,7 +458,7 @@ fn create_sub_worktree(
 mod tests {
     use super::*;
     use crate::event_log::{IterationInfo, NodeState, RunState};
-    use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port};
+    use crate::pipeline::{EdgeDef, EdgeEndpoint, NodeDef, NodeType, Port, PortType};
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
@@ -472,6 +473,7 @@ mod tests {
                     name: (*n).into(),
                     repeated: false,
                     side: None,
+                    port_type: PortType::Markdown,
                     frontmatter: None,
                     when: None,
                     description: None,
@@ -483,6 +485,7 @@ mod tests {
                     name: (*n).into(),
                     repeated: false,
                     side: None,
+                    port_type: PortType::Markdown,
                     frontmatter: None,
                     when: None,
                     description: None,
@@ -504,6 +507,7 @@ mod tests {
                 name: port_name.into(),
                 repeated: true,
                 side: None,
+                port_type: PortType::Markdown,
                 frontmatter: None,
                 when: None,
                 description: None,
@@ -512,6 +516,7 @@ mod tests {
                 name: "out".into(),
                 repeated: false,
                 side: None,
+                port_type: PortType::Markdown,
                 frontmatter: None,
                 when: None,
                 description: None,

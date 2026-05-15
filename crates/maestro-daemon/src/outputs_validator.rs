@@ -24,7 +24,9 @@ fn count_image_files(dir: &Path) -> usize {
     };
     entries
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_file()) && pipeline::is_image_file(&e.path()))
+        .filter(|e| {
+            e.file_type().ok().is_some_and(|ft| ft.is_file()) && pipeline::is_image_file(&e.path())
+        })
         .count()
 }
 

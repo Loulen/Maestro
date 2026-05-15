@@ -16,6 +16,7 @@ pub mod pipeline_migrator;
 mod pipeline_watcher;
 mod prompt_augmenter;
 mod pty_bridge;
+#[allow(dead_code)]
 mod scheduler;
 mod scheduler_dispatcher;
 mod switch_router;
@@ -31,7 +32,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Json, Multipart, Path as AxumPath, Query, State, WebSocketUpgrade};
+use axum::extract::{
+    FromRequest, Json, Multipart, Path as AxumPath, Query, State, WebSocketUpgrade,
+};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -1854,7 +1857,8 @@ struct ImageFile {
     data: Vec<u8>,
 }
 
-pub(crate) const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
+pub(crate) const ALLOWED_IMAGE_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
 
 fn sanitize_image_filename(raw: &str) -> Option<String> {
     let name = Path::new(raw)
@@ -1889,41 +1893,82 @@ async fn parse_multipart_create_run(
         let field_name = field.name().unwrap_or("").to_string();
         match field_name.as_str() {
             "pipeline" => {
-                pipeline = Some(field.text().await.map_err(|e| format!("bad field pipeline: {e}"))?);
+                pipeline = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| format!("bad field pipeline: {e}"))?,
+                );
             }
             "input" => {
-                input = Some(field.text().await.map_err(|e| format!("bad field input: {e}"))?);
+                input = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| format!("bad field input: {e}"))?,
+                );
             }
             "variables" => {
-                let text = field.text().await.map_err(|e| format!("bad field variables: {e}"))?;
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| format!("bad field variables: {e}"))?;
                 if !text.is_empty() {
                     variables = serde_json::from_str(&text)
                         .map_err(|e| format!("invalid variables JSON: {e}"))?;
                 }
             }
             "pipeline_id" => {
-                let v = field.text().await.map_err(|e| format!("bad field pipeline_id: {e}"))?;
-                if !v.is_empty() { pipeline_id = Some(v); }
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| format!("bad field pipeline_id: {e}"))?;
+                if !v.is_empty() {
+                    pipeline_id = Some(v);
+                }
             }
             "target_repo" => {
-                let v = field.text().await.map_err(|e| format!("bad field target_repo: {e}"))?;
-                if !v.is_empty() { target_repo = Some(v); }
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| format!("bad field target_repo: {e}"))?;
+                if !v.is_empty() {
+                    target_repo = Some(v);
+                }
             }
             "source_branch" => {
-                let v = field.text().await.map_err(|e| format!("bad field source_branch: {e}"))?;
-                if !v.is_empty() { source_branch = Some(v); }
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| format!("bad field source_branch: {e}"))?;
+                if !v.is_empty() {
+                    source_branch = Some(v);
+                }
             }
             "name" => {
-                let v = field.text().await.map_err(|e| format!("bad field name: {e}"))?;
-                if !v.is_empty() { name = Some(v); }
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| format!("bad field name: {e}"))?;
+                if !v.is_empty() {
+                    name = Some(v);
+                }
             }
             "images" => {
                 let raw_filename = field.file_name().unwrap_or("image.png").to_string();
-                let data = field.bytes().await.map_err(|e| format!("failed to read image: {e}"))?;
-                if data.is_empty() { continue; }
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("failed to read image: {e}"))?;
+                if data.is_empty() {
+                    continue;
+                }
                 let filename = sanitize_image_filename(&raw_filename)
                     .ok_or_else(|| format!("unsupported image type: {raw_filename}"))?;
-                images.push(ImageFile { filename, data: data.to_vec() });
+                images.push(ImageFile {
+                    filename,
+                    data: data.to_vec(),
+                });
             }
             _ => {}
         }
@@ -1941,10 +1986,7 @@ async fn parse_multipart_create_run(
     Ok((req, images))
 }
 
-async fn create_run(
-    State(state): State<Arc<AppState>>,
-    req: axum::extract::Request,
-) -> Response {
+async fn create_run(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
     let content_type = req
         .headers()
         .get(header::CONTENT_TYPE)
@@ -9742,11 +9784,17 @@ edges: []
 
     #[test]
     fn sanitize_image_filename_accepts_valid_extensions() {
-        assert_eq!(sanitize_image_filename("photo.png"), Some("photo.png".into()));
+        assert_eq!(
+            sanitize_image_filename("photo.png"),
+            Some("photo.png".into())
+        );
         assert_eq!(sanitize_image_filename("img.JPG"), Some("img.JPG".into()));
         assert_eq!(sanitize_image_filename("pic.jpeg"), Some("pic.jpeg".into()));
         assert_eq!(sanitize_image_filename("anim.gif"), Some("anim.gif".into()));
-        assert_eq!(sanitize_image_filename("modern.webp"), Some("modern.webp".into()));
+        assert_eq!(
+            sanitize_image_filename("modern.webp"),
+            Some("modern.webp".into())
+        );
         assert_eq!(sanitize_image_filename("icon.svg"), Some("icon.svg".into()));
         assert_eq!(sanitize_image_filename("old.bmp"), Some("old.bmp".into()));
     }
@@ -9822,8 +9870,14 @@ edges: []
         std::fs::write(input_dir.join("output.md"), "hello").unwrap();
 
         let images = vec![
-            ImageFile { filename: "screenshot.png".into(), data: vec![0x89, 0x50, 0x4E, 0x47] },
-            ImageFile { filename: "diagram.jpg".into(), data: vec![0xFF, 0xD8, 0xFF] },
+            ImageFile {
+                filename: "screenshot.png".into(),
+                data: vec![0x89, 0x50, 0x4E, 0x47],
+            },
+            ImageFile {
+                filename: "diagram.jpg".into(),
+                data: vec![0xFF, 0xD8, 0xFF],
+            },
         ];
         for image in &images {
             std::fs::write(input_dir.join(&image.filename), &image.data).unwrap();

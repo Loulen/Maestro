@@ -1085,8 +1085,8 @@ mod tests {
         let input_dir = artifacts_dir.join("_input");
         std::fs::create_dir_all(&input_dir).unwrap();
         std::fs::write(input_dir.join("output.md"), "text prompt").unwrap();
-        std::fs::write(input_dir.join("screenshot.png"), &[0x89]).unwrap();
-        std::fs::write(input_dir.join("diagram.jpg"), &[0xFF]).unwrap();
+        std::fs::write(input_dir.join("screenshot.png"), [0x89]).unwrap();
+        std::fs::write(input_dir.join("diagram.jpg"), [0xFF]).unwrap();
         std::fs::write(input_dir.join("notes.txt"), "not an image").unwrap();
 
         let images = discover_input_images(&artifacts_dir);
