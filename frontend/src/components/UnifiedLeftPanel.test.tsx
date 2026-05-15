@@ -3,7 +3,10 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import UnifiedLeftPanel from "./UnifiedLeftPanel";
 import type { RunListEntry } from "../types";
 import type { LibraryPipelineEntry } from "../api";
+import { renameRun } from "../api";
 import { useEditStore } from "../stores/editStore";
+
+const mockRenameRun = vi.mocked(renameRun);
 
 vi.mock("../api", () => ({
   cleanupRun: vi.fn().mockResolvedValue(undefined),
@@ -115,8 +118,7 @@ describe("UnifiedLeftPanel run display labels", () => {
     expect(input.value).toBe("Old Name");
   });
 
-  it("calls renameRun on Enter", async () => {
-    const { renameRun } = await import("../api");
+  it("calls renameRun on Enter", () => {
     const runs: RunListEntry[] = [
       { run_id: "run-enter", pipeline_name: "pipe", status: "completed", started_at: null, name: "Before" },
     ];
@@ -127,11 +129,10 @@ describe("UnifiedLeftPanel run display labels", () => {
     fireEvent.change(input, { target: { value: "After" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(renameRun).toHaveBeenCalledWith("run-enter", "After");
+    expect(mockRenameRun).toHaveBeenCalledWith("run-enter", "After");
   });
 
-  it("cancels rename on Escape without calling API", async () => {
-    const { renameRun } = await import("../api");
+  it("cancels rename on Escape without calling API", () => {
     const runs: RunListEntry[] = [
       { run_id: "run-esc", pipeline_name: "pipe", status: "running", started_at: null, name: "Keep" },
     ];
@@ -140,7 +141,7 @@ describe("UnifiedLeftPanel run display labels", () => {
     fireEvent.click(screen.getByTestId("rename-button"));
     fireEvent.keyDown(screen.getByTestId("rename-input"), { key: "Escape" });
 
-    expect(renameRun).not.toHaveBeenCalled();
+    expect(mockRenameRun).not.toHaveBeenCalled();
     expect(screen.queryByTestId("rename-input")).not.toBeInTheDocument();
     expect(screen.getByTestId("run-display-label").textContent).toBe("Keep");
   });
