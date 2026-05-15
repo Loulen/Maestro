@@ -127,6 +127,10 @@ struct CreateRunRequest {
     variables: HashMap<String, serde_yaml::Value>,
     #[serde(default)]
     pipeline_id: Option<String>,
+    #[serde(default)]
+    target_repo: Option<String>,
+    #[serde(default)]
+    source_branch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -391,6 +395,41 @@ pub async fn run_daemon(port: u16) -> Result<()> {
     handle.task.await.context("daemon task join error")?
 }
 
+// --- Repo endpoints ---
+
+#[derive(Deserialize)]
+struct RepoPathQuery {
+    path: String,
+}
+
+async fn repos_branches(Query(q): Query<RepoPathQuery>) -> Response {
+    let repo = match validate_target_repo(&q.path) {
+        Ok(p) => p,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+    };
+    match list_branches(&repo) {
+        Ok(branches) => Json(branches).into_response(),
+        Err(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+    }
+}
+
+async fn repos_validate(Query(q): Query<RepoPathQuery>) -> Response {
+    match validate_target_repo(&q.path) {
+        Ok(_) => Json(serde_json::json!({ "valid": true })).into_response(),
+        Err(_msg) => Json(serde_json::json!({ "valid": false, "error": _msg })).into_response(),
+    }
+}
+
 fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
@@ -403,10 +442,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines", post(create_pipeline))
         .route("/runs", post(create_run))
         .route("/runs", get(list_runs))
-        .route(
-            "/runs/{run_id}",
-            get(get_run).delete(forget_run),
-        )
+        .route("/runs/{run_id}", get(get_run).delete(forget_run))
         .route("/runs/{run_id}/events", get(get_run_events))
         .route("/runs/{run_id}/nodes/{node_id}/done", post(node_done))
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
@@ -442,6 +478,8 @@ fn build_router(state: Arc<AppState>) -> Router {
             "/library/pipelines/{id}",
             axum::routing::delete(delete_library_pipeline),
         )
+        .route("/repos/branches", get(repos_branches))
+        .route("/repos/validate", get(repos_validate))
         .fallback(static_handler)
         .with_state(state)
 }
@@ -1184,6 +1222,7 @@ struct SpawnContext<'a> {
     worktree_dir: &'a std::path::Path,
     artifacts_dir: &'a std::path::Path,
     resolved_vars: &'a HashMap<String, serde_yaml::Value>,
+    repo_root: &'a std::path::Path,
 }
 
 fn deposit_foreach_items(
@@ -1272,13 +1311,16 @@ async fn spawn_node(
         || node.node_type == pipeline::NodeType::Merge;
 
     let working_dir = if has_sub_worktree {
-        let sub_wt_dir = sub_worktree_path(&state.repo_root, run_id, &node.id, iter);
+        let sub_wt_dir = sub_worktree_path(spawn_ctx.repo_root, run_id, &node.id, iter);
         let sub_branch = sub_worktree_branch(run_id, &node.id, iter);
         let pipeline_branch = format!("maestro/run-{run_id}");
 
-        if let Err(e) =
-            create_sub_worktree(&state.repo_root, &sub_wt_dir, &sub_branch, &pipeline_branch)
-        {
+        if let Err(e) = create_sub_worktree(
+            spawn_ctx.repo_root,
+            &sub_wt_dir,
+            &sub_branch,
+            &pipeline_branch,
+        ) {
             error!("failed to create sub-worktree for {}: {e}", node.id);
             return;
         }
@@ -1362,12 +1404,13 @@ async fn handle_node_completion(
     completed_node_id: &str,
     events: &[event_log::Event],
 ) {
+    let repo_root = effective_repo_root(state, run_state);
     let pipeline_path = {
-        let run_scoped = run_scoped_pipeline_path(&state.repo_root, run_id);
+        let run_scoped = run_scoped_pipeline_path(&repo_root, run_id);
         if run_scoped.exists() {
             run_scoped
         } else {
-            resolve_pipeline_path(&state.repo_root, &run_state.pipeline_name)
+            resolve_pipeline_path(&repo_root, &run_state.pipeline_name)
         }
     };
     let Ok(yaml) = std::fs::read_to_string(&pipeline_path) else {
@@ -1379,12 +1422,7 @@ async fn handle_node_completion(
 
     let pipeline = parse_result.pipeline;
 
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(run_id)
-        .join("worktree");
+    let worktree_dir = worktree_dir_for_run(&repo_root, run_id);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
 
     let resolved_vars = resolve_run_variables(&pipeline, events);
@@ -1412,6 +1450,7 @@ async fn handle_node_completion(
         worktree_dir: &worktree_dir,
         artifacts_dir: &artifacts_dir,
         resolved_vars: &resolved_vars,
+        repo_root: &repo_root,
     };
 
     for action in &actions {
@@ -1487,6 +1526,7 @@ async fn handle_node_completion(
         worktree_dir: &worktree_dir,
         artifacts_dir: &artifacts_dir,
         resolved_vars: &fresh_resolved_vars,
+        repo_root: &repo_root,
     };
 
     // Check loop body completion for all loop nodes
@@ -1584,8 +1624,8 @@ async fn spawn_ready_after_event(state: &AppState, run_id: &str) {
         return;
     }
 
-    let pipeline_path =
-        resolve_run_pipeline_path(&state.repo_root, run_id, &run_state.pipeline_name);
+    let repo_root = effective_repo_root(state, &run_state);
+    let pipeline_path = resolve_run_pipeline_path(&repo_root, run_id, &run_state.pipeline_name);
     let Ok(yaml) = std::fs::read_to_string(&pipeline_path) else {
         return;
     };
@@ -1606,12 +1646,7 @@ async fn spawn_ready_after_event(state: &AppState, run_id: &str) {
         return;
     }
 
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(run_id)
-        .join("worktree");
+    let worktree_dir = worktree_dir_for_run(&repo_root, run_id);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
 
     let spawn_ctx = SpawnContext {
@@ -1621,6 +1656,7 @@ async fn spawn_ready_after_event(state: &AppState, run_id: &str) {
         worktree_dir: &worktree_dir,
         artifacts_dir: &artifacts_dir,
         resolved_vars: &resolved_vars,
+        repo_root: &repo_root,
     };
 
     for rs in &ready {
@@ -1731,6 +1767,36 @@ async fn create_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRunRequest>,
 ) -> Response {
+    // Validate target_repo if provided
+    let run_repo_root = if let Some(ref target) = req.target_repo {
+        match validate_target_repo(target) {
+            Ok(p) => p,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": msg })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        state.repo_root.clone()
+    };
+
+    // Validate source_branch if provided
+    let source_ref = if let Some(ref branch) = req.source_branch {
+        if let Err(msg) = validate_source_branch(&run_repo_root, branch) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+        branch.as_str()
+    } else {
+        "HEAD"
+    };
+
     let (yaml, pipeline_path) = if let Some(ref lib_id) = req.pipeline_id {
         match library_store::pipelines::get_yaml(&state.repo_root, lib_id) {
             Some(y) => {
@@ -1799,6 +1865,12 @@ async fn create_run(
     if let Some(vars) = variables_json {
         run_payload["variables"] = vars;
     }
+    if let Some(ref target) = req.target_repo {
+        run_payload["target_repo"] = serde_json::json!(target);
+    }
+    if let Some(ref branch) = req.source_branch {
+        run_payload["source_branch"] = serde_json::json!(branch);
+    }
 
     let run_started = event_log::Event {
         id: None,
@@ -1815,16 +1887,11 @@ async fn create_run(
         return (StatusCode::INTERNAL_SERVER_ERROR, "event log error").into_response();
     }
 
-    // Create worktree
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(&run_id)
-        .join("worktree");
+    // Create worktree — artifacts live under <target_repo>/.maestro/runs/<run-id>/
+    let worktree_dir = worktree_dir_for_run(&run_repo_root, &run_id);
     let branch_name = format!("maestro/run-{run_id}");
 
-    if let Err(e) = create_worktree(&state.repo_root, &worktree_dir, &branch_name) {
+    if let Err(e) = create_worktree(&run_repo_root, &worktree_dir, &branch_name, source_ref) {
         error!("failed to create worktree: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1833,8 +1900,8 @@ async fn create_run(
             .into_response();
     }
 
-    // Copy pipeline YAML + prompts to run-scoped location
-    if let Err(e) = copy_pipeline_to_run(&state.repo_root, &pipeline_path, &run_id) {
+    // Copy pipeline YAML + prompts to run-scoped location (always in target repo)
+    if let Err(e) = copy_pipeline_to_run(&run_repo_root, &pipeline_path, &run_id) {
         error!("failed to copy pipeline to run dir: {e}");
     }
 
@@ -1956,7 +2023,8 @@ async fn get_run(
 
     match event_log::project(&events) {
         Some(mut run_state) => {
-            augment_run_state_from_disk(&mut run_state, &state.repo_root);
+            let repo_root = effective_repo_root(&state, &run_state);
+            augment_run_state_from_disk(&mut run_state, &repo_root);
             Json(run_state).into_response()
         }
         None => (StatusCode::NOT_FOUND, "run not found").into_response(),
@@ -2011,7 +2079,14 @@ async fn get_run_pipeline(
     State(state): State<Arc<AppState>>,
     AxumPath(run_id): AxumPath<String>,
 ) -> Response {
-    let yaml_path = run_scoped_pipeline_path(&state.repo_root, &run_id);
+    let repo_root = match load_events(&state.db, &run_id).await {
+        Ok(events) => match event_log::project(&events) {
+            Some(run_state) => effective_repo_root(&state, &run_state),
+            None => state.repo_root.clone(),
+        },
+        Err(_) => state.repo_root.clone(),
+    };
+    let yaml_path = run_scoped_pipeline_path(&repo_root, &run_id);
     let yaml = match std::fs::read_to_string(&yaml_path) {
         Ok(y) => y,
         Err(_) => {
@@ -2030,7 +2105,7 @@ async fn get_run_pipeline(
         }
     };
 
-    let prompts_dir = run_scoped_prompts_dir(&state.repo_root, &run_id);
+    let prompts_dir = run_scoped_prompts_dir(&repo_root, &run_id);
     let mut prompts: HashMap<String, String> = HashMap::new();
     if prompts_dir.is_dir() {
         for entry in std::fs::read_dir(&prompts_dir)
@@ -2067,7 +2142,29 @@ async fn save_run_pipeline(
     AxumPath(run_id): AxumPath<String>,
     Json(req): Json<SavePipelineRequest>,
 ) -> Response {
-    let yaml_path = run_scoped_pipeline_path(&state.repo_root, &run_id);
+    let events = match load_events(&state.db, &run_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("load events: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let run_state = match event_log::project(&events) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "run not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    let repo_root = effective_repo_root(&state, &run_state);
+    let yaml_path = run_scoped_pipeline_path(&repo_root, &run_id);
     if !yaml_path.exists() {
         return (StatusCode::NOT_FOUND, "run-scoped pipeline not found").into_response();
     }
@@ -2101,27 +2198,6 @@ async fn save_run_pipeline(
         }
     };
 
-    let events = match load_events(&state.db, &run_id).await {
-        Ok(e) => e,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("load events: {e}") })),
-            )
-                .into_response();
-        }
-    };
-    let run_state = match event_log::project(&events) {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "run not found" })),
-            )
-                .into_response();
-        }
-    };
-
     let rejections =
         mutation_validator::validate_run_mutation(&old_pipeline, &new_pipeline, &run_state);
     if !rejections.is_empty() {
@@ -2145,7 +2221,7 @@ async fn save_run_pipeline(
             .into_response();
     }
 
-    let prompts_dir = run_scoped_prompts_dir(&state.repo_root, &run_id);
+    let prompts_dir = run_scoped_prompts_dir(&repo_root, &run_id);
     for (node_id, content) in &req.prompts {
         let prompt_path = prompts_dir.join(format!("{node_id}.md"));
         if let Some(parent) = prompt_path.parent() {
@@ -2218,11 +2294,7 @@ fn sync_run_pipeline_to_template(
 
 // --- Orphan sweep / reaper ---
 
-async fn run_orphan_sweep(
-    db: &sqlx::SqlitePool,
-    socket: &str,
-    ttl: Duration,
-) -> Result<()> {
+async fn run_orphan_sweep(db: &sqlx::SqlitePool, socket: &str, ttl: Duration) -> Result<()> {
     let run_ids = load_all_run_ids(db).await?;
     let mut run_states: HashMap<String, event_log::RunState> = HashMap::new();
 
@@ -2321,13 +2393,10 @@ async fn node_pane(
     }
 
     if is_latest_iter && node_state.status != event_log::NodeStatus::Pending {
+        let repo_root = effective_repo_root(&state, &run_state);
         let node_type = find_node_type(&run_state, &node_id).unwrap_or("doc-only");
         let working_dir = tmux_session_manager::working_dir_for_node(
-            &state.repo_root,
-            &run_id,
-            &node_id,
-            iter,
-            node_type,
+            &repo_root, &run_id, &node_id, iter, node_type,
         );
 
         if working_dir.exists() {
@@ -2408,14 +2477,10 @@ async fn node_prompt(
         return (StatusCode::NOT_FOUND, "node not found in run").into_response();
     }
 
+    let repo_root = effective_repo_root(&state, &run_state);
     let node_type = find_node_type(&run_state, &node_id).unwrap_or("doc-only");
-    let working_dir = tmux_session_manager::working_dir_for_node(
-        &state.repo_root,
-        &run_id,
-        &node_id,
-        iter,
-        node_type,
-    );
+    let working_dir =
+        tmux_session_manager::working_dir_for_node(&repo_root, &run_id, &node_id, iter, node_type);
 
     let prompt_path = working_dir
         .join(".maestro")
@@ -2462,7 +2527,8 @@ async fn node_io(
         return (StatusCode::NOT_FOUND, "node not found in run").into_response();
     }
 
-    let yaml_path = run_scoped_pipeline_path(&state.repo_root, &run_id);
+    let repo_root = effective_repo_root(&state, &run_state);
+    let yaml_path = run_scoped_pipeline_path(&repo_root, &run_id);
     let pipeline = match std::fs::read_to_string(&yaml_path)
         .ok()
         .and_then(|y| pipeline::parse_pipeline(&y).ok())
@@ -2477,12 +2543,7 @@ async fn node_io(
         }
     };
 
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(&run_id)
-        .join("worktree");
+    let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
 
     let io = node_io_resolver::resolve(&pipeline, &artifacts_dir, &node_id, iter);
@@ -2508,16 +2569,15 @@ async fn artifact(
         }
     };
 
-    if event_log::project(&events).is_none() {
-        return (StatusCode::NOT_FOUND, "run not found").into_response();
-    }
+    let run_state = match event_log::project(&events) {
+        Some(s) => s,
+        None => {
+            return (StatusCode::NOT_FOUND, "run not found").into_response();
+        }
+    };
 
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(&run_id)
-        .join("worktree");
+    let repo_root = effective_repo_root(&state, &run_state);
+    let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
 
     let requested = Path::new(&query.path);
@@ -2784,12 +2844,8 @@ async fn node_done(
         }
     };
 
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(&run_id)
-        .join("worktree");
+    let repo_root = effective_repo_root(&state, &pre_run_state);
+    let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
 
     if node_id == MERGE_RESOLVER_NODE_ID {
         return handle_merge_resolver_done(&state, &run_id, &worktree_dir, &pre_run_state).await;
@@ -2797,7 +2853,7 @@ async fn node_done(
 
     match find_node_type(&pre_run_state, &node_id) {
         Some("code-mutating") | Some("merge") => {
-            let sub_wt_dir = sub_worktree_path(&state.repo_root, &run_id, &node_id, iter);
+            let sub_wt_dir = sub_worktree_path(&repo_root, &run_id, &node_id, iter);
             let sub_branch = sub_worktree_branch(&run_id, &node_id, iter);
 
             let _lock = state.merge_lock.lock().await;
@@ -2917,7 +2973,7 @@ async fn node_done(
     }
 
     let pipeline_path =
-        resolve_run_pipeline_path(&state.repo_root, &run_id, &pre_run_state.pipeline_name);
+        resolve_run_pipeline_path(&repo_root, &run_id, &pre_run_state.pipeline_name);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
     if let Some(resp) = check_output_validation_with_retry(
         &state,
@@ -3091,19 +3147,16 @@ async fn run_command(
                 }
             }
 
+            let empty_run_state = event_log::RunState::new(run_id.clone(), String::new());
+            let rs_ref = run_state.as_ref().unwrap_or(&empty_run_state);
+            let repo_root = effective_repo_root(&state, rs_ref);
             let pipeline_name = run_state
                 .as_ref()
                 .map(|rs| rs.pipeline_name.as_str())
                 .unwrap_or("");
-            let pipeline_path = resolve_run_pipeline_path(&state.repo_root, &run_id, pipeline_name);
-            let artifacts_dir = state
-                .repo_root
-                .join(".maestro")
-                .join("runs")
-                .join(&run_id)
-                .join("worktree/.maestro/artifacts");
-            let empty_run_state = event_log::RunState::new(run_id.clone(), String::new());
-            let rs_ref = run_state.as_ref().unwrap_or(&empty_run_state);
+            let pipeline_path = resolve_run_pipeline_path(&repo_root, &run_id, pipeline_name);
+            let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
+            let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
             if let Some(resp) = check_output_validation_with_retry(
                 &state,
                 &pipeline_path,
@@ -3404,12 +3457,13 @@ async fn run_command(
                 }
             };
 
+            let repo_root = effective_repo_root(&state, &run_state);
             let pipeline_path = {
-                let run_scoped = run_scoped_pipeline_path(&state.repo_root, &run_id);
+                let run_scoped = run_scoped_pipeline_path(&repo_root, &run_id);
                 if run_scoped.exists() {
                     run_scoped
                 } else {
-                    resolve_pipeline_path(&state.repo_root, &run_state.pipeline_name)
+                    resolve_pipeline_path(&repo_root, &run_state.pipeline_name)
                 }
             };
             let Ok(yaml) = std::fs::read_to_string(&pipeline_path) else {
@@ -3422,12 +3476,7 @@ async fn run_command(
 
             let pipeline = parse_result.pipeline;
             if let Some(node) = pipeline.nodes.iter().find(|n| n.id == node_id) {
-                let worktree_dir = state
-                    .repo_root
-                    .join(".maestro")
-                    .join("runs")
-                    .join(&run_id)
-                    .join("worktree");
+                let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
                 let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
                 let resolved_vars = resolve_run_variables(&pipeline, &events);
 
@@ -3438,6 +3487,7 @@ async fn run_command(
                     worktree_dir: &worktree_dir,
                     artifacts_dir: &artifacts_dir,
                     resolved_vars: &resolved_vars,
+                    repo_root: &repo_root,
                 };
 
                 spawn_node(&state, &spawn_ctx, node, iter).await;
@@ -3475,12 +3525,14 @@ async fn run_command(
                     .into_response();
             }
 
-            let worktree_dir = state
-                .repo_root
-                .join(".maestro")
-                .join("runs")
-                .join(&run_id)
-                .join("worktree");
+            let repo_root = match load_events(&state.db, &run_id).await {
+                Ok(events) => match event_log::project(&events) {
+                    Some(run_state) => effective_repo_root(&state, &run_state),
+                    None => state.repo_root.clone(),
+                },
+                Err(_) => state.repo_root.clone(),
+            };
+            let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
             let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
             let full_path = artifacts_dir.join(requested);
 
@@ -3545,12 +3597,13 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
         None => return,
     };
 
+    let repo_root = effective_repo_root(state, &run_state);
     let pipeline_path = {
-        let run_scoped = run_scoped_pipeline_path(&state.repo_root, run_id);
+        let run_scoped = run_scoped_pipeline_path(&repo_root, run_id);
         if run_scoped.exists() {
             run_scoped
         } else {
-            resolve_pipeline_path(&state.repo_root, &run_state.pipeline_name)
+            resolve_pipeline_path(&repo_root, &run_state.pipeline_name)
         }
     };
     let Ok(yaml) = std::fs::read_to_string(&pipeline_path) else {
@@ -3561,12 +3614,7 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
     };
 
     let pipeline = parse_result.pipeline;
-    let worktree_dir = state
-        .repo_root
-        .join(".maestro")
-        .join("runs")
-        .join(run_id)
-        .join("worktree");
+    let worktree_dir = worktree_dir_for_run(&repo_root, run_id);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
     let mut resolved_vars = resolve_run_variables(&pipeline, &events);
 
@@ -3599,6 +3647,7 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
         worktree_dir: &worktree_dir,
         artifacts_dir: &artifacts_dir,
         resolved_vars: &resolved_vars,
+        repo_root: &repo_root,
     };
 
     for completed_node_id in &completed_node_ids {
@@ -3709,6 +3758,7 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
         worktree_dir: &worktree_dir,
         artifacts_dir: &artifacts_dir,
         resolved_vars: &fresh_resolved_vars,
+        repo_root: &repo_root,
     };
 
     // Check loop body completion for all loop nodes
@@ -4045,7 +4095,8 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
     let mgr_session = tmux_session_manager::manager_session_name(run_id);
     tmux_session_manager::kill(&socket, &mgr_session);
 
-    let run_dir = state.repo_root.join(".maestro").join("runs").join(run_id);
+    let repo_root = effective_repo_root(state, &run_state);
+    let run_dir = repo_root.join(".maestro").join("runs").join(run_id);
 
     // Remove sub-worktrees (nodes/) before the main worktree
     let nodes_dir = run_dir.join("nodes");
@@ -4065,7 +4116,7 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
                     let _ = std::process::Command::new("git")
                         .args(["worktree", "remove", "--force"])
                         .arg(&sub_wt)
-                        .current_dir(&state.repo_root)
+                        .current_dir(&repo_root)
                         .output();
                 }
             }
@@ -4077,7 +4128,7 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
         let output = std::process::Command::new("git")
             .args(["worktree", "remove", "--force"])
             .arg(&worktree_dir)
-            .current_dir(&state.repo_root)
+            .current_dir(&repo_root)
             .output();
         if let Ok(o) = output {
             if !o.status.success() {
@@ -4096,7 +4147,7 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
     ] {
         let branch_output = std::process::Command::new("git")
             .args(["branch", "--list", &pattern])
-            .current_dir(&state.repo_root)
+            .current_dir(&repo_root)
             .output();
         if let Ok(o) = branch_output {
             let branches = String::from_utf8_lossy(&o.stdout);
@@ -4105,7 +4156,7 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
                 if !branch.is_empty() {
                     let _ = std::process::Command::new("git")
                         .args(["branch", "-D", branch])
-                        .current_dir(&state.repo_root)
+                        .current_dir(&repo_root)
                         .output();
                 }
             }
@@ -4274,6 +4325,89 @@ fn unix_timestamp_secs() -> String {
     let secs = d.as_secs();
     let millis = d.subsec_millis();
     format!("{secs}.{millis:03}")
+}
+
+// --- Target repo validation ---
+
+fn validate_target_repo(path: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(path);
+    if !p.is_absolute() {
+        return Err("target_repo must be an absolute path".into());
+    }
+    if !p.is_dir() {
+        return Err(format!(
+            "target_repo does not exist or is not a directory: {path}"
+        ));
+    }
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&p)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => Ok(p),
+        _ => Err(format!("target_repo is not a git repository: {path}")),
+    }
+}
+
+fn validate_source_branch(repo: &Path, branch: &str) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .args(["branch", "--list", branch])
+        .current_dir(repo)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.trim().is_empty() {
+                Err(format!(
+                    "branch '{branch}' does not exist in {}",
+                    repo.display()
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            Err(format!("git branch --list failed: {stderr}"))
+        }
+        Err(e) => Err(format!("failed to run git: {e}")),
+    }
+}
+
+fn list_branches(repo: &Path) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(repo)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            Ok(stdout.lines().map(|l| l.to_string()).collect())
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            Err(format!("git branch failed: {stderr}"))
+        }
+        Err(e) => Err(format!("failed to run git: {e}")),
+    }
+}
+
+/// Returns the effective repo root for a run — the run's `target_repo` if set,
+/// otherwise the daemon's repo_root.
+fn effective_repo_root<'a>(state: &'a AppState, run_state: &'a event_log::RunState) -> PathBuf {
+    run_state
+        .target_repo
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.repo_root.clone())
+}
+
+fn worktree_dir_for_run(repo_root: &Path, run_id: &str) -> PathBuf {
+    repo_root
+        .join(".maestro")
+        .join("runs")
+        .join(run_id)
+        .join("worktree")
 }
 
 // --- Pipeline path resolution ---
@@ -4734,13 +4868,14 @@ fn create_worktree(
     repo_root: &std::path::Path,
     worktree_dir: &std::path::Path,
     branch_name: &str,
+    source_ref: &str,
 ) -> Result<()> {
     std::fs::create_dir_all(worktree_dir.parent().unwrap_or(std::path::Path::new(".")))?;
 
     let output = std::process::Command::new("git")
         .args(["worktree", "add", "-b", branch_name])
         .arg(worktree_dir)
-        .arg("HEAD")
+        .arg(source_ref)
         .current_dir(repo_root)
         .output()
         .context("failed to run git worktree add")?;
@@ -5376,7 +5511,7 @@ mod tests {
         // Create real worktrees on disk (simulating what the daemon would do)
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
         let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
@@ -5825,7 +5960,7 @@ mod tests {
         let run_id = "test-cm-run";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
         let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
@@ -5853,7 +5988,7 @@ mod tests {
         let run_id = "test-cm-survive";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
         let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
@@ -5893,7 +6028,7 @@ mod tests {
         let run_id = "test-conflict";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Create two sub-worktrees that will conflict
         let sub_wt_1 = sub_worktree_path(repo, run_id, "impl-1", 1);
@@ -5928,7 +6063,7 @@ mod tests {
         let run_id = "test-do-clean";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         assert!(!worktree_has_tracked_changes(&wt_dir).unwrap());
     }
@@ -5942,7 +6077,7 @@ mod tests {
         let run_id = "test-do-dirty";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Modify a tracked file
         std::fs::write(wt_dir.join("README.md"), "# modified\n").unwrap();
@@ -5959,7 +6094,7 @@ mod tests {
         let run_id = "test-do-untracked";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Add an untracked file (like artifacts)
         let artifacts_dir = wt_dir.join(".maestro/artifacts/planner/iter-1");
@@ -7107,7 +7242,7 @@ mod tests {
         // Create real worktrees
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
         let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
@@ -8124,7 +8259,7 @@ mod tests {
         let run_id = "test-pending";
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let sub_wt_1 = sub_worktree_path(repo, run_id, "impl-1", 1);
         let sub_branch_1 = sub_worktree_branch(run_id, "impl-1", 1);
@@ -8428,5 +8563,194 @@ edges: []
             std::env::set_var("HOME", p);
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- Multi-repo run creation tests (issue #114) ---
+
+    #[test]
+    fn validate_target_repo_rejects_relative_path() {
+        let result = validate_target_repo("relative/path");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("absolute path"));
+    }
+
+    #[test]
+    fn validate_target_repo_rejects_nonexistent_path() {
+        let result = validate_target_repo("/nonexistent/path/that/does/not/exist");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_target_repo_rejects_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = validate_target_repo(tmp.path().to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a git repository"));
+    }
+
+    #[test]
+    fn validate_target_repo_accepts_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+        let result = validate_target_repo(tmp.path().to_str().unwrap());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_source_branch_rejects_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+        let result = validate_source_branch(tmp.path(), "nonexistent-branch");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_source_branch_accepts_existing_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+        // init_test_repo creates a default branch, find its name
+        let output = std::process::Command::new("git")
+            .args(["branch", "--format=%(refname:short)"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert!(!branch.is_empty());
+        let result = validate_source_branch(tmp.path(), &branch);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_branches_returns_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_test_repo(tmp.path());
+        let result = list_branches(tmp.path());
+        assert!(result.is_ok());
+        let branches = result.unwrap();
+        assert!(!branches.is_empty());
+    }
+
+    #[test]
+    fn create_worktree_with_source_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_test_repo(repo);
+
+        // Create a feature branch with a file
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap()
+        };
+        run(&["checkout", "-b", "feature-branch"]);
+        std::fs::write(repo.join("feature.txt"), "feature content\n").unwrap();
+        run(&["add", "feature.txt"]);
+        run(&["commit", "-m", "add feature"]);
+        // Go back to default branch
+        let default_out = std::process::Command::new("git")
+            .args(["branch", "--format=%(refname:short)"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let branch_list = String::from_utf8_lossy(&default_out.stdout).to_string();
+        let default_branch = branch_list
+            .trim()
+            .lines()
+            .find(|b| *b != "feature-branch")
+            .unwrap_or("master");
+        run(&["checkout", default_branch]);
+
+        // Create worktree from feature-branch
+        let wt_dir = repo
+            .join(".maestro")
+            .join("runs")
+            .join("test-run")
+            .join("worktree");
+        create_worktree(repo, &wt_dir, "maestro/run-test-run", "feature-branch").unwrap();
+
+        // The worktree should contain feature.txt from the feature branch
+        assert!(wt_dir.join("feature.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(wt_dir.join("feature.txt")).unwrap(),
+            "feature content\n"
+        );
+    }
+
+    #[test]
+    fn worktree_dir_for_run_follows_canonical_schema() {
+        let path =
+            worktree_dir_for_run(std::path::Path::new("/target-repo"), "20260101-120000-abc");
+        assert_eq!(
+            path,
+            PathBuf::from("/target-repo/.maestro/runs/20260101-120000-abc/worktree")
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_repo_root_uses_target_repo_when_set() {
+        let state = test_state().await;
+
+        let mut run_state = event_log::RunState::new("test".into(), "pipe".into());
+
+        // Without target_repo — falls back to daemon root
+        let default_root = effective_repo_root(&state, &run_state);
+        assert_eq!(default_root, state.repo_root);
+
+        // With target_repo — uses it
+        run_state.target_repo = Some("/custom/repo".into());
+        assert_eq!(
+            effective_repo_root(&state, &run_state),
+            PathBuf::from("/custom/repo")
+        );
+    }
+
+    #[test]
+    fn run_state_projection_includes_target_repo() {
+        let events = vec![event_log::Event {
+            id: None,
+            run_id: "test-run".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "pipeline_name": "test-pipe",
+                "input": "hello",
+                "target_repo": "/custom/repo",
+                "source_branch": "feature-branch",
+                "edges": [],
+                "node_defs": [],
+            })),
+        }];
+
+        let state = event_log::project(&events).unwrap();
+        assert_eq!(state.target_repo.as_deref(), Some("/custom/repo"));
+        assert_eq!(state.source_branch.as_deref(), Some("feature-branch"));
+    }
+
+    #[test]
+    fn run_state_projection_no_target_repo_when_absent() {
+        let events = vec![event_log::Event {
+            id: None,
+            run_id: "test-run".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "pipeline_name": "test-pipe",
+                "input": "hello",
+                "edges": [],
+                "node_defs": [],
+            })),
+        }];
+
+        let state = event_log::project(&events).unwrap();
+        assert!(state.target_repo.is_none());
+        assert!(state.source_branch.is_none());
     }
 }
