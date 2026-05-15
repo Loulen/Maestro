@@ -416,6 +416,7 @@ export default function App() {
                   selectedNodeId={selectedNodeId}
                   infoOpen={infoPanelOpen}
                   onToggleInfo={handleToggleInfo}
+                  onRetryAll={(newRunId) => setSelectedRunId(newRunId)}
                 />
               </div>
             ) : (

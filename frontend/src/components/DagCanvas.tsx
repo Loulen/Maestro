@@ -13,9 +13,9 @@ import {
   MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Trash2, Terminal, Info, Play, Square } from "lucide-react";
+import { Trash2, Terminal, Info, Play, Square, Pause, RotateCcw } from "lucide-react";
 import { isLiveRun, type NodeStatus, type NodeType, type PipelineDef, type PipelineDetail, type RunState, type RunStatus, type PortBrief } from "../types";
-import { cleanupRun, attachManager, fetchRunPipeline, saveRunPipeline } from "../api";
+import { cleanupRun, attachManager, fetchRunPipeline, saveRunPipeline, pauseRun, resumeRun, retryAll } from "../api";
 import { serializePipeline } from "../stores/editStore";
 
 export const START_NODE_OFFSET_X_PX = 180;
@@ -292,6 +292,7 @@ interface Props {
   selectedNodeId: string | null;
   infoOpen?: boolean;
   onToggleInfo?: () => void;
+  onRetryAll?: (newRunId: string) => void;
 }
 
 const START_NODE_OFFSET_X = START_NODE_OFFSET_X_PX;
@@ -691,6 +692,7 @@ function DagCanvasInner({
   selectedNodeId,
   infoOpen,
   onToggleInfo,
+  onRetryAll,
 }: Props) {
   const [confirmCleanup, setConfirmCleanup] = useState(false);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -851,6 +853,52 @@ function DagCanvasInner({
               Open Manager
             </button>
           </Tooltip>
+          {(run.status === "running" || run.status === "awaiting_user") && (
+            <Tooltip content="Pause the run — running nodes finish, no new nodes spawn">
+              <button
+                data-testid="btn-pause"
+                onClick={() => pauseRun(run.run_id).catch(() => {})}
+                className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg-2"
+                style={{ fontSize: "10px" }}
+              >
+                <Pause size={10} />
+                Pause
+              </button>
+            </Tooltip>
+          )}
+          {run.status === "paused" && (
+            <Tooltip content="Resume the run — clear pause gate and continue scheduling">
+              <button
+                data-testid="btn-resume"
+                onClick={() => resumeRun(run.run_id).catch(() => {})}
+                className="flex cursor-pointer items-center gap-1 rounded border border-acc bg-acc/20 px-2 py-1 text-acc transition-colors hover:bg-acc/30"
+                style={{ fontSize: "10px" }}
+              >
+                <Play size={10} />
+                Resume
+              </button>
+            </Tooltip>
+          )}
+          {isTerminal && (
+            <Tooltip content="Archive this run and start a new one with the same pipeline and input">
+              <button
+                data-testid="btn-retry-all"
+                onClick={async () => {
+                  try {
+                    const { run_id } = await retryAll(run.run_id);
+                    onRetryAll?.(run_id);
+                  } catch {
+                    // event-driven refresh handles state
+                  }
+                }}
+                className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg-2"
+                style={{ fontSize: "10px" }}
+              >
+                <RotateCcw size={10} />
+                Retry All
+              </button>
+            </Tooltip>
+          )}
           {canCleanup && (
             <Tooltip
               content={

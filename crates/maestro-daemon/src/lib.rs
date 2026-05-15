@@ -3891,18 +3891,94 @@ async fn run_command(
             info!("extend_cycle: node {node_id} +{additional_iter} in run {run_id}");
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
-        "resume_run" => {
-            let cmd_event = event_log::Event {
+        "pause_run" => {
+            let events = match load_events(&state.db, &run_id).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            };
+            let run_state = match event_log::project(&events) {
+                Some(s) => s,
+                None => {
+                    return (StatusCode::NOT_FOUND, "run not found").into_response();
+                }
+            };
+
+            if run_state.status != event_log::RunStatus::Running
+                && run_state.status != event_log::RunStatus::AwaitingUser
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!("cannot pause run in {:?} state", run_state.status)
+                    })),
+                )
+                    .into_response();
+            }
+
+            let pause_event = event_log::Event {
                 id: None,
                 run_id: run_id.clone(),
                 ts: event_log::now_iso(),
-                kind: event_log::EventKind::CommandIssued,
+                kind: event_log::EventKind::RunPaused,
                 node_id: None,
                 iter: None,
-                payload: Some(serde_json::json!({ "command": "resume_run" })),
+                payload: None,
             };
-            if let Err(e) = append_event(&state, &cmd_event).await {
+            if let Err(e) = append_event(&state, &pause_event).await {
                 return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+            }
+
+            info!("pause_run: run {run_id}");
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        "resume_run" => {
+            let events = match load_events(&state.db, &run_id).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            };
+            let run_state = match event_log::project(&events) {
+                Some(s) => s,
+                None => {
+                    return (StatusCode::NOT_FOUND, "run not found").into_response();
+                }
+            };
+
+            if run_state.status == event_log::RunStatus::Paused {
+                let resume_event = event_log::Event {
+                    id: None,
+                    run_id: run_id.clone(),
+                    ts: event_log::now_iso(),
+                    kind: event_log::EventKind::RunResumed,
+                    node_id: None,
+                    iter: None,
+                    payload: None,
+                };
+                if let Err(e) = append_event(&state, &resume_event).await {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            } else if run_state.status == event_log::RunStatus::Halted
+                || run_state.status == event_log::RunStatus::Failed
+            {
+                let cmd_event = event_log::Event {
+                    id: None,
+                    run_id: run_id.clone(),
+                    ts: event_log::now_iso(),
+                    kind: event_log::EventKind::CommandIssued,
+                    node_id: None,
+                    iter: None,
+                    payload: Some(serde_json::json!({ "command": "resume_run" })),
+                };
+                if let Err(e) = append_event(&state, &cmd_event).await {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
             }
 
             re_evaluate_after_command(&state, &run_id).await;
@@ -4139,6 +4215,76 @@ async fn run_command(
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         "cleanup_run" => cleanup_run(&state, &run_id).await,
+        "retry_all" => {
+            let events = match load_events(&state.db, &run_id).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                        .into_response();
+                }
+            };
+            let run_state = match event_log::project(&events) {
+                Some(s) => s,
+                None => {
+                    return (StatusCode::NOT_FOUND, "run not found").into_response();
+                }
+            };
+
+            let is_terminal = matches!(
+                run_state.status,
+                event_log::RunStatus::Completed
+                    | event_log::RunStatus::Failed
+                    | event_log::RunStatus::Halted
+            );
+            if !is_terminal {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!("retry_all requires a terminal state, run is {:?}", run_state.status)
+                    })),
+                )
+                    .into_response();
+            }
+
+            let run_started_event = events
+                .iter()
+                .find(|e| e.kind == event_log::EventKind::RunStarted);
+            let run_started_payload = run_started_event.and_then(|e| e.payload.as_ref());
+
+            let pipeline_name = run_state.pipeline_name.clone();
+            let input = run_state.input.clone().unwrap_or_default();
+            let variables: HashMap<String, serde_yaml::Value> = run_started_payload
+                .and_then(|p| p.get("variables"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let target_repo = run_state.target_repo.clone();
+            let source_branch = run_state.source_branch.clone();
+
+            // Archive the current run (cleanup disk resources, keep events)
+            let archive_resp = cleanup_run(&state, &run_id).await;
+            let archive_status = archive_resp.into_response().status();
+            if !archive_status.is_success() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "failed to archive original run" })),
+                )
+                    .into_response();
+            }
+
+            let new_run_req = CreateRunRequest {
+                pipeline: pipeline_name,
+                input,
+                variables,
+                pipeline_id: None,
+                target_repo,
+                source_branch,
+                name: None,
+            };
+            let new_run_resp = create_run_core(&state, new_run_req, Vec::new()).await;
+
+            info!("retry_all: archived run {run_id}, created new run");
+            new_run_resp
+        }
         other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": format!("unknown command: {other}") })),
@@ -10018,5 +10164,237 @@ edges: []
             std::fs::read(input_dir.join("screenshot.png")).unwrap(),
             vec![0x89, 0x50, 0x4E, 0x47]
         );
+    }
+
+    // --- Pause/Resume/Retry-all tests ---
+
+    #[tokio::test]
+    async fn pause_run_sets_paused_status() {
+        let state = test_state().await;
+
+        let run_event = event_log::Event {
+            id: None,
+            run_id: "pause-test".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "test-pipe" })),
+        };
+        append_event(&state, &run_event).await.unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/pause-test/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "kind": "pause_run" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = load_events(&state.db, "pause-test").await.unwrap();
+        let run_state = event_log::project(&events).unwrap();
+        assert_eq!(run_state.status, event_log::RunStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn pause_run_rejected_on_terminal_state() {
+        let state = test_state().await;
+
+        let run_event = event_log::Event {
+            id: None,
+            run_id: "pause-completed".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "test-pipe" })),
+        };
+        append_event(&state, &run_event).await.unwrap();
+
+        let completed_event = event_log::Event {
+            id: None,
+            run_id: "pause-completed".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunCompleted,
+            node_id: None,
+            iter: None,
+            payload: None,
+        };
+        append_event(&state, &completed_event).await.unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/pause-completed/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "kind": "pause_run" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn resume_run_from_paused_emits_run_resumed() {
+        let state = test_state().await;
+
+        let run_event = event_log::Event {
+            id: None,
+            run_id: "resume-paused".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "test-pipe" })),
+        };
+        append_event(&state, &run_event).await.unwrap();
+
+        let pause_event = event_log::Event {
+            id: None,
+            run_id: "resume-paused".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunPaused,
+            node_id: None,
+            iter: None,
+            payload: None,
+        };
+        append_event(&state, &pause_event).await.unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/resume-paused/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "kind": "resume_run" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = load_events(&state.db, "resume-paused").await.unwrap();
+        let run_state = event_log::project(&events).unwrap();
+        assert_eq!(run_state.status, event_log::RunStatus::Running);
+
+        let has_resumed = events
+            .iter()
+            .any(|e| e.kind == event_log::EventKind::RunResumed);
+        assert!(has_resumed, "should have emitted RunResumed event");
+    }
+
+    #[tokio::test]
+    async fn retry_all_archives_and_creates_new_run() {
+        let state = test_state().await;
+
+        let run_event = event_log::Event {
+            id: None,
+            run_id: "retry-test".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "pipeline_name": "retry-pipe",
+                "input": "do the thing",
+                "edges": [],
+                "node_defs": [],
+            })),
+        };
+        append_event(&state, &run_event).await.unwrap();
+
+        let fail_event = event_log::Event {
+            id: None,
+            run_id: "retry-test".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunFailed,
+            node_id: None,
+            iter: None,
+            payload: None,
+        };
+        append_event(&state, &fail_event).await.unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/retry-test/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "kind": "retry_all" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.get("run_id").is_some(), "should return new run_id");
+
+        let old_events = load_events(&state.db, "retry-test").await.unwrap();
+        let old_state = event_log::project(&old_events).unwrap();
+        assert_eq!(old_state.status, event_log::RunStatus::Archived);
+
+        let new_run_id = json["run_id"].as_str().unwrap();
+        let new_events = load_events(&state.db, new_run_id).await.unwrap();
+        let new_state = event_log::project(&new_events).unwrap();
+        assert_eq!(new_state.status, event_log::RunStatus::Running);
+        assert_eq!(new_state.pipeline_name, "retry-pipe");
+        assert_eq!(new_state.input.as_deref(), Some("do the thing"));
+    }
+
+    #[tokio::test]
+    async fn retry_all_rejected_on_running_state() {
+        let state = test_state().await;
+
+        let run_event = event_log::Event {
+            id: None,
+            run_id: "retry-running".into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({ "pipeline_name": "test-pipe" })),
+        };
+        append_event(&state, &run_event).await.unwrap();
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/retry-running/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "kind": "retry_all" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

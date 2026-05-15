@@ -261,6 +261,34 @@ export async function restartNode(
   if (!resp.ok) throw new Error(`restart_node failed: ${resp.status}`);
 }
 
+export async function pauseRun(runId: string): Promise<void> {
+  const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/commands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "pause_run" }),
+  });
+  if (!resp.ok) throw new Error(`pause_run failed: ${resp.status}`);
+}
+
+export async function resumeRun(runId: string): Promise<void> {
+  const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/commands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "resume_run" }),
+  });
+  if (!resp.ok) throw new Error(`resume_run failed: ${resp.status}`);
+}
+
+export async function retryAll(runId: string): Promise<CreateRunResponse> {
+  const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/commands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "retry_all" }),
+  });
+  if (!resp.ok) throw new Error(`retry_all failed: ${resp.status}`);
+  return resp.json();
+}
+
 export async function cleanupRun(runId: string): Promise<void> {
   const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/commands`, {
     method: "POST",
