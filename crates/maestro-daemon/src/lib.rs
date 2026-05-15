@@ -3906,9 +3906,10 @@ async fn run_command(
                 }
             };
 
-            if run_state.status != event_log::RunStatus::Running
-                && run_state.status != event_log::RunStatus::AwaitingUser
-            {
+            if !matches!(
+                run_state.status,
+                event_log::RunStatus::Running | event_log::RunStatus::AwaitingUser
+            ) {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({
@@ -3949,36 +3950,38 @@ async fn run_command(
                 }
             };
 
-            if run_state.status == event_log::RunStatus::Paused {
-                let resume_event = event_log::Event {
-                    id: None,
-                    run_id: run_id.clone(),
-                    ts: event_log::now_iso(),
-                    kind: event_log::EventKind::RunResumed,
-                    node_id: None,
-                    iter: None,
-                    payload: None,
-                };
-                if let Err(e) = append_event(&state, &resume_event).await {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
-                        .into_response();
+            match run_state.status {
+                event_log::RunStatus::Paused => {
+                    let resume_event = event_log::Event {
+                        id: None,
+                        run_id: run_id.clone(),
+                        ts: event_log::now_iso(),
+                        kind: event_log::EventKind::RunResumed,
+                        node_id: None,
+                        iter: None,
+                        payload: None,
+                    };
+                    if let Err(e) = append_event(&state, &resume_event).await {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                            .into_response();
+                    }
                 }
-            } else if run_state.status == event_log::RunStatus::Halted
-                || run_state.status == event_log::RunStatus::Failed
-            {
-                let cmd_event = event_log::Event {
-                    id: None,
-                    run_id: run_id.clone(),
-                    ts: event_log::now_iso(),
-                    kind: event_log::EventKind::CommandIssued,
-                    node_id: None,
-                    iter: None,
-                    payload: Some(serde_json::json!({ "command": "resume_run" })),
-                };
-                if let Err(e) = append_event(&state, &cmd_event).await {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
-                        .into_response();
+                event_log::RunStatus::Halted | event_log::RunStatus::Failed => {
+                    let cmd_event = event_log::Event {
+                        id: None,
+                        run_id: run_id.clone(),
+                        ts: event_log::now_iso(),
+                        kind: event_log::EventKind::CommandIssued,
+                        node_id: None,
+                        iter: None,
+                        payload: Some(serde_json::json!({ "command": "resume_run" })),
+                    };
+                    if let Err(e) = append_event(&state, &cmd_event).await {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}"))
+                            .into_response();
+                    }
                 }
+                _ => {}
             }
 
             re_evaluate_after_command(&state, &run_id).await;
