@@ -121,48 +121,22 @@ pub fn detection_events(
     node_id: &str,
     iter: i64,
 ) -> Vec<event_log::Event> {
-    match detection {
-        Detection::Ok => vec![],
-        Detection::SessionDied => {
-            vec![event_log::Event {
-                id: None,
-                run_id: run_id.to_string(),
-                ts: event_log::now_iso(),
-                kind: EventKind::NodeFailed,
-                node_id: Some(node_id.to_string()),
-                iter: Some(iter),
-                payload: Some(serde_json::json!({
-                    "reason": "session_died",
-                })),
-            }]
-        }
-        Detection::AutoComplete => {
-            vec![event_log::Event {
-                id: None,
-                run_id: run_id.to_string(),
-                ts: event_log::now_iso(),
-                kind: EventKind::NodeAutoCompleted,
-                node_id: Some(node_id.to_string()),
-                iter: Some(iter),
-                payload: Some(serde_json::json!({
-                    "reason": "auto_completed_idle_valid",
-                })),
-            }]
-        }
-        Detection::Stale => {
-            vec![event_log::Event {
-                id: None,
-                run_id: run_id.to_string(),
-                ts: event_log::now_iso(),
-                kind: EventKind::NodeStale,
-                node_id: Some(node_id.to_string()),
-                iter: Some(iter),
-                payload: Some(serde_json::json!({
-                    "reason": "idle_outputs_incomplete",
-                })),
-            }]
-        }
-    }
+    let (kind, reason) = match detection {
+        Detection::Ok => return vec![],
+        Detection::SessionDied => (EventKind::NodeFailed, "session_died"),
+        Detection::AutoComplete => (EventKind::NodeAutoCompleted, "auto_completed_idle_valid"),
+        Detection::Stale => (EventKind::NodeStale, "idle_outputs_incomplete"),
+    };
+
+    vec![event_log::Event {
+        id: None,
+        run_id: run_id.to_string(),
+        ts: event_log::now_iso(),
+        kind,
+        node_id: Some(node_id.to_string()),
+        iter: Some(iter),
+        payload: Some(serde_json::json!({ "reason": reason })),
+    }]
 }
 
 /// Collect all running nodes from a RunState.
