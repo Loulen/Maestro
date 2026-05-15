@@ -21,6 +21,8 @@ const tmuxUnmountCount = { current: 0 };
 
 const killNodeMock = vi.fn().mockResolvedValue(undefined);
 const restartNodeMock = vi.fn().mockResolvedValue(undefined);
+const stopNodeMock = vi.fn().mockResolvedValue(undefined);
+const retryNodeMock = vi.fn().mockResolvedValue({ ok: true, iter: 2, invalidated: [] });
 
 vi.mock("../api", () => ({
   fetchPrompt: (...args: unknown[]) => fetchPromptMock(...args),
@@ -28,6 +30,9 @@ vi.mock("../api", () => ({
   markNodeDone: vi.fn(),
   killNode: (...args: unknown[]) => killNodeMock(...args),
   restartNode: (...args: unknown[]) => restartNodeMock(...args),
+  stopNode: (...args: unknown[]) => stopNodeMock(...args),
+  retryNode: (...args: unknown[]) => retryNodeMock(...args),
+  startNode: vi.fn(),
   attachSession: vi.fn(),
   artifactUrl: (runId: string, path: string) => `/runs/${runId}/artifact?path=${encodeURIComponent(path)}`,
 }));
@@ -96,6 +101,8 @@ describe("NodeDetailPanel", () => {
     fetchNodeIOMock.mockClear();
     killNodeMock.mockClear();
     restartNodeMock.mockClear();
+    stopNodeMock.mockClear();
+    retryNodeMock.mockClear();
     tmuxMountCount.current = 0;
     tmuxUnmountCount.current = 0;
   });
@@ -682,6 +689,144 @@ describe("NodeDetailPanel", () => {
       if (failedBanner) {
         expect(failedBanner.className).toContain("st-failed");
       }
+    });
+  });
+
+  describe("Node control buttons (issue #124)", () => {
+    it("shows enabled Stop button when node is running", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "running" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const stopBtn = screen.getByTestId("stop-btn");
+      expect(stopBtn).toBeInTheDocument();
+      expect(stopBtn).not.toBeDisabled();
+      expect(stopBtn).toHaveTextContent("Stop");
+    });
+
+    it("shows disabled Stop button when node is completed", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "completed" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const stopBtn = screen.getByTestId("stop-btn");
+      expect(stopBtn).toBeDisabled();
+    });
+
+    it("shows disabled Stop button when node is failed", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "failed" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const stopBtn = screen.getByTestId("stop-btn");
+      expect(stopBtn).toBeDisabled();
+    });
+
+    it("shows disabled Stop button when node is stopped", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stopped" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const stopBtn = screen.getByTestId("stop-btn");
+      expect(stopBtn).toBeDisabled();
+    });
+
+    it("does not show controls when node is pending", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "pending" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.queryByTestId("node-controls")).not.toBeInTheDocument();
+    });
+
+    it("does not show controls for archived runs", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "running" })} runId="run-1" isArchived />
+        </TooltipProvider>,
+      );
+      expect(screen.queryByTestId("node-controls")).not.toBeInTheDocument();
+    });
+
+    it("shows Retry button with Retry label for running node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "running" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const retryBtn = screen.getByTestId("retry-btn");
+      expect(retryBtn).toHaveTextContent("Retry");
+    });
+
+    it("shows Play label for failed node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "failed" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const playBtn = screen.getByTestId("play-retry-btn");
+      expect(playBtn).toHaveTextContent("Play");
+    });
+
+    it("shows Play label for stopped node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stopped" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const playBtn = screen.getByTestId("play-retry-btn");
+      expect(playBtn).toHaveTextContent("Play");
+    });
+
+    it("shows Retry label for completed node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "completed" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const playBtn = screen.getByTestId("play-retry-btn");
+      expect(playBtn).toHaveTextContent("Retry");
+    });
+
+    it("Stop button calls stopNode API", async () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "running" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("stop-btn"));
+      });
+      expect(stopNodeMock).toHaveBeenCalledWith("run-1", "test-node");
+    });
+
+    it("Retry button on running node calls retryNode API", async () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "running" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("retry-btn"));
+      });
+      expect(retryNodeMock).toHaveBeenCalledWith("run-1", "test-node");
+    });
+
+    it("Play button on failed node calls retryNode API", async () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "failed" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("play-retry-btn"));
+      });
+      expect(retryNodeMock).toHaveBeenCalledWith("run-1", "test-node");
     });
   });
 });

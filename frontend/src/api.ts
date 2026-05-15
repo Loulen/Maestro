@@ -261,6 +261,64 @@ export async function restartNode(
   if (!resp.ok) throw new Error(`restart_node failed: ${resp.status}`);
 }
 
+// --- Per-node Play / Stop / Retry (issue #124) ---
+
+export interface StartNodeResult {
+  ok: boolean;
+  iter?: number;
+  already_running?: boolean;
+}
+
+export async function startNode(
+  runId: string,
+  nodeId: string,
+): Promise<StartNodeResult> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/start`,
+    { method: "POST" },
+  );
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(body?.error ?? `start_node failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function stopNode(
+  runId: string,
+  nodeId: string,
+): Promise<void> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/stop`,
+    { method: "POST" },
+  );
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(body?.error ?? `stop_node failed: ${resp.status}`);
+  }
+}
+
+export interface RetryNodeResult {
+  ok: boolean;
+  iter: number;
+  invalidated: string[];
+}
+
+export async function retryNode(
+  runId: string,
+  nodeId: string,
+): Promise<RetryNodeResult> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
+    { method: "POST" },
+  );
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(body?.error ?? `retry_node failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
 export async function cleanupRun(runId: string): Promise<void> {
   const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/commands`, {
     method: "POST",

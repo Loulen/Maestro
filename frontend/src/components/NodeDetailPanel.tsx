@@ -6,12 +6,15 @@ import {
   ChevronRight,
   Square,
   RotateCcw,
+  Play,
 } from "lucide-react";
 import type { IterationInfo, NodeState, NodeStatus } from "../types";
 import {
   markNodeDone,
   killNode,
   restartNode,
+  stopNode,
+  retryNode,
   fetchPrompt,
   fetchNodeIO,
   artifactUrl,
@@ -221,6 +224,66 @@ export default function NodeDetailPanel({
           )}
         </div>
       </div>
+
+      {/* Node control buttons */}
+      {!isArchived && node.status !== "pending" && (
+        <div
+          className="flex items-center gap-1.5 border-b border-line px-3 py-1.5"
+          data-testid="node-controls"
+        >
+          {node.status === "running" ? (
+            <button
+              data-testid="stop-btn"
+              onClick={async () => {
+                try { await stopNode(runId, node.node_id); } catch { /* best-effort */ }
+              }}
+              className="flex cursor-pointer items-center gap-1 rounded border border-st-failed/40 bg-st-failed/10 px-2 py-0.5 text-st-failed transition-colors hover:bg-st-failed/20"
+              style={{ fontSize: "10.5px", fontWeight: 500 }}
+            >
+              <Square size={10} />
+              Stop
+            </button>
+          ) : (
+            <button
+              data-testid="stop-btn"
+              disabled
+              className="flex items-center gap-1 rounded border border-line bg-bg-3 px-2 py-0.5 text-fg-4 opacity-50"
+              style={{ fontSize: "10.5px", fontWeight: 500 }}
+            >
+              <Square size={10} />
+              Stop
+            </button>
+          )}
+          {node.status === "running" ? (
+            <button
+              data-testid="retry-btn"
+              onClick={async () => {
+                try { await retryNode(runId, node.node_id); } catch { /* best-effort */ }
+              }}
+              className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-2 transition-colors hover:bg-bg-4"
+              style={{ fontSize: "10.5px", fontWeight: 500 }}
+            >
+              <RotateCcw size={10} />
+              Retry
+            </button>
+          ) : ["completed", "failed", "stopped", "stale"].includes(node.status) ? (
+            <button
+              data-testid="play-retry-btn"
+              onClick={async () => {
+                try { await retryNode(runId, node.node_id); } catch { /* best-effort */ }
+              }}
+              className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-2 transition-colors hover:bg-bg-4"
+              style={{ fontSize: "10.5px", fontWeight: 500 }}
+            >
+              {node.status === "completed" ? (
+                <><RotateCcw size={10} /> Retry</>
+              ) : (
+                <><Play size={10} /> Play</>
+              )}
+            </button>
+          ) : null}
+        </div>
+      )}
 
       {/* Awaiting user banner */}
       {node.status === "awaiting_user" && (
