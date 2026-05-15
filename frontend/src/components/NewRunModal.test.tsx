@@ -395,16 +395,15 @@ describe("NewRunModal — image upload", () => {
 
   it("passes images to createRun on launch", async () => {
     const onCreated = vi.fn();
-    const pipelines: LibraryPipelineEntry[] = [
-      { id: "p1", name: "Test Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "", prompts: {} },
-    ];
+    vi.mocked(fetchPipelines).mockResolvedValue([
+      makePipeline({ id: "p1", name: "Test Pipeline" }),
+    ]);
 
     render(
       <NewRunModal
         open={true}
         onClose={noop}
         onCreated={onCreated}
-        libraryPipelines={pipelines}
       />,
     );
 
@@ -439,16 +438,15 @@ describe("NewRunModal — image upload", () => {
 
   it("does not pass images when none attached", async () => {
     const onCreated = vi.fn();
-    const pipelines: LibraryPipelineEntry[] = [
-      { id: "p1", name: "Test Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "", prompts: {} },
-    ];
+    vi.mocked(fetchPipelines).mockResolvedValue([
+      makePipeline({ id: "p1", name: "Test Pipeline" }),
+    ]);
 
     render(
       <NewRunModal
         open={true}
         onClose={noop}
         onCreated={onCreated}
-        libraryPipelines={pipelines}
       />,
     );
 
