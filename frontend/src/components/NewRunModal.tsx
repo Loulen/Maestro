@@ -1,23 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderGit2, GitBranch, Sparkles, X } from "lucide-react";
+import { ChevronDown, FolderGit2, GitBranch, Sparkles, Star, X } from "lucide-react";
 import type { PipelineListEntry } from "../types";
-import { createRun, fetchPipelines, validateRepo, listBranches } from "../api";
-import type { LibraryPipelineEntry } from "../api";
+import { createRun, fetchPipelines, promotePipeline, validateRepo, listBranches } from "../api";
 import { useEditStore } from "../stores/editStore";
-
-const LIB_PREFIX = "__lib__";
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onCreated: (runId: string) => void;
-  libraryPipelines: LibraryPipelineEntry[];
 }
 
-export default function NewRunModal({ open, onClose, onCreated, libraryPipelines }: Props) {
+export default function NewRunModal({ open, onClose, onCreated }: Props) {
   const [pipelines, setPipelines] = useState<PipelineListEntry[]>([]);
-  const [selectedPipeline, setSelectedPipeline] = useState("");
-  const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
+  const [selectedPipelineId, setSelectedPipelineId] = useState("");
   const [runName, setRunName] = useState("");
   const [autoName, setAutoName] = useState(true);
   const [input, setInput] = useState("");
@@ -37,7 +32,6 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
 
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  // Reset form state when modal opens — bounded: fires once per open toggle, no cascade.
   /* eslint-disable react-hooks/set-state-in-effect -- modal form reset on open is intentionally synchronous */
   useEffect(() => {
     if (!open) return;
@@ -46,8 +40,7 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     setRepoError(null);
     setBranches([]);
     setSourceBranch("");
-    setSelectedPipeline("");
-    setSelectedLibraryId(null);
+    setSelectedPipelineId("");
     setInput("");
     setOverrides({});
     setError(null);
@@ -64,7 +57,6 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     }
   }, []);
 
-  // Validate repo path with debounce
   useEffect(() => {
     if (!open || !targetRepo.trim()) return;
 
@@ -109,63 +101,65 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     return () => clearTimeout(debounceRef.current);
   }, [targetRepo, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch pipelines after repo is validated (or always for library pipelines)
-  useEffect(() => {
+  const loadPipelines = useCallback(() => {
     if (!open) return;
-    let cancelled = false;
     fetchPipelines()
-      .then((list) => {
-        if (cancelled) return;
-        setPipelines(list);
-      })
+      .then((list) => setPipelines(list))
       .catch(() => {});
-    return () => { cancelled = true; };
   }, [open]);
 
-  // Auto-select first library pipeline when available
-  const shouldAutoSelect = open && repoValid && libraryPipelines.length > 0
-    && !selectedPipeline && !selectedLibraryId;
-  if (shouldAutoSelect) {
-    setSelectedPipeline(libraryPipelines[0].name);
-    setSelectedLibraryId(libraryPipelines[0].id);
-  }
+  useEffect(() => {
+    loadPipelines();
+  }, [loadPipelines]);
 
-  const currentPipeline = useMemo(
-    () => pipelines.find((p) => p.name === selectedPipeline),
-    [pipelines, selectedPipeline],
+  const repoPipelines = useMemo(
+    () => pipelines.filter((p) => p.scope === "repo"),
+    [pipelines],
+  );
+  const libraryPipelines = useMemo(
+    () => pipelines.filter((p) => p.scope === "library"),
+    [pipelines],
+  );
+  const userPipelines = useMemo(
+    () => pipelines.filter((p) => p.scope === "user"),
+    [pipelines],
   );
 
+  const selectedPipeline = useMemo(
+    () => pipelines.find((p) => p.id === selectedPipelineId),
+    [pipelines, selectedPipelineId],
+  );
+
+  // Auto-select first repo pipeline when available
+  const shouldAutoSelect = open && repoValid && pipelines.length > 0 && !selectedPipelineId;
+  if (shouldAutoSelect) {
+    const first = repoPipelines[0] ?? libraryPipelines[0] ?? userPipelines[0];
+    if (first) setSelectedPipelineId(first.id);
+  }
+
   const variableEntries = useMemo(() => {
-    if (!currentPipeline) return [];
-    return Object.entries(currentPipeline.variables).sort(([a], [b]) =>
+    if (!selectedPipeline) return [];
+    return Object.entries(selectedPipeline.variables).sort(([a], [b]) =>
       a.localeCompare(b),
     );
-  }, [currentPipeline]);
+  }, [selectedPipeline]);
 
   const overrideCount = useMemo(() => {
-    if (!currentPipeline) return 0;
+    if (!selectedPipeline) return 0;
     return Object.entries(overrides).filter(([key, val]) => {
-      const decl = currentPipeline.variables[key];
+      const decl = selectedPipeline.variables[key];
       if (!decl) return false;
       return val !== String(decl.default);
     }).length;
-  }, [overrides, currentPipeline]);
+  }, [overrides, selectedPipeline]);
 
   const handlePipelineChange = useCallback(
     (value: string) => {
-      if (value.startsWith(LIB_PREFIX)) {
-        const libId = value.slice(LIB_PREFIX.length);
-        const libEntry = libraryPipelines.find((p) => p.id === libId);
-        setSelectedPipeline(libEntry?.name ?? "");
-        setSelectedLibraryId(libId);
-      } else {
-        setSelectedPipeline(value);
-        setSelectedLibraryId(null);
-      }
+      setSelectedPipelineId(value);
       setOverrides({});
       setVarsOpen(false);
     },
-    [libraryPipelines],
+    [],
   );
 
   const flushPendingSaves = useEditStore((s) => s.flushPendingSaves);
@@ -174,28 +168,35 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     setOverrides((prev) => ({ ...prev, [key]: value }));
   }, []);
 
+  const handlePromote = useCallback(async (pipelineId: string) => {
+    try {
+      await promotePipeline(pipelineId);
+      loadPipelines();
+    } catch {
+      // ignore
+    }
+  }, [loadPipelines]);
+
   const handleLaunch = useCallback(async () => {
-    if (!repoValid || (!currentPipeline && !selectedLibraryId) || !input.trim()) return;
+    if (!repoValid || !selectedPipeline || !input.trim()) return;
     setSubmitting(true);
     setError(null);
 
     const variables: Record<string, unknown> = {};
-    if (currentPipeline) {
-      for (const [key, val] of Object.entries(overrides)) {
-        const decl = currentPipeline.variables[key];
-        if (!decl) continue;
-        if (val === String(decl.default)) continue;
-        variables[key] = parseVariableValue(val, decl.var_type);
-      }
+    for (const [key, val] of Object.entries(overrides)) {
+      const decl = selectedPipeline.variables[key];
+      if (!decl) continue;
+      if (val === String(decl.default)) continue;
+      variables[key] = parseVariableValue(val, decl.var_type);
     }
 
     try {
       await flushPendingSaves();
       const resp = await createRun({
-        pipeline: selectedPipeline,
+        pipeline: selectedPipeline.name,
         input: input.trim(),
         variables,
-        pipeline_id: selectedLibraryId ?? undefined,
+        pipeline_id: selectedPipeline.id,
         target_repo: targetRepo.trim() || undefined,
         source_branch: sourceBranch || undefined,
         name: autoName ? undefined : runName.trim() || undefined,
@@ -211,18 +212,9 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     } finally {
       setSubmitting(false);
     }
-  }, [currentPipeline, selectedPipeline, selectedLibraryId, input, overrides, onCreated, onClose, flushPendingSaves, repoValid, targetRepo, sourceBranch, autoName, runName]);
+  }, [selectedPipeline, input, overrides, onCreated, onClose, flushPendingSaves, repoValid, targetRepo, sourceBranch, autoName, runName]);
 
-  const repoPipelines = useMemo(
-    () => pipelines.filter((p) => p.scope === "repo"),
-    [pipelines],
-  );
-  const userPipelines = useMemo(
-    () => pipelines.filter((p) => p.scope === "user"),
-    [pipelines],
-  );
-
-  const canLaunch = repoValid && (selectedPipeline || selectedLibraryId) && input.trim();
+  const canLaunch = repoValid && selectedPipeline && input.trim();
 
   let repoBorderClass = "border-line-strong focus:border-acc";
   if (repoValid === true) repoBorderClass = "border-acc focus:border-acc";
@@ -331,7 +323,7 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
               )}
             </div>
 
-            {/* Source branch — only shown after repo is validated */}
+            {/* Source branch */}
             {repoValid && (
               <div className="flex flex-col gap-1.5">
                 <label
@@ -380,51 +372,92 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
               >
                 Pipeline
               </label>
-              <select
-                id="pipeline-select"
-                className="w-full rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none disabled:opacity-40"
-                style={{ fontSize: "12px" }}
-                disabled={!repoValid}
-                value={selectedLibraryId ? `${LIB_PREFIX}${selectedLibraryId}` : selectedPipeline}
-                onChange={(e) => handlePipelineChange(e.target.value)}
-                data-testid="pipeline-select"
-              >
-                {!repoValid && (
-                  <option value="">Select a repository first</option>
+              <div className="flex gap-1.5">
+                <select
+                  id="pipeline-select"
+                  className="flex-1 rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none disabled:opacity-40"
+                  style={{ fontSize: "12px" }}
+                  disabled={!repoValid}
+                  value={selectedPipelineId}
+                  onChange={(e) => handlePipelineChange(e.target.value)}
+                  data-testid="pipeline-select"
+                >
+                  {!repoValid && (
+                    <option value="">Select a repository first</option>
+                  )}
+                  {repoValid && pipelines.length === 0 && (
+                    <option value="" disabled>
+                      No pipelines found
+                    </option>
+                  )}
+                  {repoValid && repoPipelines.length > 0 && (
+                    <optgroup label="Repo pipelines">
+                      {repoPipelines.map((p) => (
+                        <option key={`repo-${p.id}`} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {repoValid && libraryPipelines.length > 0 && (
+                    <optgroup label="★ Library">
+                      {libraryPipelines.map((p) => (
+                        <option key={`lib-${p.id}`} value={p.id}>
+                          {p.drifted ? "⚠ " : ""}{p.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {repoValid && userPipelines.length > 0 && (
+                    <optgroup label="User pipelines">
+                      {userPipelines.map((p) => (
+                        <option key={`user-${p.id}`} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                {selectedPipeline?.scope === "repo" && (
+                  <button
+                    type="button"
+                    onClick={() => handlePromote(selectedPipeline.id)}
+                    className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-md border border-line-strong bg-bg-3 text-fg-4 transition-colors hover:bg-bg-4 hover:text-acc"
+                    title="Promote to library"
+                    data-testid="promote-button"
+                  >
+                    <Star size={14} />
+                  </button>
                 )}
-                {repoValid && libraryPipelines.length === 0 && pipelines.length === 0 && (
-                  <option value="" disabled>
-                    No pipelines found
-                  </option>
+                {selectedPipeline?.scope === "library" && (
+                  <span
+                    className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-md border border-line-strong bg-bg-3"
+                    title={selectedPipeline.drifted ? "Source has changed since promoted" : "In library — synced"}
+                    data-testid="library-star"
+                  >
+                    <span className="relative">
+                      <Star size={14} className="fill-acc text-acc" />
+                      {selectedPipeline.drifted && (
+                        <span
+                          className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-st-blocked"
+                          data-testid="drift-indicator"
+                        />
+                      )}
+                    </span>
+                  </span>
                 )}
-                {repoValid && libraryPipelines.length > 0 && (
-                  <optgroup label="★ Starred templates">
-                    {libraryPipelines.map((p) => (
-                      <option key={`lib-${p.id}`} value={`${LIB_PREFIX}${p.id}`}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {repoValid && repoPipelines.length > 0 && (
-                  <optgroup label="Repo pipelines">
-                    {repoPipelines.map((p) => (
-                      <option key={p.name} value={p.name}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {repoValid && userPipelines.length > 0 && (
-                  <optgroup label="User pipelines">
-                    {userPipelines.map((p) => (
-                      <option key={p.name} value={p.name}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
+              </div>
+              {selectedPipeline?.scope === "repo" && (
+                <span className="inline-flex items-center gap-1 text-fg-4" style={{ fontSize: "10.5px" }}>
+                  <span className="rounded bg-bg-3 px-1 py-0.5 font-mono text-fg-3" style={{ fontSize: "9px" }}>REPO</span>
+                  {selectedPipeline.path}
+                </span>
+              )}
+              {selectedPipeline?.scope === "library" && selectedPipeline.drifted && (
+                <span className="text-st-blocked" style={{ fontSize: "10.5px" }} data-testid="drift-warning">
+                  Source pipeline has changed — re-promote to update library copy
+                </span>
+              )}
             </div>
           </div>
 

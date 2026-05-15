@@ -452,3 +452,20 @@ export async function deleteLibraryPipeline(id: string): Promise<void> {
   });
   if (!resp.ok) throw new Error(`DELETE /library/pipelines/${id} failed: ${resp.status}`);
 }
+
+export interface PromoteResult {
+  id: string;
+  drifted: boolean;
+}
+
+export async function promotePipeline(pipelineId: string): Promise<PromoteResult> {
+  const resp = await fetch(
+    `${BASE}/pipelines/${encodeURIComponent(pipelineId)}/promote`,
+    { method: "POST" },
+  );
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(body?.error ?? `POST /pipelines/${pipelineId}/promote failed: ${resp.status}`);
+  }
+  return resp.json();
+}

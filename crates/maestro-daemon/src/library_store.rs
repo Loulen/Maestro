@@ -202,12 +202,14 @@ pub mod pipelines {
     use std::path::{Path, PathBuf};
 
     use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "lowercase")]
     pub enum Scope {
         Repo,
         User,
+        Library,
     }
 
     impl Scope {
@@ -215,6 +217,7 @@ pub mod pipelines {
             match s {
                 "repo" => Some(Scope::Repo),
                 "user" => Some(Scope::User),
+                "library" => Some(Scope::Library),
                 _ => None,
             }
         }
@@ -222,8 +225,49 @@ pub mod pipelines {
             match self {
                 Scope::Repo => "repo",
                 Scope::User => "user",
+                Scope::Library => "library",
             }
         }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct PromotedFrom {
+        pub repo: String,
+        pub path: String,
+        pub content_hash: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct PipelineMeta {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub promoted_from: Option<PromotedFrom>,
+    }
+
+    pub fn content_hash(yaml: &str, prompts: &HashMap<String, String>) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(yaml.as_bytes());
+        let mut keys: Vec<&String> = prompts.keys().collect();
+        keys.sort();
+        for key in keys {
+            hasher.update(key.as_bytes());
+            hasher.update(prompts[key].as_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn read_meta(pipeline_path: &Path) -> PipelineMeta {
+        let meta_path = pipeline_path.with_extension("meta.json");
+        std::fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_meta(pipeline_path: &Path, meta: &PipelineMeta) -> Result<(), String> {
+        let meta_path = pipeline_path.with_extension("meta.json");
+        let json =
+            serde_json::to_string_pretty(meta).map_err(|e| format!("meta serialize error: {e}"))?;
+        std::fs::write(&meta_path, json).map_err(|e| format!("meta write error: {e}"))
     }
 
     pub fn user_pipelines_dir() -> Option<PathBuf> {
@@ -242,7 +286,7 @@ pub mod pipelines {
     fn scope_dir(repo_root: &Path, scope: Scope) -> Option<PathBuf> {
         match scope {
             Scope::Repo => Some(repo_pipelines_dir(repo_root)),
-            Scope::User => user_pipelines_dir(),
+            Scope::User | Scope::Library => user_pipelines_dir(),
         }
     }
 
@@ -269,11 +313,12 @@ pub mod pipelines {
         pub node_count: usize,
         pub modified: Option<String>,
         pub yaml: String,
-        /// Per-node prompts mirrored from `<id>.prompts/<node_id>.md`. The frontend
-        /// needs these to detect divergence when only a prompt was edited — without
-        /// them the star would stay "synced" after a prompt-only change.
         #[serde(default)]
         pub prompts: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub promoted_from: Option<PromotedFrom>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub drifted: Option<bool>,
     }
 
     fn read_prompts_dir(prompts_dir: &Path) -> HashMap<String, String> {
@@ -326,6 +371,16 @@ pub mod pipelines {
                         .to_string()
                 });
             let prompts = read_prompts_dir(&path.with_extension("prompts"));
+
+            let meta = read_meta(&path);
+            let drifted = meta.promoted_from.as_ref().and_then(|pf| {
+                let source = Path::new(&pf.path);
+                let source_yaml = std::fs::read_to_string(source).ok()?;
+                let source_prompts = read_prompts_dir(&source.with_extension("prompts"));
+                let current = content_hash(&source_yaml, &source_prompts);
+                Some(current != pf.content_hash)
+            });
+
             entries.push(PipelineLibraryEntry {
                 id,
                 name: parsed.pipeline.name.clone(),
@@ -334,6 +389,8 @@ pub mod pipelines {
                 modified,
                 yaml: contents,
                 prompts,
+                promoted_from: meta.promoted_from,
+                drifted,
             });
         }
         entries
@@ -454,12 +511,82 @@ pub mod pipelines {
             return Ok(false);
         };
         let prompts_dir = path.with_extension("prompts");
+        let meta_path = path.with_extension("meta.json");
         std::fs::remove_file(&path).map_err(|e| format!("delete error: {e}"))?;
         if prompts_dir.exists() {
             std::fs::remove_dir_all(&prompts_dir)
                 .map_err(|e| format!("delete prompts error: {e}"))?;
         }
+        let _ = std::fs::remove_file(&meta_path);
         Ok(true)
+    }
+
+    pub fn promote(repo_root: &Path, pipeline_id: &str) -> Result<String, String> {
+        let repo_dir = repo_root.join(".maestro").join("pipelines");
+        let source_path = repo_dir.join(format!("{pipeline_id}.yaml"));
+        let yaml = std::fs::read_to_string(&source_path)
+            .map_err(|e| format!("cannot read repo pipeline: {e}"))?;
+        crate::pipeline::parse_pipeline(&yaml)
+            .map_err(|e| format!("invalid pipeline YAML: {e}"))?;
+
+        let prompts = read_prompts_dir(&source_path.with_extension("prompts"));
+        let hash = content_hash(&yaml, &prompts);
+
+        let lib_dir = user_pipelines_dir().ok_or("HOME not set")?;
+        std::fs::create_dir_all(&lib_dir)
+            .map_err(|e| format!("failed to create library dir: {e}"))?;
+
+        let lib_path = lib_dir.join(format!("{pipeline_id}.yaml"));
+        std::fs::write(&lib_path, &yaml).map_err(|e| format!("write error: {e}"))?;
+
+        let lib_prompts_dir = lib_dir.join(format!("{pipeline_id}.prompts"));
+        if lib_prompts_dir.exists() {
+            std::fs::remove_dir_all(&lib_prompts_dir)
+                .map_err(|e| format!("clear prompts error: {e}"))?;
+        }
+        if !prompts.is_empty() {
+            std::fs::create_dir_all(&lib_prompts_dir)
+                .map_err(|e| format!("create prompts dir error: {e}"))?;
+            for (node_id, content) in &prompts {
+                let prompt_path = lib_prompts_dir.join(format!("{node_id}.md"));
+                std::fs::write(&prompt_path, content)
+                    .map_err(|e| format!("write prompt error: {e}"))?;
+            }
+        }
+
+        let meta = PipelineMeta {
+            promoted_from: Some(PromotedFrom {
+                repo: repo_root.to_string_lossy().to_string(),
+                path: source_path.to_string_lossy().to_string(),
+                content_hash: hash,
+            }),
+        };
+        write_meta(&lib_path, &meta)?;
+
+        Ok(pipeline_id.to_string())
+    }
+
+    pub fn check_drift(library_id: &str) -> Option<bool> {
+        let lib_dir = user_pipelines_dir()?;
+        let lib_path = lib_dir.join(format!("{library_id}.yaml"));
+        let meta = read_meta(&lib_path);
+        let promoted = meta.promoted_from?;
+
+        let source_path = Path::new(&promoted.path);
+        let yaml = std::fs::read_to_string(source_path).ok()?;
+        let prompts = read_prompts_dir(&source_path.with_extension("prompts"));
+        let current_hash = content_hash(&yaml, &prompts);
+        Some(current_hash != promoted.content_hash)
+    }
+
+    pub fn get_meta(library_id: &str) -> Option<PipelineMeta> {
+        let lib_dir = user_pipelines_dir()?;
+        let lib_path = lib_dir.join(format!("{library_id}.yaml"));
+        if lib_path.exists() {
+            Some(read_meta(&lib_path))
+        } else {
+            None
+        }
     }
 }
 
@@ -1285,6 +1412,218 @@ mod tests {
             assert!(pipelines::delete(repo, "promptful").unwrap());
             assert!(!dir.join("promptful.yaml").exists());
             assert!(!dir.join("promptful.prompts").exists());
+        });
+    }
+
+    fn create_repo_pipeline(repo: &std::path::Path, name: &str) -> String {
+        let yaml = sample_pipeline_yaml(name);
+        let pipelines_dir = repo.join(".maestro").join("pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+        let slug = name.to_lowercase().replace(' ', "-");
+        std::fs::write(pipelines_dir.join(format!("{slug}.yaml")), &yaml).unwrap();
+        slug
+    }
+
+    fn create_repo_pipeline_with_prompts(
+        repo: &std::path::Path,
+        name: &str,
+        prompts: &HashMap<String, String>,
+    ) -> String {
+        let slug = create_repo_pipeline(repo, name);
+        if !prompts.is_empty() {
+            let prompts_dir = repo
+                .join(".maestro")
+                .join("pipelines")
+                .join(format!("{slug}.prompts"));
+            std::fs::create_dir_all(&prompts_dir).unwrap();
+            for (node_id, content) in prompts {
+                std::fs::write(prompts_dir.join(format!("{node_id}.md")), content).unwrap();
+            }
+        }
+        slug
+    }
+
+    #[test]
+    fn content_hash_deterministic() {
+        let yaml = sample_pipeline_yaml("Test");
+        let prompts = HashMap::new();
+        let h1 = pipelines::content_hash(&yaml, &prompts);
+        let h2 = pipelines::content_hash(&yaml, &prompts);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn content_hash_changes_on_yaml_diff() {
+        let prompts = HashMap::new();
+        let h1 = pipelines::content_hash(&sample_pipeline_yaml("A"), &prompts);
+        let h2 = pipelines::content_hash(&sample_pipeline_yaml("B"), &prompts);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn content_hash_changes_on_prompt_diff() {
+        let yaml = sample_pipeline_yaml("Same");
+        let mut p1 = HashMap::new();
+        p1.insert("planner".to_string(), "Version 1".to_string());
+        let mut p2 = HashMap::new();
+        p2.insert("planner".to_string(), "Version 2".to_string());
+        assert_ne!(
+            pipelines::content_hash(&yaml, &p1),
+            pipelines::content_hash(&yaml, &p2),
+        );
+    }
+
+    #[test]
+    fn promote_copies_to_library_with_metadata() {
+        with_temp_repo(|repo| {
+            let slug = create_repo_pipeline(repo, "My Pipeline");
+
+            let id = pipelines::promote(repo, &slug).unwrap();
+            assert_eq!(id, slug);
+
+            let lib_dir = pipelines::user_pipelines_dir().unwrap();
+            assert!(lib_dir.join(format!("{slug}.yaml")).exists());
+            assert!(lib_dir.join(format!("{slug}.meta.json")).exists());
+
+            let meta = pipelines::get_meta(&slug).unwrap();
+            assert!(meta.promoted_from.is_some());
+            let pf = meta.promoted_from.unwrap();
+            assert_eq!(pf.repo, repo.to_string_lossy());
+            assert!(!pf.content_hash.is_empty());
+        });
+    }
+
+    #[test]
+    fn promote_copies_prompts_to_library() {
+        with_temp_repo(|repo| {
+            let mut prompts = HashMap::new();
+            prompts.insert("planner".to_string(), "You plan things.".to_string());
+            let slug = create_repo_pipeline_with_prompts(repo, "Prompted", &prompts);
+
+            pipelines::promote(repo, &slug).unwrap();
+
+            let lib_dir = pipelines::user_pipelines_dir().unwrap();
+            let lib_prompts = lib_dir.join(format!("{slug}.prompts"));
+            assert!(lib_prompts.is_dir());
+            assert_eq!(
+                std::fs::read_to_string(lib_prompts.join("planner.md")).unwrap(),
+                "You plan things."
+            );
+        });
+    }
+
+    #[test]
+    fn promote_nonexistent_pipeline_errors() {
+        with_temp_repo(|repo| {
+            let result = pipelines::promote(repo, "nonexistent");
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn drift_detection_no_drift_when_unchanged() {
+        with_temp_repo(|repo| {
+            let slug = create_repo_pipeline(repo, "Stable");
+            pipelines::promote(repo, &slug).unwrap();
+
+            let drifted = pipelines::check_drift(&slug);
+            assert_eq!(drifted, Some(false));
+        });
+    }
+
+    #[test]
+    fn drift_detection_detects_yaml_change() {
+        with_temp_repo(|repo| {
+            let slug = create_repo_pipeline(repo, "Drifter");
+            pipelines::promote(repo, &slug).unwrap();
+
+            let repo_yaml_path = repo.join(".maestro/pipelines").join(format!("{slug}.yaml"));
+            std::fs::write(&repo_yaml_path, sample_pipeline_yaml("Drifter Modified")).unwrap();
+
+            let drifted = pipelines::check_drift(&slug);
+            assert_eq!(drifted, Some(true));
+        });
+    }
+
+    #[test]
+    fn drift_detection_detects_prompt_change() {
+        with_temp_repo(|repo| {
+            let mut prompts = HashMap::new();
+            prompts.insert("planner".to_string(), "Original".to_string());
+            let slug = create_repo_pipeline_with_prompts(repo, "PromptDrift", &prompts);
+            pipelines::promote(repo, &slug).unwrap();
+
+            let prompt_path = repo
+                .join(".maestro/pipelines")
+                .join(format!("{slug}.prompts/planner.md"));
+            std::fs::write(&prompt_path, "Changed prompt").unwrap();
+
+            let drifted = pipelines::check_drift(&slug);
+            assert_eq!(drifted, Some(true));
+        });
+    }
+
+    #[test]
+    fn re_promote_updates_hash() {
+        with_temp_repo(|repo| {
+            let slug = create_repo_pipeline(repo, "Updater");
+            pipelines::promote(repo, &slug).unwrap();
+
+            let repo_yaml_path = repo.join(".maestro/pipelines").join(format!("{slug}.yaml"));
+            std::fs::write(&repo_yaml_path, sample_pipeline_yaml("Updater v2")).unwrap();
+
+            assert_eq!(pipelines::check_drift(&slug), Some(true));
+
+            pipelines::promote(repo, &slug).unwrap();
+
+            assert_eq!(pipelines::check_drift(&slug), Some(false));
+        });
+    }
+
+    #[test]
+    fn drift_returns_none_when_no_promoted_from() {
+        with_temp_repo(|repo| {
+            pipelines::save(
+                repo,
+                None,
+                "Manual",
+                &sample_pipeline_yaml("Manual"),
+                &HashMap::new(),
+                pipelines::Scope::User,
+            )
+            .unwrap();
+
+            let drifted = pipelines::check_drift("manual");
+            assert_eq!(drifted, None);
+        });
+    }
+
+    #[test]
+    fn drift_returns_none_when_source_deleted() {
+        with_temp_repo(|repo| {
+            let slug = create_repo_pipeline(repo, "Ephemeral");
+            pipelines::promote(repo, &slug).unwrap();
+
+            let repo_yaml_path = repo.join(".maestro/pipelines").join(format!("{slug}.yaml"));
+            std::fs::remove_file(&repo_yaml_path).unwrap();
+
+            let drifted = pipelines::check_drift(&slug);
+            assert_eq!(drifted, None);
+        });
+    }
+
+    #[test]
+    fn delete_removes_meta_json() {
+        with_temp_repo(|repo| {
+            let slug = create_repo_pipeline(repo, "CleanMe");
+            pipelines::promote(repo, &slug).unwrap();
+
+            let lib_dir = pipelines::user_pipelines_dir().unwrap();
+            assert!(lib_dir.join(format!("{slug}.meta.json")).exists());
+
+            pipelines::delete(repo, &slug).unwrap();
+            assert!(!lib_dir.join(format!("{slug}.meta.json")).exists());
         });
     }
 }

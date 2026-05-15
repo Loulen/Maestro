@@ -486,6 +486,7 @@ fn build_router(state: Arc<AppState>) -> Router {
             "/library/pipelines/{id}",
             axum::routing::delete(delete_library_pipeline),
         )
+        .route("/pipelines/{pipeline_id}/promote", post(promote_pipeline))
         .route("/repos/branches", get(repos_branches))
         .route("/repos/validate", get(repos_validate))
         .fallback(static_handler)
@@ -739,6 +740,8 @@ struct PipelineListEntry {
     node_count: usize,
     modified: Option<String>,
     variables: HashMap<String, PipelineVariableInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drifted: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -812,6 +815,7 @@ fn scan_pipeline_dir(dir: &std::path::Path, scope: &str) -> Vec<PipelineListEntr
             node_count,
             modified,
             variables,
+            drifted: None,
         });
     }
     entries
@@ -824,6 +828,14 @@ async fn list_pipelines(State(state): State<Arc<AppState>>) -> Response {
     if let Some(home) = dirs_next_home() {
         let user_dir = home.join(".maestro").join("pipelines");
         pipelines.extend(scan_pipeline_dir(&user_dir, "user"));
+    }
+
+    if let Some(lib_dir) = library_store::pipelines::user_pipelines_dir() {
+        let lib_entries = scan_pipeline_dir(&lib_dir, "library");
+        for mut entry in lib_entries {
+            entry.drifted = library_store::pipelines::check_drift(&entry.id);
+            pipelines.push(entry);
+        }
     }
 
     Json(pipelines).into_response()
@@ -1219,6 +1231,27 @@ async fn delete_pipeline(
 
     info!("Deleted pipeline {pipeline_id}");
     (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+async fn promote_pipeline(
+    State(state): State<Arc<AppState>>,
+    AxumPath(pipeline_id): AxumPath<String>,
+) -> Response {
+    match library_store::pipelines::promote(&state.repo_root, &pipeline_id) {
+        Ok(id) => {
+            let drifted = library_store::pipelines::check_drift(&id);
+            Json(serde_json::json!({
+                "id": id,
+                "drifted": drifted.unwrap_or(false),
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 // --- API handlers ---
@@ -2083,7 +2116,10 @@ async fn run_diff(
     {
         Ok(o) => o,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git diff failed: {e}"),
+            )
                 .into_response();
         }
     };
@@ -2093,7 +2129,10 @@ async fn run_diff(
         if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
             return (StatusCode::NOT_FOUND, "run branch not found").into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git diff failed: {stderr}"),
+        )
             .into_response();
     }
 
@@ -2132,7 +2171,10 @@ async fn node_diff(
     {
         Ok(o) => o,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git diff failed: {e}"),
+            )
                 .into_response();
         }
     };
@@ -2142,7 +2184,10 @@ async fn node_diff(
         if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
             return (StatusCode::NOT_FOUND, "node branch not found").into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git diff failed: {stderr}"),
+        )
             .into_response();
     }
 
@@ -6444,8 +6489,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn list_pipelines_scans_repo_dir() {
+        let _guard = library_store::HOME_TEST_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
         write_test_pipeline(tmp.path(), "test-pipe");
         write_test_pipeline(tmp.path(), "another-pipe");
 
@@ -6471,11 +6522,21 @@ mod tests {
         assert!(list.iter().any(|p| p["id"] == "test-pipe"));
         assert!(list.iter().any(|p| p["id"] == "another-pipe"));
         assert!(list.iter().all(|p| p["scope"] == "repo"));
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn list_pipelines_empty_when_no_dir() {
+        let _guard = library_store::HOME_TEST_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
         let state = test_state_with_dir(tmp.path()).await;
         let app = build_router(state);
 
@@ -6495,6 +6556,10 @@ mod tests {
             .unwrap();
         let list: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert!(list.is_empty());
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
     }
 
     #[tokio::test]
@@ -6901,6 +6966,163 @@ mod tests {
         let entries = scan_pipeline_dir(&dir, "repo");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "real-pipe");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn promote_pipeline_copies_to_library() {
+        let _guard = library_store::HOME_TEST_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        write_test_pipeline(tmp.path(), "promotable");
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipelines/promotable/promote")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["id"], "promotable");
+        assert_eq!(result["drifted"], false);
+
+        let lib_dir = library_store::pipelines::user_pipelines_dir().unwrap();
+        assert!(lib_dir.join("promotable.yaml").exists());
+        assert!(lib_dir.join("promotable.meta.json").exists());
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn promote_nonexistent_pipeline_returns_error() {
+        let _guard = library_store::HOME_TEST_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipelines/nonexistent/promote")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_pipelines_includes_library_with_drift() {
+        let _guard = library_store::HOME_TEST_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        write_test_pipeline(tmp.path(), "repo-pipe");
+
+        library_store::pipelines::promote(tmp.path(), "repo-pipe").unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        let repo_entry = list.iter().find(|p| p["scope"] == "repo").unwrap();
+        assert_eq!(repo_entry["id"], "repo-pipe");
+        assert!(repo_entry.get("drifted").is_none() || repo_entry["drifted"].is_null());
+
+        let lib_entry = list.iter().find(|p| p["scope"] == "library").unwrap();
+        assert_eq!(lib_entry["id"], "repo-pipe");
+        assert_eq!(lib_entry["drifted"], false);
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_pipelines_library_shows_drift_after_source_change() {
+        let _guard = library_store::HOME_TEST_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+
+        write_test_pipeline(tmp.path(), "drifting");
+        library_store::pipelines::promote(tmp.path(), "drifting").unwrap();
+
+        let changed_yaml =
+            format!("name: drifting-modified\nversion: \"2.0\"\nnodes:\n{START_END_YAML}");
+        std::fs::write(
+            tmp.path().join(".maestro/pipelines/drifting.yaml"),
+            changed_yaml,
+        )
+        .unwrap();
+
+        let state = test_state_with_dir(tmp.path()).await;
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let lib_entry = list.iter().find(|p| p["scope"] == "library").unwrap();
+        assert_eq!(lib_entry["drifted"], true);
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
     }
 
     #[tokio::test]
@@ -9078,7 +9300,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let app = build_router(state);
         let resp = app
@@ -9114,7 +9336,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Make a change on the pipeline branch
         std::fs::write(wt_dir.join("new_file.rs"), "fn hello() {}\n").unwrap();
@@ -9147,8 +9369,14 @@ edges: []
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("new_file.rs"), "diff should mention new_file.rs");
-        assert!(body.contains("fn hello()"), "diff should contain the added content");
+        assert!(
+            body.contains("new_file.rs"),
+            "diff should mention new_file.rs"
+        );
+        assert!(
+            body.contains("fn hello()"),
+            "diff should contain the added content"
+        );
     }
 
     #[tokio::test]
@@ -9163,7 +9391,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Create a sub-worktree for impl-1
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
@@ -9201,8 +9429,14 @@ edges: []
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("node_file.rs"), "diff should mention node_file.rs");
-        assert!(body.contains("fn node_work()"), "diff should contain the node's changes");
+        assert!(
+            body.contains("node_file.rs"),
+            "diff should mention node_file.rs"
+        );
+        assert!(
+            body.contains("fn node_work()"),
+            "diff should contain the node's changes"
+        );
     }
 
     #[tokio::test]
@@ -9217,7 +9451,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let app = build_router(state);
         let resp = app
