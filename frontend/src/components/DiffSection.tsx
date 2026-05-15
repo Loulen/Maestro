@@ -24,7 +24,6 @@ export default function DiffSection({ run }: Props) {
   useEffect(() => {
     if (!expanded || !run) return;
     let stale = false;
-    setLoading(true);
     const promise =
       selectedNode === ""
         ? fetchRunDiff(run.run_id)
@@ -38,10 +37,20 @@ export default function DiffSection({ run }: Props) {
 
   if (!run) return null;
 
+  const handleExpand = () => {
+    if (!expanded) setLoading(true);
+    setExpanded((e) => !e);
+  };
+
+  const handleNodeChange = (nodeId: string) => {
+    setLoading(true);
+    setSelectedNode(nodeId);
+  };
+
   return (
     <div data-testid="diff-section" className="border-t border-line">
       <button
-        onClick={() => setExpanded((e) => !e)}
+        onClick={handleExpand}
         className="flex w-full items-center gap-1.5 px-3 py-2 text-fg-2 transition-colors hover:bg-bg-3 cursor-pointer"
         style={{ fontSize: "11.5px" }}
       >
@@ -55,7 +64,7 @@ export default function DiffSection({ run }: Props) {
             <select
               data-testid="diff-node-select"
               value={selectedNode}
-              onChange={(e) => setSelectedNode(e.target.value)}
+              onChange={(e) => handleNodeChange(e.target.value)}
               className="mb-2 w-full rounded border border-line bg-bg-3 px-2 py-1 font-mono text-fg-2"
               style={{ fontSize: "10.5px" }}
             >
