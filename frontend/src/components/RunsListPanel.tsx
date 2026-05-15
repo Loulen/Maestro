@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, Plus, Star, Trash2 } from "lucide-react";
-import type { RunListEntry, RunStatus } from "../types";
+import { isLiveRun, type RunListEntry, type RunStatus } from "../types";
 import { cleanupRun, deleteLibraryPipeline, forgetRun } from "../api";
 import type { LibraryEntry, LibraryPipelineEntry } from "../api";
 import CleanupConfirmModal from "./CleanupConfirmModal";
@@ -119,7 +119,7 @@ export default function RunsListPanel({
                 <span
                   role="button"
                   title={
-                    run.status === "running" || run.status === "awaiting_user" || run.status === "paused"
+                    isLiveRun(run.status)
                       ? "Stop and archive run"
                       : "Cleanup run"
                   }
@@ -176,9 +176,7 @@ export default function RunsListPanel({
       {confirmCleanup && (
         <CleanupConfirmModal
           isLive={
-            confirmCleanup.status === "running" ||
-            confirmCleanup.status === "awaiting_user" ||
-            confirmCleanup.status === "paused"
+            isLiveRun(confirmCleanup.status)
           }
           onConfirm={() => handleCleanup(confirmCleanup.runId)}
           onCancel={() => setConfirmCleanup(null)}

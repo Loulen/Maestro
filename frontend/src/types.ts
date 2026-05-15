@@ -1,5 +1,9 @@
 export type RunStatus = "running" | "awaiting_user" | "completed" | "failed" | "halted" | "paused" | "archived";
 export type NodeStatus = "pending" | "running" | "awaiting_user" | "completed" | "failed" | "stopped" | "stale";
+
+export function isLiveRun(status: RunStatus): boolean {
+  return status === "running" || status === "awaiting_user" || status === "paused";
+}
 export type NodeType = "doc-only" | "code-mutating" | "start" | "end" | "switch" | "loop" | "for-each" | "merge";
 
 export interface RunListEntry {

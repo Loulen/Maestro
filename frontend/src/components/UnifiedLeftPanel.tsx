@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Plus, Star, Trash2, ChevronDown, ChevronRight } from "lucide-react";
-import type { RunListEntry, RunStatus, PipelineListEntry, PipelineScope } from "../types";
+import { isLiveRun, type RunListEntry, type RunStatus, type PipelineListEntry, type PipelineScope } from "../types";
 import type { LibraryPipelineEntry } from "../api";
 import { cleanupRun, createPipeline, deleteLibraryPipeline, forgetRun } from "../api";
 import { useEditStore } from "../stores/editStore";
@@ -157,7 +157,7 @@ export default function UnifiedLeftPanel({
                   <span
                     role="button"
                     title={
-                      run.status === "running" || run.status === "awaiting_user" || run.status === "paused"
+                      isLiveRun(run.status)
                         ? "Stop and archive run"
                         : "Cleanup run"
                     }
@@ -339,9 +339,7 @@ export default function UnifiedLeftPanel({
       {confirmCleanup && (
         <CleanupConfirmModal
           isLive={
-            confirmCleanup.status === "running" ||
-            confirmCleanup.status === "awaiting_user" ||
-            confirmCleanup.status === "paused"
+            isLiveRun(confirmCleanup.status)
           }
           onConfirm={() => handleCleanup(confirmCleanup.runId)}
           onCancel={() => setConfirmCleanup(null)}
