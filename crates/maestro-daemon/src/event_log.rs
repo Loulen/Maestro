@@ -352,7 +352,7 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                     upsert_iteration(&mut node.iterations, iteration);
                 }
             }
-            EventKind::NodeCompleted => {
+            EventKind::NodeCompleted | EventKind::NodeAutoCompleted => {
                 if let Some(ref node_id) = event.node_id {
                     if let Some(node) = state.nodes.get_mut(node_id) {
                         node.status = NodeStatus::Completed;
@@ -413,19 +413,6 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                         let iter = event.iter.unwrap_or(node.iter);
                         if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
                             it.status = NodeStatus::Stopped;
-                            it.completed_at = Some(event.ts.clone());
-                        }
-                    }
-                }
-            }
-            EventKind::NodeAutoCompleted => {
-                if let Some(ref node_id) = event.node_id {
-                    if let Some(node) = state.nodes.get_mut(node_id) {
-                        node.status = NodeStatus::Completed;
-                        node.completed_at = Some(event.ts.clone());
-                        let iter = event.iter.unwrap_or(node.iter);
-                        if let Some(it) = node.iterations.iter_mut().find(|i| i.iter == iter) {
-                            it.status = NodeStatus::Completed;
                             it.completed_at = Some(event.ts.clone());
                         }
                     }
