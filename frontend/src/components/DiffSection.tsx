@@ -23,15 +23,17 @@ export default function DiffSection({ run }: Props) {
 
   useEffect(() => {
     if (!expanded || !run) return;
+    let stale = false;
     setLoading(true);
     const promise =
       selectedNode === ""
         ? fetchRunDiff(run.run_id)
         : fetchNodeDiff(run.run_id, selectedNode);
     promise
-      .then(setDiff)
-      .catch(() => setDiff(""))
-      .finally(() => setLoading(false));
+      .then((d) => { if (!stale) setDiff(d); })
+      .catch(() => { if (!stale) setDiff(""); })
+      .finally(() => { if (!stale) setLoading(false); });
+    return () => { stale = true; };
   }, [expanded, run, selectedNode]);
 
   if (!run) return null;
