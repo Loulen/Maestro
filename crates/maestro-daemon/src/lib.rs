@@ -3656,10 +3656,6 @@ async fn node_fail(
     (StatusCode::OK, "ok").into_response()
 }
 
-// ---------------------------------------------------------------------------
-// Per-node Play / Stop / Retry  (issue #124)
-// ---------------------------------------------------------------------------
-
 async fn node_start(
     State(state): State<Arc<AppState>>,
     AxumPath((run_id, node_id)): AxumPath<(String, String)>,
@@ -3866,7 +3862,6 @@ async fn node_retry(
     let worktree_dir = worktree_dir_for_run(&repo_root, &run_id);
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
 
-    // Stop the node if it is currently running
     if let Some(ns) = run_state.nodes.get(&node_id) {
         if ns.status == event_log::NodeStatus::Running {
             let stop_params = node_primitives::StopNodeParams {
@@ -3884,7 +3879,6 @@ async fn node_retry(
         }
     }
 
-    // Invalidate downstream subgraph
     let downstream: Vec<String> = graph_resolver::downstream_subgraph(&pipeline_def, &node_id)
         .into_iter()
         .collect();
@@ -3901,7 +3895,7 @@ async fn node_retry(
         }
     }
 
-    // Also invalidate the node itself so it resets to pending
+    // Invalidate self separately so its state resets for the re-start below
     let self_inv = node_primitives::InvalidateNodesParams {
         run_id: &run_id,
         node_ids: std::slice::from_ref(&node_id),
@@ -3914,7 +3908,7 @@ async fn node_retry(
         }
     }
 
-    // Re-load events to get fresh run_state after invalidation
+    // Reload so start_node sees the invalidated state
     let events = match load_events(&state.db, &run_id).await {
         Ok(e) => e,
         Err(e) => {
@@ -3933,7 +3927,6 @@ async fn node_retry(
     };
     let resolved_vars = resolve_run_variables(&pipeline_def, &events);
 
-    // Start the node at next iter
     let next_iter = current_iter + 1;
     let start_params = node_primitives::StartNodeParams {
         run_id: &run_id,
@@ -10402,8 +10395,6 @@ edges: []
             vec![0x89, 0x50, 0x4E, 0x47]
         );
     }
-
-    // --- node_start / node_stop / node_retry endpoint tests (issue #124) ---
 
     async fn seed_run_for_node_control(state: &Arc<AppState>, run_id: &str, pipeline_name: &str) {
         let ev = event_log::Event {

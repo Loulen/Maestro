@@ -696,7 +696,7 @@ describe("NodeDetailPanel", () => {
     });
   });
 
-  describe("Node control buttons (issue #124)", () => {
+  describe("Node control buttons", () => {
     it("shows enabled Stop button when node is running", () => {
       render(
         <TooltipProvider>
@@ -836,7 +836,7 @@ describe("NodeDetailPanel", () => {
     });
   });
 
-  describe("Retry confirmation dialog (issue #124)", () => {
+  describe("Retry confirmation dialog", () => {
     it("shows confirmation dialog when downstream has artifacts", async () => {
       retryNodePreviewMock.mockResolvedValue({
         downstream: ["reviewer"],

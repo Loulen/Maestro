@@ -261,8 +261,6 @@ export async function restartNode(
   if (!resp.ok) throw new Error(`restart_node failed: ${resp.status}`);
 }
 
-// --- Per-node Play / Stop / Retry (issue #124) ---
-
 export interface StartNodeResult {
   ok: boolean;
   iter?: number;

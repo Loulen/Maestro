@@ -177,6 +177,14 @@ export default function NodeDetailPanel({
     };
   }, [interval, node.node_id, selectedIter, runId, isStaleIter, node.status]);
 
+  const handleStop = useCallback(async () => {
+    try {
+      await stopNode(runId, node.node_id);
+    } catch {
+      // best-effort
+    }
+  }, [runId, node.node_id]);
+
   const handleRetry = useCallback(async () => {
     try {
       const preview = await retryNodePreview(runId, node.node_id);
@@ -251,59 +259,26 @@ export default function NodeDetailPanel({
         </div>
       </div>
 
-      {/* Node control buttons */}
       {!isArchived && node.status !== "pending" && (
         <div
           className="flex items-center gap-1.5 border-b border-line px-3 py-1.5"
           data-testid="node-controls"
         >
-          {node.status === "running" ? (
-            <button
-              data-testid="stop-btn"
-              onClick={async () => {
-                try { await stopNode(runId, node.node_id); } catch { /* best-effort */ }
-              }}
-              className="flex cursor-pointer items-center gap-1 rounded border border-st-failed/40 bg-st-failed/10 px-2 py-0.5 text-st-failed transition-colors hover:bg-st-failed/20"
-              style={{ fontSize: "10.5px", fontWeight: 500 }}
-            >
-              <Square size={10} />
-              Stop
-            </button>
-          ) : (
-            <button
-              data-testid="stop-btn"
-              disabled
-              className="flex items-center gap-1 rounded border border-line bg-bg-3 px-2 py-0.5 text-fg-4 opacity-50"
-              style={{ fontSize: "10.5px", fontWeight: 500 }}
-            >
-              <Square size={10} />
-              Stop
-            </button>
-          )}
-          {node.status === "running" ? (
-            <button
-              data-testid="retry-btn"
-              onClick={handleRetry}
-              className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-2 transition-colors hover:bg-bg-4"
-              style={{ fontSize: "10.5px", fontWeight: 500 }}
-            >
-              <RotateCcw size={10} />
-              Retry
-            </button>
-          ) : ["completed", "failed", "stopped", "stale"].includes(node.status) ? (
-            <button
-              data-testid="play-retry-btn"
-              onClick={handleRetry}
-              className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-2 transition-colors hover:bg-bg-4"
-              style={{ fontSize: "10.5px", fontWeight: 500 }}
-            >
-              {node.status === "completed" ? (
-                <><RotateCcw size={10} /> Retry</>
-              ) : (
-                <><Play size={10} /> Play</>
-              )}
-            </button>
-          ) : null}
+          <button
+            data-testid="stop-btn"
+            disabled={node.status !== "running"}
+            onClick={node.status === "running" ? handleStop : undefined}
+            className={
+              node.status === "running"
+                ? "flex cursor-pointer items-center gap-1 rounded border border-st-failed/40 bg-st-failed/10 px-2 py-0.5 text-st-failed transition-colors hover:bg-st-failed/20"
+                : "flex items-center gap-1 rounded border border-line bg-bg-3 px-2 py-0.5 text-fg-4 opacity-50"
+            }
+            style={{ fontSize: "10.5px", fontWeight: 500 }}
+          >
+            <Square size={10} />
+            Stop
+          </button>
+          <RetryPlayButton status={node.status} onClick={handleRetry} />
         </div>
       )}
 
@@ -630,7 +605,61 @@ export default function NodeDetailPanel({
   );
 }
 
-// --- Prompt Section (collapsible) ---
+const RETRY_BUTTON_CLASS =
+  "flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-2 transition-colors hover:bg-bg-4";
+const RETRY_BUTTON_STYLE = { fontSize: "10.5px", fontWeight: 500 } as const;
+
+function RetryPlayButton({
+  status,
+  onClick,
+}: {
+  status: NodeStatus;
+  onClick: () => void;
+}) {
+  if (status === "running") {
+    return (
+      <button
+        data-testid="retry-btn"
+        onClick={onClick}
+        className={RETRY_BUTTON_CLASS}
+        style={RETRY_BUTTON_STYLE}
+      >
+        <RotateCcw size={10} />
+        Retry
+      </button>
+    );
+  }
+
+  if (status === "completed") {
+    return (
+      <button
+        data-testid="play-retry-btn"
+        onClick={onClick}
+        className={RETRY_BUTTON_CLASS}
+        style={RETRY_BUTTON_STYLE}
+      >
+        <RotateCcw size={10} />
+        Retry
+      </button>
+    );
+  }
+
+  if (status === "failed" || status === "stopped" || status === "stale") {
+    return (
+      <button
+        data-testid="play-retry-btn"
+        onClick={onClick}
+        className={RETRY_BUTTON_CLASS}
+        style={RETRY_BUTTON_STYLE}
+      >
+        <Play size={10} />
+        Play
+      </button>
+    );
+  }
+
+  return null;
+}
 
 function PromptSection({
   promptText,

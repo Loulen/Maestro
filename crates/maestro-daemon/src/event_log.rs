@@ -2382,8 +2382,6 @@ mod tests {
         assert_eq!(d, RunStatus::Paused);
     }
 
-    // --- NodeInvalidated projection (issue #124) ---
-
     #[test]
     fn node_invalidated_removes_node_from_state() {
         let events = vec![
