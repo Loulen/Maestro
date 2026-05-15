@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, Sparkles, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, FolderGit2, GitBranch, Sparkles, X } from "lucide-react";
 import type { PipelineListEntry } from "../types";
-import { createRun, fetchPipelines } from "../api";
+import { createRun, fetchPipelines, validateRepo, listBranches } from "../api";
 import type { LibraryPipelineEntry } from "../api";
 import { useEditStore } from "../stores/editStore";
 
@@ -24,6 +24,90 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Multi-repo state
+  const [targetRepo, setTargetRepo] = useState("");
+  const [repoValid, setRepoValid] = useState<boolean | null>(null);
+  const [repoError, setRepoError] = useState<string | null>(null);
+  const [repoValidating, setRepoValidating] = useState(false);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [sourceBranch, setSourceBranch] = useState("");
+  const [branchesLoading, setBranchesLoading] = useState(false);
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // Reset form state when modal opens — bounded: fires once per open toggle, no cascade.
+  /* eslint-disable react-hooks/set-state-in-effect -- modal form reset on open is intentionally synchronous */
+  useEffect(() => {
+    if (!open) return;
+    setTargetRepo("");
+    setRepoValid(null);
+    setRepoError(null);
+    setBranches([]);
+    setSourceBranch("");
+    setSelectedPipeline("");
+    setSelectedLibraryId(null);
+    setInput("");
+    setOverrides({});
+    setError(null);
+  }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const handleRepoChange = useCallback((value: string) => {
+    setTargetRepo(value);
+    if (!value.trim()) {
+      setRepoValid(null);
+      setRepoError(null);
+      setBranches([]);
+      setSourceBranch("");
+    }
+  }, []);
+
+  // Validate repo path with debounce
+  useEffect(() => {
+    if (!open || !targetRepo.trim()) return;
+
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      setRepoValidating(true);
+      setRepoError(null);
+      try {
+        const result = await validateRepo(targetRepo.trim());
+        setRepoValid(result.valid);
+        if (!result.valid) {
+          setRepoError(result.error ?? "Not a valid git repository");
+          setBranches([]);
+          setSourceBranch("");
+        } else {
+          setBranchesLoading(true);
+          try {
+            const branchList = await listBranches(targetRepo.trim());
+            setBranches(branchList);
+            if (branchList.length > 0 && !sourceBranch) {
+              const main = branchList.find((b) => b === "main")
+                ?? branchList.find((b) => b === "master")
+                ?? branchList[0];
+              setSourceBranch(main);
+            }
+          } catch {
+            setBranches([]);
+          } finally {
+            setBranchesLoading(false);
+          }
+        }
+      } catch {
+        setRepoValid(false);
+        setRepoError("Failed to validate repository");
+        setBranches([]);
+        setSourceBranch("");
+      } finally {
+        setRepoValidating(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(debounceRef.current);
+  }, [targetRepo, open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch pipelines after repo is validated (or always for library pipelines)
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -36,7 +120,9 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     return () => { cancelled = true; };
   }, [open]);
 
-  const shouldAutoSelect = open && libraryPipelines.length > 0 && !selectedPipeline && !selectedLibraryId;
+  // Auto-select first library pipeline when available
+  const shouldAutoSelect = open && repoValid && libraryPipelines.length > 0
+    && !selectedPipeline && !selectedLibraryId;
   if (shouldAutoSelect) {
     setSelectedPipeline(libraryPipelines[0].name);
     setSelectedLibraryId(libraryPipelines[0].id);
@@ -87,7 +173,7 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
   }, []);
 
   const handleLaunch = useCallback(async () => {
-    if ((!currentPipeline && !selectedLibraryId) || !input.trim()) return;
+    if (!repoValid || (!currentPipeline && !selectedLibraryId) || !input.trim()) return;
     setSubmitting(true);
     setError(null);
 
@@ -108,6 +194,8 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
         input: input.trim(),
         variables,
         pipeline_id: selectedLibraryId ?? undefined,
+        target_repo: targetRepo.trim() || undefined,
+        source_branch: sourceBranch || undefined,
       });
       onCreated(resp.run_id);
       setInput("");
@@ -118,7 +206,7 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     } finally {
       setSubmitting(false);
     }
-  }, [currentPipeline, selectedPipeline, selectedLibraryId, input, overrides, onCreated, onClose, flushPendingSaves]);
+  }, [currentPipeline, selectedPipeline, selectedLibraryId, input, overrides, onCreated, onClose, flushPendingSaves, repoValid, targetRepo, sourceBranch]);
 
   const repoPipelines = useMemo(
     () => pipelines.filter((p) => p.scope === "repo"),
@@ -129,6 +217,12 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     [pipelines],
   );
 
+  const canLaunch = repoValid && (selectedPipeline || selectedLibraryId) && input.trim();
+
+  let repoBorderClass = "border-line-strong focus:border-acc";
+  if (repoValid === true) repoBorderClass = "border-acc focus:border-acc";
+  else if (repoValid === false) repoBorderClass = "border-st-failed focus:border-st-failed";
+
   if (!open) return null;
 
   return (
@@ -137,13 +231,13 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
       onClick={onClose}
     >
       <div
-        className="w-[480px] rounded-lg border border-line bg-bg-4 shadow-xl"
+        className="w-[480px] max-h-[85vh] flex flex-col rounded-lg border border-line bg-bg-4 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="font-semibold text-fg" style={{ fontSize: "13.5px" }}>
-            Launch new run
+            New Run
           </h2>
           <button
             onClick={onClose}
@@ -154,83 +248,175 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
         </div>
 
         {/* Body */}
-        <div className="flex flex-col gap-4 px-4 py-4">
-          {/* Pipeline select */}
-          <div className="flex flex-col gap-1.5">
-            <label
-              className="font-medium text-fg-2"
-              style={{ fontSize: "11.5px" }}
-            >
-              Pipeline
-            </label>
-            <select
-              className="w-full rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none"
-              style={{ fontSize: "12px" }}
-              value={selectedLibraryId ? `${LIB_PREFIX}${selectedLibraryId}` : selectedPipeline}
-              onChange={(e) => handlePipelineChange(e.target.value)}
-            >
-              {libraryPipelines.length > 0 && (
-                <optgroup label="★ Starred templates">
-                  {libraryPipelines.map((p) => (
-                    <option key={`lib-${p.id}`} value={`${LIB_PREFIX}${p.id}`}>
-                      {p.name}
+        <div className="flex flex-col gap-0 overflow-y-auto px-4 py-4">
+
+          {/* ── WHERE ── */}
+          <div className="flex flex-col gap-3 pb-4 border-b border-line">
+            <span className="text-fg-4 uppercase tracking-wider font-medium" style={{ fontSize: "10px" }}>
+              Where
+            </span>
+
+            {/* Target repository */}
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="target-repo"
+                className="font-medium text-fg-2 flex items-center gap-1.5"
+                style={{ fontSize: "11.5px" }}
+              >
+                <FolderGit2 size={12} className="text-fg-3" />
+                Target repository
+              </label>
+              <input
+                id="target-repo"
+                className={`w-full rounded-md border bg-bg-3 px-2.5 py-1.5 font-mono text-fg placeholder:text-fg-4 transition-colors focus:outline-none ${repoBorderClass}`}
+                style={{ fontSize: "12px" }}
+                placeholder="/path/to/your/repo"
+                value={targetRepo}
+                onChange={(e) => handleRepoChange(e.target.value)}
+                data-testid="target-repo-input"
+              />
+              {repoValidating && (
+                <span className="text-fg-4" style={{ fontSize: "10.5px" }}>
+                  Validating...
+                </span>
+              )}
+              {repoError && (
+                <span className="text-st-failed" style={{ fontSize: "10.5px" }} data-testid="repo-error">
+                  {repoError}
+                </span>
+              )}
+              {repoValid && !repoError && (
+                <span className="text-acc" style={{ fontSize: "10.5px" }} data-testid="repo-valid">
+                  Valid git repository
+                </span>
+              )}
+            </div>
+
+            {/* Source branch — only shown after repo is validated */}
+            {repoValid && (
+              <div className="flex flex-col gap-1.5">
+                <label
+                  htmlFor="source-branch"
+                  className="font-medium text-fg-2 flex items-center gap-1.5"
+                  style={{ fontSize: "11.5px" }}
+                >
+                  <GitBranch size={12} className="text-fg-3" />
+                  Source branch
+                </label>
+                <select
+                  id="source-branch"
+                  className="w-full rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none disabled:opacity-40"
+                  style={{ fontSize: "12px" }}
+                  disabled={branches.length === 0}
+                  value={sourceBranch}
+                  onChange={(e) => setSourceBranch(e.target.value)}
+                  data-testid="source-branch-select"
+                >
+                  {branchesLoading && (
+                    <option value="">Loading branches...</option>
+                  )}
+                  {!branchesLoading && branches.length === 0 && (
+                    <option value="">Loading...</option>
+                  )}
+                  {branches.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
                     </option>
                   ))}
-                </optgroup>
-              )}
-              {repoPipelines.length > 0 && (
-                <optgroup label="Repo pipelines">
-                  {repoPipelines.map((p) => (
-                    <option key={p.name} value={p.name}>
-                      {p.name}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {userPipelines.length > 0 && (
-                <optgroup label="User pipelines">
-                  {userPipelines.map((p) => (
-                    <option key={p.name} value={p.name}>
-                      {p.name}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {libraryPipelines.length === 0 && pipelines.length === 0 && (
-                <option value="" disabled>
-                  No pipelines found. Star a template from the info panel to make it launchable.
-                </option>
-              )}
-            </select>
-            {libraryPipelines.length === 0 && pipelines.length > 0 && (
-              <span className="text-fg-4" style={{ fontSize: "10px" }}>
-                Star a template from the info panel to make it launchable.
-              </span>
+                </select>
+              </div>
             )}
           </div>
 
-          {/* Input textarea */}
-          <div className="flex flex-col gap-1.5">
-            <label
-              className="font-medium text-fg-2"
-              style={{ fontSize: "11.5px" }}
-            >
-              Input
-            </label>
-            <textarea
-              className="w-full resize-y rounded-md border border-line-strong bg-bg-3 px-2.5 py-2 font-mono text-fg placeholder:text-fg-4 focus:border-acc focus:outline-none"
-              style={{ fontSize: "12px" }}
-              rows={6}
-              placeholder="Free-text prompt, a GitHub issue link, or a mix."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-            />
-            <span className="text-fg-4" style={{ fontSize: "10.5px" }}>
-              Free-text prompt, an issue link, or a mix.
+          {/* ── HOW ── */}
+          <div className="flex flex-col gap-3 py-4 border-b border-line">
+            <span className="text-fg-4 uppercase tracking-wider font-medium" style={{ fontSize: "10px" }}>
+              How
             </span>
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="pipeline-select"
+                className="font-medium text-fg-2"
+                style={{ fontSize: "11.5px" }}
+              >
+                Pipeline
+              </label>
+              <select
+                id="pipeline-select"
+                className="w-full rounded-md border border-line-strong bg-bg-3 px-2.5 py-1.5 font-mono text-fg transition-colors focus:border-acc focus:outline-none disabled:opacity-40"
+                style={{ fontSize: "12px" }}
+                disabled={!repoValid}
+                value={selectedLibraryId ? `${LIB_PREFIX}${selectedLibraryId}` : selectedPipeline}
+                onChange={(e) => handlePipelineChange(e.target.value)}
+                data-testid="pipeline-select"
+              >
+                {!repoValid && (
+                  <option value="">Select a repository first</option>
+                )}
+                {repoValid && libraryPipelines.length === 0 && pipelines.length === 0 && (
+                  <option value="" disabled>
+                    No pipelines found
+                  </option>
+                )}
+                {repoValid && libraryPipelines.length > 0 && (
+                  <optgroup label="★ Starred templates">
+                    {libraryPipelines.map((p) => (
+                      <option key={`lib-${p.id}`} value={`${LIB_PREFIX}${p.id}`}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {repoValid && repoPipelines.length > 0 && (
+                  <optgroup label="Repo pipelines">
+                    {repoPipelines.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {repoValid && userPipelines.length > 0 && (
+                  <optgroup label="User pipelines">
+                    {userPipelines.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </div>
           </div>
 
-          {/* Variable overrides accordion */}
+          {/* ── WHAT ── */}
+          <div className="flex flex-col gap-3 py-4">
+            <span className="text-fg-4 uppercase tracking-wider font-medium" style={{ fontSize: "10px" }}>
+              What
+            </span>
+            <div className="flex flex-col gap-1.5">
+              <label
+                className="font-medium text-fg-2"
+                style={{ fontSize: "11.5px" }}
+              >
+                Prompt
+              </label>
+              <textarea
+                className="w-full resize-y rounded-md border border-line-strong bg-bg-3 px-2.5 py-2 font-mono text-fg placeholder:text-fg-4 focus:border-acc focus:outline-none"
+                style={{ fontSize: "12px" }}
+                rows={5}
+                placeholder="Free-text prompt, a GitHub issue link, or a mix."
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                data-testid="input-textarea"
+              />
+              <span className="text-fg-4" style={{ fontSize: "10.5px" }}>
+                Free-text prompt, an issue link, or a mix.
+              </span>
+            </div>
+          </div>
+
+          {/* ── CONFIG ── Variable overrides accordion */}
           {variableEntries.length > 0 && (
             <div className="rounded-md border border-line">
               <button
@@ -292,8 +478,9 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
 
           {error && (
             <div
-              className="rounded-md border border-st-failed/30 bg-st-failed-bg px-3 py-2 text-st-failed"
+              className="mt-3 rounded-md border border-st-failed/30 bg-st-failed-bg px-3 py-2 text-st-failed"
               style={{ fontSize: "11.5px" }}
+              data-testid="launch-error"
             >
               {error}
             </div>
@@ -311,9 +498,10 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
           </button>
           <button
             onClick={handleLaunch}
-            disabled={submitting || (!selectedPipeline && !selectedLibraryId) || !input.trim()}
+            disabled={submitting || !canLaunch}
             className="flex items-center gap-1.5 rounded-md bg-acc px-3 py-1.5 font-medium text-[#04140d] transition-colors hover:bg-acc-dim disabled:opacity-40"
             style={{ fontSize: "11.5px" }}
+            data-testid="launch-button"
           >
             <Sparkles size={12} />
             {submitting ? "Launching…" : "Launch"}

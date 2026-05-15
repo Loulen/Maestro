@@ -201,6 +201,10 @@ pub struct RunState {
     pub loop_states: HashMap<String, LoopState>,
     #[serde(default)]
     pub foreach_states: HashMap<String, ForEachState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
 }
 
 impl RunState {
@@ -220,6 +224,8 @@ impl RunState {
             merge_resolver: None,
             loop_states: HashMap::new(),
             foreach_states: HashMap::new(),
+            target_repo: None,
+            source_branch: None,
         }
     }
 }
@@ -296,6 +302,12 @@ pub fn project(events: &[Event]) -> Option<RunState> {
                         {
                             state.node_defs = parsed;
                         }
+                    }
+                    if let Some(tr) = payload.get("target_repo").and_then(|v| v.as_str()) {
+                        state.target_repo = Some(tr.to_string());
+                    }
+                    if let Some(sb) = payload.get("source_branch").and_then(|v| v.as_str()) {
+                        state.source_branch = Some(sb.to_string());
                     }
 
                     state.start_node = Some(StartNodeInfo {

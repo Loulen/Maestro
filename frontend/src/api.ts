@@ -162,6 +162,8 @@ export interface CreateRunRequest {
   input: string;
   variables: Record<string, unknown>;
   pipeline_id?: string;
+  target_repo?: string;
+  source_branch?: string;
 }
 
 export interface CreateRunResponse {
@@ -174,7 +176,28 @@ export async function createRun(req: CreateRunRequest): Promise<CreateRunRespons
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
-  if (!resp.ok) throw new Error(`POST /runs failed: ${resp.status}`);
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => null);
+    throw new Error(body?.error ?? `POST /runs failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// --- Repo validation and branch listing ---
+
+export interface ValidateRepoResponse {
+  valid: boolean;
+  error?: string;
+}
+
+export async function validateRepo(path: string): Promise<ValidateRepoResponse> {
+  const resp = await fetch(`${BASE}/repos/validate?path=${encodeURIComponent(path)}`);
+  return resp.json();
+}
+
+export async function listBranches(repoPath: string): Promise<string[]> {
+  const resp = await fetch(`${BASE}/repos/branches?path=${encodeURIComponent(repoPath)}`);
+  if (!resp.ok) throw new Error(`GET /repos/branches failed: ${resp.status}`);
   return resp.json();
 }
 

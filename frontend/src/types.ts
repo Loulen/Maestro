@@ -115,6 +115,8 @@ export interface RunState {
   merge_resolver: MergeResolverInfo | null;
   loop_states?: Record<string, LoopStateInfo>;
   foreach_states?: Record<string, ForEachStateInfo>;
+  target_repo?: string | null;
+  source_branch?: string | null;
 }
 
 export interface DaemonEvent {

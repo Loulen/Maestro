@@ -18,6 +18,7 @@ export default defineConfig({
       '/runs': 'http://127.0.0.1:5172',
       '/pipelines': 'http://127.0.0.1:5172',
       '/library': 'http://127.0.0.1:5172',
+      '/repos': 'http://127.0.0.1:5172',
     },
   },
   test: {
