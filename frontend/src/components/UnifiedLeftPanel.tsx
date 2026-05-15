@@ -21,6 +21,7 @@ const STATUS_STYLES: Record<RunStatus, { dot: string }> = {
 const SCOPE_BADGE: Record<PipelineScope, { label: string; cls: string }> = {
   repo: { label: "repo", cls: "border-acc text-acc" },
   user: { label: "user", cls: "border-st-await text-st-await" },
+  library: { label: "library", cls: "border-st-await text-st-await" },
 };
 
 interface Props {

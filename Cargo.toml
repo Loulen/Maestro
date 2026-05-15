@@ -30,3 +30,4 @@ portable-pty = "0.8"
 pretty_assertions = "1"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
+sha2 = "0.10"

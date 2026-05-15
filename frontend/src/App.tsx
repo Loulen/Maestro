@@ -527,7 +527,6 @@ export default function App() {
         open={newRunModalOpen}
         onClose={() => setNewRunModalOpen(false)}
         onCreated={handleRunCreated}
-        libraryPipelines={libraryPipelines}
       />
       <ConflictModal
         open={conflictTab != null}

@@ -155,7 +155,7 @@ export interface PipelineVariableInfo {
 
 // --- Edit mode types ---
 
-export type PipelineScope = "repo" | "user";
+export type PipelineScope = "repo" | "user" | "library";
 
 export interface PipelineListEntry {
   id: string;
@@ -165,6 +165,7 @@ export interface PipelineListEntry {
   node_count: number;
   modified: string | null;
   variables: Record<string, PipelineVariableInfo>;
+  drifted?: boolean | null;
 }
 
 export type PortSide = "left" | "right" | "top" | "bottom";
