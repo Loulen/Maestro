@@ -36,6 +36,34 @@ pub struct AugmentContext<'a> {
     /// agent must edit in. Set to `None` for nodes that run directly in the
     /// pipeline worktree (doc-only, switch, loop, etc.).
     pub source_worktree_dir: Option<&'a Path>,
+    pub input_images: Vec<String>,
+}
+
+pub fn discover_input_images(artifacts_dir: &Path) -> Vec<String> {
+    let input_dir = artifacts_dir.join("_input");
+    let entries = match std::fs::read_dir(&input_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut images = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        if crate::ALLOWED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                images.push(name.to_string());
+            }
+        }
+    }
+    images.sort();
+    images
 }
 
 pub fn resolve_input_paths(ctx: &AugmentContext<'_>) -> Vec<InputResolution> {
@@ -150,6 +178,21 @@ pub fn build_preamble(ctx: &AugmentContext<'_>) -> String {
                     input.path.display()
                 ));
             }
+        }
+        preamble.push('\n');
+    }
+
+    // Input images
+    if !ctx.input_images.is_empty() {
+        preamble.push_str("## Input Images\n\n");
+        preamble.push_str(
+            "The following images were uploaded alongside the text prompt. \
+             Use the Read tool to view them:\n",
+        );
+        let input_dir = ctx.artifacts_dir.join("_input");
+        for filename in &ctx.input_images {
+            let img_path = input_dir.join(filename);
+            preamble.push_str(&format!("- `{}`\n", img_path.display()));
         }
         preamble.push('\n');
     }
@@ -448,6 +491,7 @@ mod tests {
             daemon_url: "http://localhost:5172",
             foreach_context: None,
             source_worktree_dir: None,
+            input_images: Vec::new(),
         }
     }
 
@@ -1032,5 +1076,74 @@ mod tests {
             "image port path should be a directory, not output.md"
         );
         assert!(outputs[0].path.to_string_lossy().ends_with("/img"));
+    }
+
+    #[test]
+    fn discover_input_images_finds_image_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts_dir = tmp.path().join("artifacts");
+        let input_dir = artifacts_dir.join("_input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(input_dir.join("output.md"), "text prompt").unwrap();
+        std::fs::write(input_dir.join("screenshot.png"), &[0x89]).unwrap();
+        std::fs::write(input_dir.join("diagram.jpg"), &[0xFF]).unwrap();
+        std::fs::write(input_dir.join("notes.txt"), "not an image").unwrap();
+
+        let images = discover_input_images(&artifacts_dir);
+        assert_eq!(images, vec!["diagram.jpg", "screenshot.png"]);
+    }
+
+    #[test]
+    fn discover_input_images_returns_empty_when_no_images() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts_dir = tmp.path().join("artifacts");
+        let input_dir = artifacts_dir.join("_input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(input_dir.join("output.md"), "text only").unwrap();
+
+        let images = discover_input_images(&artifacts_dir);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn discover_input_images_returns_empty_when_no_input_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts_dir = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+
+        let images = discover_input_images(&artifacts_dir);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn preamble_includes_image_section_when_images_present() {
+        let pipeline = sample_pipeline();
+        let node = &pipeline.nodes[0];
+        let vars = HashMap::new();
+        let mut ctx = sample_ctx(&pipeline, node, &vars);
+        ctx.input_images = vec!["screenshot.png".into(), "diagram.jpg".into()];
+
+        let preamble = build_preamble(&ctx);
+        assert!(
+            preamble.contains("## Input Images"),
+            "preamble should contain Input Images section"
+        );
+        assert!(preamble.contains("screenshot.png"));
+        assert!(preamble.contains("diagram.jpg"));
+        assert!(preamble.contains("_input/screenshot.png"));
+    }
+
+    #[test]
+    fn preamble_omits_image_section_when_no_images() {
+        let pipeline = sample_pipeline();
+        let node = &pipeline.nodes[0];
+        let vars = HashMap::new();
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let preamble = build_preamble(&ctx);
+        assert!(
+            !preamble.contains("Input Images"),
+            "preamble should not contain Input Images section when no images"
+        );
     }
 }

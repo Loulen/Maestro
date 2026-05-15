@@ -197,6 +197,171 @@ describe("NewRunModal — multi-repo form flow", () => {
   });
 });
 
+describe("NewRunModal — image upload", () => {
+  it("renders the image upload area", async () => {
+    renderModal();
+    expect(screen.getByTestId("image-drop-zone")).toBeInTheDocument();
+    expect(screen.getByTestId("image-upload-button")).toBeInTheDocument();
+    expect(screen.getByText(/paste, drag-drop, or click/i)).toBeInTheDocument();
+  });
+
+  it("shows 'Optional' hint when no images attached", () => {
+    renderModal();
+    expect(screen.getByText(/optional/i)).toBeInTheDocument();
+  });
+
+  it("adds images via file input and shows thumbnails", async () => {
+    renderModal();
+    const fileInput = screen.getByTestId("image-file-input") as HTMLInputElement;
+
+    const file = new File(["png-data"], "screenshot.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => {
+      const thumbnails = screen.getAllByTestId("image-thumbnail");
+      expect(thumbnails).toHaveLength(1);
+    });
+    expect(screen.getByText("1 image attached")).toBeInTheDocument();
+  });
+
+  it("shows remove button and removes image on click", async () => {
+    renderModal();
+    const fileInput = screen.getByTestId("image-file-input") as HTMLInputElement;
+
+    const file = new File(["png-data"], "test.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("image-thumbnail")).toHaveLength(1);
+    });
+
+    const removeBtn = screen.getByTestId("image-remove-button");
+    fireEvent.click(removeBtn);
+
+    await waitFor(() => {
+      expect(screen.queryAllByTestId("image-thumbnail")).toHaveLength(0);
+    });
+    expect(screen.getByText(/optional/i)).toBeInTheDocument();
+  });
+
+  it("supports multiple images", async () => {
+    renderModal();
+    const fileInput = screen.getByTestId("image-file-input") as HTMLInputElement;
+
+    const file1 = new File(["a"], "one.png", { type: "image/png" });
+    const file2 = new File(["b"], "two.jpg", { type: "image/jpeg" });
+    fireEvent.change(fileInput, { target: { files: [file1, file2] } });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("image-thumbnail")).toHaveLength(2);
+    });
+    expect(screen.getByText("2 images attached")).toBeInTheDocument();
+  });
+
+  it("shows add-more button when images exist", async () => {
+    renderModal();
+    const fileInput = screen.getByTestId("image-file-input") as HTMLInputElement;
+
+    const file = new File(["png"], "img.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("image-add-more-button")).toBeInTheDocument();
+    });
+  });
+
+  it("passes images to createRun on launch", async () => {
+    const onCreated = vi.fn();
+    const pipelines: LibraryPipelineEntry[] = [
+      { id: "p1", name: "Test Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "", prompts: {} },
+    ];
+
+    render(
+      <NewRunModal
+        open={true}
+        onClose={noop}
+        onCreated={onCreated}
+        libraryPipelines={pipelines}
+      />,
+    );
+
+    await enterValidRepo();
+
+    const inputTextarea = screen.getByPlaceholderText(/free-text prompt/i);
+    fireEvent.change(inputTextarea, { target: { value: "implement feature" } });
+
+    const fileInput = screen.getByTestId("image-file-input") as HTMLInputElement;
+    const file = new File(["png-data"], "design.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("image-thumbnail")).toHaveLength(1);
+    });
+
+    vi.useRealTimers();
+    const launchButton = screen.getByRole("button", { name: /launch/i });
+    fireEvent.click(launchButton);
+
+    await waitFor(() => {
+      expect(createRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: "implement feature",
+          images: expect.arrayContaining([
+            expect.objectContaining({ name: "design.png" }),
+          ]),
+        }),
+      );
+    });
+  });
+
+  it("does not pass images when none attached", async () => {
+    const onCreated = vi.fn();
+    const pipelines: LibraryPipelineEntry[] = [
+      { id: "p1", name: "Test Pipeline", scope: "repo", node_count: 2, modified: null, yaml: "", prompts: {} },
+    ];
+
+    render(
+      <NewRunModal
+        open={true}
+        onClose={noop}
+        onCreated={onCreated}
+        libraryPipelines={pipelines}
+      />,
+    );
+
+    await enterValidRepo();
+
+    const inputTextarea = screen.getByPlaceholderText(/free-text prompt/i);
+    fireEvent.change(inputTextarea, { target: { value: "text only" } });
+
+    vi.useRealTimers();
+    const launchButton = screen.getByRole("button", { name: /launch/i });
+    fireEvent.click(launchButton);
+
+    await waitFor(() => {
+      expect(createRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: "text only",
+          images: undefined,
+        }),
+      );
+    });
+  });
+
+  it("filters non-image files from file input", async () => {
+    renderModal();
+    const fileInput = screen.getByTestId("image-file-input") as HTMLInputElement;
+
+    const textFile = new File(["text"], "notes.txt", { type: "text/plain" });
+    const imageFile = new File(["png"], "img.png", { type: "image/png" });
+    fireEvent.change(fileInput, { target: { files: [textFile, imageFile] } });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("image-thumbnail")).toHaveLength(1);
+    });
+  });
+});
+
 describe("NewRunModal run name field", () => {
   it("renders a name input and auto-generated checkbox", () => {
     renderModal([]);
