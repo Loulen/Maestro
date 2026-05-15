@@ -189,7 +189,7 @@ export default function TmuxTerminal({
   }, [session]);
 
   const isActive =
-    status === "running" || status === "awaiting_user";
+    status === "running" || status === "awaiting_user" || status === "stale";
 
   let dotClass: string;
   let statusLabel: string;

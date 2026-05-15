@@ -57,6 +57,12 @@
   --color-st-failed: #ef4444;
   --color-st-failed-bg: rgba(239, 68, 68, 0.14);
   --color-st-archived: #6b7280;
+  --color-st-stopped: #9ca3af;
+  --color-st-stopped-bg: rgba(156, 163, 175, 0.14);
+  --color-st-stale: #d97706;
+  --color-st-stale-bg: rgba(217, 119, 6, 0.14);
+  --color-st-paused: #f97316;
+  --color-st-paused-bg: rgba(249, 115, 22, 0.14);
   --color-st-pending: #4b5563;
 
   /* Edit-mode chrome */

@@ -19,6 +19,8 @@ describe("NodeCard", () => {
     ["awaiting_user", "border-st-await"],
     ["completed", "border-st-done"],
     ["failed", "border-st-failed"],
+    ["stopped", "border-st-stopped"],
+    ["stale", "border-st-stale"],
   ])("status %s applies border class %s", (status, expectedClass) => {
     const { container } = render(
       <NodeCard status={status}><span>child</span></NodeCard>,

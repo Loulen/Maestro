@@ -34,6 +34,33 @@ function renderPanel({
   );
 }
 
+describe("RunsListPanel run status rendering", () => {
+  it("renders paused run with correct status dot", () => {
+    const runs: RunListEntry[] = [
+      { run_id: "run-1", pipeline_name: "test-pipe", status: "paused", started_at: null },
+    ];
+    renderPanel({ runs });
+    const dot = document.querySelector(".bg-st-paused");
+    expect(dot).toBeInTheDocument();
+  });
+
+  it("renders all run statuses without errors", () => {
+    const statuses: RunListEntry["status"][] = [
+      "running", "awaiting_user", "completed", "failed", "halted", "paused", "archived",
+    ];
+    const runs: RunListEntry[] = statuses.map((status, i) => ({
+      run_id: `run-${i}`,
+      pipeline_name: `pipe-${status}`,
+      status,
+      started_at: null,
+    }));
+    renderPanel({ runs });
+    for (const status of statuses) {
+      expect(screen.getByText(`pipe-${status}`)).toBeInTheDocument();
+    }
+  });
+});
+
 describe("RunsListPanel Library section", () => {
   it("renders the Library header", () => {
     renderPanel();

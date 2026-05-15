@@ -32,15 +32,19 @@ const STATUS_LABELS: Record<NodeStatus, string> = {
   awaiting_user: "Awaiting User",
   completed: "Completed",
   failed: "Failed",
+  stopped: "Stopped",
+  stale: "Stale",
 };
 
 function pollInterval(status: NodeStatus): number | null {
   switch (status) {
     case "running":
     case "awaiting_user":
+    case "stale":
       return 1000;
     case "completed":
     case "failed":
+    case "stopped":
       return 5000;
     case "pending":
       return null;
@@ -224,6 +228,32 @@ export default function NodeDetailPanel({
         </div>
       )}
 
+      {/* Stale banner */}
+      {node.status === "stale" && (
+        <div className="flex items-center gap-2 border-b border-st-stale/30 bg-st-stale-bg px-3 py-2">
+          <AlertCircle size={14} className="shrink-0 text-st-stale" />
+          <span
+            className="text-st-stale"
+            style={{ fontSize: "11.5px", fontWeight: 500 }}
+          >
+            Stale — agent idle, outputs incomplete
+          </span>
+        </div>
+      )}
+
+      {/* Stopped banner */}
+      {node.status === "stopped" && (
+        <div className="flex items-center gap-2 border-b border-st-stopped/30 bg-st-stopped-bg px-3 py-2">
+          <AlertCircle size={14} className="shrink-0 text-st-stopped" />
+          <span
+            className="text-st-stopped"
+            style={{ fontSize: "11.5px", fontWeight: 500 }}
+          >
+            Stopped{node.failure_reason ? ` — ${node.failure_reason}` : ""}
+          </span>
+        </div>
+      )}
+
       {/* Frontmatter retry pending banner (amber) */}
       {node.status === "running" && (node.frontmatter_retries ?? 0) > 0 && (
         <div
@@ -323,7 +353,7 @@ export default function NodeDetailPanel({
           >
             {/* Actions */}
             <div className="flex flex-col gap-1.5 px-3 py-2">
-              {(node.status === "awaiting_user" || node.status === "running" || node.status === "failed") && !isArchived && (
+              {(node.status === "awaiting_user" || node.status === "running" || node.status === "failed" || node.status === "stale") && !isArchived && (
                 <>
                   <button
                     onClick={handleMarkComplete}
@@ -484,6 +514,8 @@ const STATUS_DOTS: Record<NodeStatus, string> = {
   awaiting_user: "bg-st-await",
   completed: "bg-st-done",
   failed: "bg-st-failed",
+  stopped: "bg-st-stopped",
+  stale: "bg-st-stale",
 };
 
 function IterSelector({
@@ -719,6 +751,10 @@ function terminalPlaceholder(node: NodeState): string {
       return "Session ended.";
     case "failed":
       return `Failed: ${node.failure_reason ?? "unknown reason"}`;
+    case "stopped":
+      return `Stopped: ${node.failure_reason ?? "user stopped"}`;
+    case "stale":
+      return "Agent idle — outputs incomplete";
     case "running":
       return "Connecting...";
     case "awaiting_user":

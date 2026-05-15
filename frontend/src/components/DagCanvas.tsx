@@ -14,7 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Trash2, Terminal, Info, Play, Square } from "lucide-react";
-import type { NodeStatus, NodeType, PipelineDef, PipelineDetail, RunState, RunStatus, PortBrief } from "../types";
+import { isLiveRun, type NodeStatus, type NodeType, type PipelineDef, type PipelineDetail, type RunState, type RunStatus, type PortBrief } from "../types";
 import { cleanupRun, attachManager, fetchRunPipeline, saveRunPipeline } from "../api";
 import { serializePipeline } from "../stores/editStore";
 
@@ -65,6 +65,7 @@ const RUN_STATUS_DOTS: Record<RunStatus, string> = {
   completed: "bg-st-done",
   failed: "bg-st-failed",
   halted: "bg-st-blocked",
+  paused: "bg-st-paused",
   archived: "bg-st-archived",
 };
 
@@ -284,7 +285,6 @@ const nodeTypes = {
 };
 
 const TERMINAL_STATUSES: RunStatus[] = ["completed", "failed", "halted"];
-const LIVE_STATUSES: RunStatus[] = ["running", "awaiting_user"];
 
 interface Props {
   run: RunState | null;
@@ -798,7 +798,7 @@ function DagCanvasInner({
   }
 
   const isTerminal = TERMINAL_STATUSES.includes(run.status);
-  const isLive = LIVE_STATUSES.includes(run.status);
+  const isLive = isLiveRun(run.status);
   const canCleanup = isTerminal || isLive;
 
   async function handleCleanup() {
