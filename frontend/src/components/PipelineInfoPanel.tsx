@@ -32,8 +32,8 @@ const STATUS_DOT: Record<string, string> = {
 export default function PipelineInfoPanel({
   run,
   pipeline,
-  libraryPipelines: _libraryPipelines,
-  onLibraryChanged: _onLibraryChanged,
+  libraryPipelines: _libraryPipelines, // eslint-disable-line @typescript-eslint/no-unused-vars
+  onLibraryChanged: _onLibraryChanged, // eslint-disable-line @typescript-eslint/no-unused-vars
   onClose,
   initialTab,
   scrollToLine,
