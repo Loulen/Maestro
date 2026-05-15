@@ -45,12 +45,16 @@ export default function MarkdownArtifactModal({
     source.kind === "static" ? source.files : [],
   );
   const [fileIndex, setFileIndex] = useState(0);
-  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesLoading, setFilesLoading] = useState(source.kind === "iter-nav");
+
+  const changeIter = useCallback((newIter: number) => {
+    setFilesLoading(true);
+    setIter(newIter);
+  }, []);
 
   useEffect(() => {
     if (source.kind !== "iter-nav") return;
     let cancelled = false;
-    setFilesLoading(true);
     fetchNodeIO(runId, source.nodeId, iter)
       .then((io) => {
         if (cancelled) return;
@@ -114,14 +118,14 @@ export default function MarkdownArtifactModal({
 
   const goPrevIter = useCallback(() => {
     if (!hasIterNav || iterIndex <= 0) return;
-    setIter(iterNumbers[iterIndex - 1]);
-  }, [hasIterNav, iterIndex, iterNumbers]);
+    changeIter(iterNumbers[iterIndex - 1]);
+  }, [hasIterNav, iterIndex, iterNumbers, changeIter]);
 
   const goNextIter = useCallback(() => {
     if (!hasIterNav || iterIndex < 0 || iterIndex >= iterNumbers.length - 1)
       return;
-    setIter(iterNumbers[iterIndex + 1]);
-  }, [hasIterNav, iterIndex, iterNumbers]);
+    changeIter(iterNumbers[iterIndex + 1]);
+  }, [hasIterNav, iterIndex, iterNumbers, changeIter]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
