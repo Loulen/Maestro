@@ -2083,7 +2083,10 @@ async fn run_diff(
     {
         Ok(o) => o,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git diff failed: {e}"),
+            )
                 .into_response();
         }
     };
@@ -2093,7 +2096,10 @@ async fn run_diff(
         if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
             return (StatusCode::NOT_FOUND, "run branch not found").into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git diff failed: {stderr}"),
+        )
             .into_response();
     }
 
@@ -2132,7 +2138,10 @@ async fn node_diff(
     {
         Ok(o) => o,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git diff failed: {e}"),
+            )
                 .into_response();
         }
     };
@@ -2142,7 +2151,10 @@ async fn node_diff(
         if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
             return (StatusCode::NOT_FOUND, "node branch not found").into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git diff failed: {stderr}"),
+        )
             .into_response();
     }
 
@@ -2704,14 +2716,31 @@ async fn artifact(
         return (StatusCode::BAD_REQUEST, "path traversal not allowed").into_response();
     }
 
-    match std::fs::read_to_string(&resolved) {
-        Ok(content) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/markdown")],
-            content,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
+    let mime = match resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => "text/markdown",
+    };
+
+    if mime.starts_with("image/") {
+        match std::fs::read(&resolved) {
+            Ok(bytes) => (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
+        }
+    } else {
+        match std::fs::read_to_string(&resolved) {
+            Ok(content) => {
+                (StatusCode::OK, [(header::CONTENT_TYPE, mime)], content).into_response()
+            }
+            Err(_) => (StatusCode::NOT_FOUND, "artifact not found").into_response(),
+        }
     }
 }
 
@@ -8372,6 +8401,7 @@ mod tests {
                     name: "in".into(),
                     repeated: false,
                     side: None,
+                    port_type: PortType::Markdown,
                     frontmatter: None,
                     when: None,
                     description: None,
@@ -8380,6 +8410,7 @@ mod tests {
                     name: "pass".into(),
                     repeated: false,
                     side: None,
+                    port_type: PortType::Markdown,
                     frontmatter: None,
                     when: Some(serde_yaml::from_str("iter: { lt: \"$max_iter_review\" }").unwrap()),
                     description: None,
@@ -8422,6 +8453,7 @@ mod tests {
                     name: "in".into(),
                     repeated: false,
                     side: None,
+                    port_type: PortType::Markdown,
                     frontmatter: None,
                     when: None,
                     description: None,
@@ -9078,7 +9110,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let app = build_router(state);
         let resp = app
@@ -9114,7 +9146,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Make a change on the pipeline branch
         std::fs::write(wt_dir.join("new_file.rs"), "fn hello() {}\n").unwrap();
@@ -9147,8 +9179,14 @@ edges: []
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("new_file.rs"), "diff should mention new_file.rs");
-        assert!(body.contains("fn hello()"), "diff should contain the added content");
+        assert!(
+            body.contains("new_file.rs"),
+            "diff should mention new_file.rs"
+        );
+        assert!(
+            body.contains("fn hello()"),
+            "diff should contain the added content"
+        );
     }
 
     #[tokio::test]
@@ -9163,7 +9201,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Create a sub-worktree for impl-1
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
@@ -9201,8 +9239,14 @@ edges: []
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("node_file.rs"), "diff should mention node_file.rs");
-        assert!(body.contains("fn node_work()"), "diff should contain the node's changes");
+        assert!(
+            body.contains("node_file.rs"),
+            "diff should mention node_file.rs"
+        );
+        assert!(
+            body.contains("fn node_work()"),
+            "diff should contain the node's changes"
+        );
     }
 
     #[tokio::test]
@@ -9217,7 +9261,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let app = build_router(state);
         let resp = app
