@@ -138,7 +138,6 @@ export default function SwitchDetailPanel({
           </div>
         )}
 
-        {/* No terminal, no prompt — Switch evaluates in-process */}
         <div className="border-t border-line px-3 py-2 text-fg-4" style={{ fontSize: "10px" }}>
           Switch nodes evaluate in-process — no agent session.
         </div>
