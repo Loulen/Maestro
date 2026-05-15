@@ -229,6 +229,38 @@ export async function listBranches(repoPath: string): Promise<string[]> {
   return resp.json();
 }
 
+export async function killNode(
+  runId: string,
+  nodeId: string,
+  iter: number,
+): Promise<void> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/commands`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "kill_node", node_id: nodeId, iter }),
+    },
+  );
+  if (!resp.ok) throw new Error(`kill_node failed: ${resp.status}`);
+}
+
+export async function restartNode(
+  runId: string,
+  nodeId: string,
+  iter: number,
+): Promise<void> {
+  const resp = await fetch(
+    `${BASE}/runs/${encodeURIComponent(runId)}/commands`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "restart_node", node_id: nodeId, iter }),
+    },
+  );
+  if (!resp.ok) throw new Error(`restart_node failed: ${resp.status}`);
+}
+
 export async function cleanupRun(runId: string): Promise<void> {
   const resp = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/commands`, {
     method: "POST",

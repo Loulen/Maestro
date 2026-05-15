@@ -4,10 +4,14 @@ import {
   AlertCircle,
   ChevronDown,
   ChevronRight,
+  Square,
+  RotateCcw,
 } from "lucide-react";
 import type { IterationInfo, NodeState, NodeStatus } from "../types";
 import {
   markNodeDone,
+  killNode,
+  restartNode,
   fetchPrompt,
   fetchNodeIO,
   artifactUrl,
@@ -233,14 +237,43 @@ export default function NodeDetailPanel({
 
       {/* Stale banner */}
       {node.status === "stale" && (
-        <div className="flex items-center gap-2 border-b border-st-stale/30 bg-st-stale-bg px-3 py-2">
+        <div
+          className="flex items-center gap-2 border-b border-st-stale/30 bg-st-stale-bg px-3 py-2"
+          data-testid="stale-banner"
+        >
           <AlertCircle size={14} className="shrink-0 text-st-stale" />
           <span
-            className="text-st-stale"
+            className="flex-1 text-st-stale"
             style={{ fontSize: "11.5px", fontWeight: 500 }}
           >
-            Stale — agent idle, outputs incomplete
+            Agent idle for &gt;2 min — outputs incomplete
           </span>
+          {!isArchived && (
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="stale-stop-btn"
+                onClick={async () => {
+                  try { await killNode(runId, node.node_id, selectedIter); } catch { /* best-effort */ }
+                }}
+                className="flex cursor-pointer items-center gap-1 rounded border border-st-stale/40 bg-st-stale/10 px-1.5 py-0.5 text-st-stale transition-colors hover:bg-st-stale/20"
+                style={{ fontSize: "10.5px", fontWeight: 500 }}
+              >
+                <Square size={10} />
+                Stop
+              </button>
+              <button
+                data-testid="stale-retry-btn"
+                onClick={async () => {
+                  try { await restartNode(runId, node.node_id, selectedIter); } catch { /* best-effort */ }
+                }}
+                className="flex cursor-pointer items-center gap-1 rounded border border-st-stale/40 bg-st-stale/10 px-1.5 py-0.5 text-st-stale transition-colors hover:bg-st-stale/20"
+                style={{ fontSize: "10.5px", fontWeight: 500 }}
+              >
+                <RotateCcw size={10} />
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       )}
 

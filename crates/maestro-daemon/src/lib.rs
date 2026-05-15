@@ -18,6 +18,7 @@ mod prompt_augmenter;
 mod pty_bridge;
 mod scheduler;
 mod scheduler_dispatcher;
+pub mod stale_detector;
 mod switch_router;
 pub mod tmux_session_manager;
 #[allow(dead_code)]
@@ -381,10 +382,25 @@ pub async fn serve(addr: SocketAddr, repo_root: PathBuf) -> Result<DaemonHandle>
         handle_run_pipeline_modifications(mod_state, run_modified_rx).await;
     });
 
+    // Background task: stale detection (dead sessions + idle agents)
+    let _stale_handle = if nested_daemon {
+        None
+    } else {
+        let stale_state = state.clone();
+        Some(tokio::spawn(async move {
+            let mut tick = time::interval(Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                run_stale_detection(&stale_state).await;
+            }
+        }))
+    };
+
     let task = tokio::spawn(async move {
         let _watcher = watcher; // keep the file watcher alive for the server's lifetime
         let _reaper = _reaper_handle; // keep the reaper alive
         let _run_modified = _run_modified_handle; // keep the pipeline_modified handler alive
+        let _stale = _stale_handle; // keep the stale detector alive
         axum::serve(listener, app).await.context("server error")?;
         Ok(())
     });
@@ -2651,6 +2667,118 @@ fn sync_run_pipeline_to_template(
         "Synced run {run_id} pipeline to template at {}",
         template_path.display()
     );
+}
+
+// --- Stale detection ---
+
+async fn run_stale_detection(state: &AppState) {
+    let run_ids = match load_all_run_ids(&state.db).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!("Stale detector: failed to load run ids: {e}");
+            return;
+        }
+    };
+
+    let socket = state.tmux_socket();
+    let now = std::time::SystemTime::now();
+
+    for run_id in &run_ids {
+        let events = match load_events(&state.db, run_id).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let run_state = match event_log::project(&events) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        if run_state.status != event_log::RunStatus::Running
+            && run_state.status != event_log::RunStatus::AwaitingUser
+        {
+            continue;
+        }
+
+        let repo_root = effective_repo_root(state, &run_state);
+        let worktree_dir = worktree_dir_for_run(&repo_root, run_id);
+        let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
+        let pipeline_path =
+            resolve_run_pipeline_path(&repo_root, run_id, &run_state.pipeline_name);
+
+        let running = stale_detector::running_nodes(&run_state);
+        for (node_id, iter) in &running {
+            let node_type = find_node_type(&run_state, node_id);
+            let is_cm = matches!(node_type, Some("code-mutating") | Some("merge"));
+
+            let working_dir = if is_cm {
+                sub_worktree_path(&repo_root, run_id, node_id, *iter)
+            } else {
+                worktree_dir.clone()
+            };
+
+            let session_name =
+                tmux_session_manager::node_session_name(run_id, node_id, *iter);
+            let session_alive =
+                tmux_session_manager::session_exists(&socket, &session_name);
+
+            let jsonl_mtime = stale_detector::find_session_jsonl(&working_dir)
+                .and_then(|p| std::fs::metadata(&p).ok())
+                .and_then(|m| m.modified().ok());
+
+            let artifacts_valid = if jsonl_mtime
+                .and_then(|mt| now.duration_since(mt).ok())
+                .is_some_and(|age| age >= stale_detector::STALE_THRESHOLD)
+            {
+                Some(stale_detector::validate_outputs(
+                    &pipeline_path,
+                    node_id,
+                    *iter,
+                    &artifacts_dir,
+                ))
+            } else {
+                None
+            };
+
+            let probe = stale_detector::NodeProbe {
+                session_alive,
+                jsonl_mtime,
+                now,
+                artifacts_valid,
+            };
+
+            let detection = stale_detector::decide(&probe);
+            if detection == stale_detector::Detection::Ok {
+                continue;
+            }
+
+            let events = stale_detector::detection_events(&detection, run_id, node_id, *iter);
+            for event in &events {
+                if let Err(e) = append_event(state, event).await {
+                    error!("Stale detector: failed to append event: {e}");
+                }
+            }
+
+            match detection {
+                stale_detector::Detection::SessionDied => {
+                    info!(
+                        "Stale detector: node {node_id} in run {run_id} — session died"
+                    );
+                }
+                stale_detector::Detection::AutoComplete => {
+                    info!(
+                        "Stale detector: node {node_id} in run {run_id} — auto-completing (idle + valid outputs)"
+                    );
+                    spawn_ready_after_event(state, run_id).await;
+                }
+                stale_detector::Detection::Stale => {
+                    info!(
+                        "Stale detector: node {node_id} in run {run_id} — stale (idle + incomplete outputs)"
+                    );
+                }
+                stale_detector::Detection::Ok => {}
+            }
+        }
+    }
 }
 
 // --- Orphan sweep / reaper ---

@@ -19,10 +19,15 @@ const fetchNodeIOMock = vi
 const tmuxMountCount = { current: 0 };
 const tmuxUnmountCount = { current: 0 };
 
+const killNodeMock = vi.fn().mockResolvedValue(undefined);
+const restartNodeMock = vi.fn().mockResolvedValue(undefined);
+
 vi.mock("../api", () => ({
   fetchPrompt: (...args: unknown[]) => fetchPromptMock(...args),
   fetchNodeIO: (...args: unknown[]) => fetchNodeIOMock(...args),
   markNodeDone: vi.fn(),
+  killNode: (...args: unknown[]) => killNodeMock(...args),
+  restartNode: (...args: unknown[]) => restartNodeMock(...args),
   attachSession: vi.fn(),
   artifactUrl: (runId: string, path: string) => `/runs/${runId}/artifact?path=${encodeURIComponent(path)}`,
 }));
@@ -89,6 +94,8 @@ describe("NodeDetailPanel", () => {
   beforeEach(() => {
     fetchPromptMock.mockClear();
     fetchNodeIOMock.mockClear();
+    killNodeMock.mockClear();
+    restartNodeMock.mockClear();
     tmuxMountCount.current = 0;
     tmuxUnmountCount.current = 0;
   });
@@ -592,6 +599,89 @@ describe("NodeDetailPanel", () => {
         </TooltipProvider>,
       );
       expect(screen.getByTestId("tmux-terminal")).toBeInTheDocument();
+    });
+  });
+
+  describe("Stale banner with Stop/Retry (issue #123)", () => {
+    it("shows stale banner with idle message", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      const banner = screen.getByTestId("stale-banner");
+      expect(banner).toBeInTheDocument();
+      expect(banner).toHaveTextContent("Agent idle for >2 min");
+      expect(banner).toHaveTextContent("outputs incomplete");
+    });
+
+    it("shows Stop and Retry buttons on stale node", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      expect(screen.getByTestId("stale-stop-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("stale-retry-btn")).toBeInTheDocument();
+    });
+
+    it("calls killNode when Stop is clicked", async () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("stale-stop-btn"));
+      });
+      expect(killNodeMock).toHaveBeenCalledWith("run-1", "test-node", 1);
+    });
+
+    it("calls restartNode when Retry is clicked", async () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("stale-retry-btn"));
+      });
+      expect(restartNodeMock).toHaveBeenCalledWith("run-1", "test-node", 1);
+    });
+
+    it("hides Stop/Retry buttons when archived", () => {
+      render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" isArchived />
+        </TooltipProvider>,
+      );
+      expect(screen.getByTestId("stale-banner")).toBeInTheDocument();
+      expect(screen.queryByTestId("stale-stop-btn")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("stale-retry-btn")).not.toBeInTheDocument();
+    });
+
+    it("stale indicator is distinct from failed", () => {
+      const { container: staleContainer } = render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "stale" })} runId="run-1" />
+        </TooltipProvider>,
+      );
+
+      const { container: failedContainer } = render(
+        <TooltipProvider>
+          <NodeDetailPanel node={makeNode({ status: "failed", failure_reason: "test" })} runId="run-2" />
+        </TooltipProvider>,
+      );
+
+      const staleBanner = staleContainer.querySelector('[data-testid="stale-banner"]');
+      const failedBanner = failedContainer.querySelector('[data-testid="frontmatter-exhausted-banner"]')
+        ?? failedContainer.querySelector('.border-st-failed\\/30');
+
+      expect(staleBanner).toBeInTheDocument();
+      expect(staleBanner?.className).toContain("st-stale");
+      if (failedBanner) {
+        expect(failedBanner.className).toContain("st-failed");
+      }
     });
   });
 });
