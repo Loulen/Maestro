@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::frontmatter_parser;
 use crate::pipeline::{FrontmatterFieldDecl, PipelineDef, Port};
 
-fn iter_dirs_containing(node_dir: &Path, filename: &str) -> usize {
+fn iter_dirs_containing(node_dir: &Path, port_name: &str) -> usize {
     let entries = match std::fs::read_dir(node_dir) {
         Ok(e) => e,
         Err(_) => return 0,
@@ -13,7 +13,7 @@ fn iter_dirs_containing(node_dir: &Path, filename: &str) -> usize {
         .filter_map(Result::ok)
         .filter(|entry| {
             entry.file_name().to_string_lossy().starts_with("iter-")
-                && entry.path().join(filename).exists()
+                && entry.path().join(port_name).join("output.md").exists()
         })
         .count()
 }
@@ -51,15 +51,12 @@ pub fn validate(
     for port in &node.outputs {
         if port.repeated {
             let node_dir = artifacts_dir.join(node_id);
-            let found = iter_dirs_containing(&node_dir, &format!("{}.md", port.name));
+            let found = iter_dirs_containing(&node_dir, &port.name);
             if found == 0 {
                 missing.push(port.name.clone());
             }
         } else {
-            let path = artifacts_dir
-                .join(node_id)
-                .join(format!("iter-{iter}"))
-                .join(format!("{}.md", port.name));
+            let path = crate::blackboard::artifact_path(artifacts_dir, node_id, iter, &port.name);
             if !path.exists() {
                 missing.push(port.name.clone());
             }
@@ -92,10 +89,7 @@ fn validate_frontmatter_schemas(
             _ => continue,
         };
 
-        let path = artifacts_dir
-            .join(node_id)
-            .join(format!("iter-{iter}"))
-            .join(format!("{}.md", port.name));
+        let path = crate::blackboard::artifact_path(artifacts_dir, node_id, iter, &port.name);
 
         let fields = match frontmatter_parser::parse_frontmatter_from_file(&path) {
             Ok(f) => f,
@@ -282,9 +276,12 @@ mod tests {
     }
 
     fn write_artifact(dir: &Path, node_id: &str, iter: i64, port_name: &str, content: &str) {
-        let d = dir.join(node_id).join(format!("iter-{iter}"));
+        let d = dir
+            .join(node_id)
+            .join(format!("iter-{iter}"))
+            .join(port_name);
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join(format!("{port_name}.md")), content).unwrap();
+        std::fs::write(d.join("output.md"), content).unwrap();
     }
 
     // --- existence checks (unchanged behavior) ---

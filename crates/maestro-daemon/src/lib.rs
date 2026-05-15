@@ -1711,10 +1711,8 @@ fn resolve_source_frontmatter(
 
     let mut fields = HashMap::new();
     for port in &node.outputs {
-        let artifact_path = artifacts_dir
-            .join(completed_node_id)
-            .join(format!("iter-{iter}"))
-            .join(format!("{}.md", port.name));
+        let artifact_path =
+            blackboard::artifact_path(artifacts_dir, completed_node_id, iter, &port.name);
         if let Ok(port_fields) = frontmatter_parser::parse_frontmatter_from_file(&artifact_path) {
             for (k, v) in port_fields {
                 fields.insert(k, v);
@@ -1835,14 +1833,15 @@ async fn create_run(
         error!("failed to copy pipeline to run dir: {e}");
     }
 
-    // Write _input.md
+    // Write _input/output.md (directory-based artifact, ADR-0010)
     let artifacts_dir = worktree_dir.join(".maestro").join("artifacts");
-    if let Err(e) = std::fs::create_dir_all(&artifacts_dir) {
-        error!("failed to create artifacts dir: {e}");
+    let input_dir = artifacts_dir.join("_input");
+    if let Err(e) = std::fs::create_dir_all(&input_dir) {
+        error!("failed to create _input artifact dir: {e}");
     }
-    let input_path = artifacts_dir.join("_input.md");
+    let input_path = input_dir.join("output.md");
     if let Err(e) = std::fs::write(&input_path, &req.input) {
-        error!("failed to write _input.md: {e}");
+        error!("failed to write _input/output.md: {e}");
     }
 
     spawn_ready_after_event(&state, &run_id).await;
@@ -5955,9 +5954,9 @@ mod tests {
         create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
 
         // Add an untracked file (like artifacts)
-        let artifacts_dir = wt_dir.join(".maestro/artifacts/planner/iter-1");
-        std::fs::create_dir_all(&artifacts_dir).unwrap();
-        std::fs::write(artifacts_dir.join("plan.md"), "# plan\n").unwrap();
+        let port_dir = wt_dir.join(".maestro/artifacts/planner/iter-1/plan");
+        std::fs::create_dir_all(&port_dir).unwrap();
+        std::fs::write(port_dir.join("output.md"), "# plan\n").unwrap();
 
         assert!(!worktree_has_tracked_changes(&wt_dir).unwrap());
     }
@@ -7152,10 +7151,12 @@ mod tests {
     fn seed_io_test(dir: &std::path::Path, run_id: &str) {
         let run_dir = dir.join(".maestro/runs").join(run_id);
         let pipeline_path = run_dir.join("pipeline.yaml");
-        std::fs::create_dir_all(run_dir.join("worktree/.maestro/artifacts/planner/iter-1"))
+        std::fs::create_dir_all(run_dir.join("worktree/.maestro/artifacts/planner/iter-1/plan"))
             .unwrap();
-        std::fs::create_dir_all(run_dir.join("worktree/.maestro/artifacts/implementer/iter-1"))
-            .unwrap();
+        std::fs::create_dir_all(
+            run_dir.join("worktree/.maestro/artifacts/implementer/iter-1/summary"),
+        )
+        .unwrap();
         std::fs::create_dir_all(pipeline_path.parent().unwrap()).unwrap();
         std::fs::write(
             &pipeline_path,
@@ -7165,12 +7166,12 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            run_dir.join("worktree/.maestro/artifacts/planner/iter-1/plan.md"),
+            run_dir.join("worktree/.maestro/artifacts/planner/iter-1/plan/output.md"),
             "# Plan\nDo stuff.",
         )
         .unwrap();
         std::fs::write(
-            run_dir.join("worktree/.maestro/artifacts/implementer/iter-1/summary.md"),
+            run_dir.join("worktree/.maestro/artifacts/implementer/iter-1/summary/output.md"),
             "---\nverdict: PASS\nscore: 9\n---\n\n## Summary\nAll good.",
         )
         .unwrap();
@@ -7362,7 +7363,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/runs/{run_id}/artifact?path=planner/iter-1/plan.md"
+                        "/runs/{run_id}/artifact?path=planner/iter-1/plan/output.md"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -7565,15 +7566,18 @@ mod tests {
         let run_id = "failed-rescue-1";
         seed_failed_run(&state, run_id, pipe_name).await;
 
-        // Create the required output files
-        let artifacts_dir = tmp
+        // Create the required output files (directory-based, ADR-0010)
+        let base = tmp
             .path()
             .join(".maestro/runs")
             .join(run_id)
             .join("worktree/.maestro/artifacts/worker/iter-1");
-        std::fs::create_dir_all(&artifacts_dir).unwrap();
-        std::fs::write(artifacts_dir.join("summary.md"), "# Summary\nDone.").unwrap();
-        std::fs::write(artifacts_dir.join("report.md"), "# Report\nAll good.").unwrap();
+        let summary_dir = base.join("summary");
+        std::fs::create_dir_all(&summary_dir).unwrap();
+        std::fs::write(summary_dir.join("output.md"), "# Summary\nDone.").unwrap();
+        let report_dir = base.join("report");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(report_dir.join("output.md"), "# Report\nAll good.").unwrap();
 
         let app = build_router(state.clone());
         let resp = app

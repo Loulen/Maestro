@@ -55,16 +55,18 @@ pub fn resolve(pipeline: &PipelineDef, artifacts_dir: &Path, node_id: &str, iter
                 let source_dir = artifacts_dir.join(&edge.source.node);
                 files.extend(glob_repeated(&source_dir, &edge.source.port));
             } else {
-                let path = artifacts_dir
-                    .join(&edge.source.node)
-                    .join(format!("iter-{iter}"))
-                    .join(format!("{}.md", edge.source.port));
+                let path = crate::blackboard::artifact_path(
+                    artifacts_dir,
+                    &edge.source.node,
+                    iter,
+                    &edge.source.port,
+                );
                 files.push(file_info(artifacts_dir, &path));
             }
         }
 
         if !found_edge && input_port.name == "task" {
-            let path = artifacts_dir.join("_input.md");
+            let path = crate::blackboard::input_path(artifacts_dir);
             files.push(file_info(artifacts_dir, &path));
         }
 
@@ -77,10 +79,8 @@ pub fn resolve(pipeline: &PipelineDef, artifacts_dir: &Path, node_id: &str, iter
 
     let mut outputs: Vec<PortIO> = Vec::new();
     for output_port in &node.outputs {
-        let path = artifacts_dir
-            .join(node_id)
-            .join(format!("iter-{iter}"))
-            .join(format!("{}.md", output_port.name));
+        let path =
+            crate::blackboard::artifact_path(artifacts_dir, node_id, iter, &output_port.name);
         let info = file_info_with_frontmatter(artifacts_dir, &path);
         outputs.push(PortIO {
             port: output_port.name.clone(),
@@ -176,7 +176,6 @@ fn serde_yaml_to_json(v: &serde_yaml::Value) -> serde_json::Value {
 
 fn glob_repeated(source_dir: &Path, port_name: &str) -> Vec<FileInfo> {
     let mut results = Vec::new();
-    let filename = format!("{port_name}.md");
 
     let Ok(entries) = std::fs::read_dir(source_dir) else {
         return results;
@@ -197,7 +196,7 @@ fn glob_repeated(source_dir: &Path, port_name: &str) -> Vec<FileInfo> {
     let artifacts_dir = source_dir.parent().unwrap_or(source_dir);
 
     for (_, dir) in iter_dirs {
-        let file_path = dir.join(&filename);
+        let file_path = dir.join(port_name).join("output.md");
         let exists = file_path.exists();
         let size = if exists {
             std::fs::metadata(&file_path).ok().map(|m| m.len())
@@ -308,7 +307,7 @@ mod tests {
         assert_eq!(io.inputs[0].port, "plan");
         assert!(!io.inputs[0].repeated);
         assert_eq!(io.inputs[0].files.len(), 1);
-        assert_eq!(io.inputs[0].files[0].path, "planner/iter-1/plan.md");
+        assert_eq!(io.inputs[0].files[0].path, "planner/iter-1/plan/output.md");
         assert!(!io.inputs[0].files[0].exists);
     }
 
@@ -316,9 +315,9 @@ mod tests {
     fn simple_wire_detects_existing_file() {
         let tmp = tempfile::tempdir().unwrap();
         let artifacts = tmp.path().join("artifacts");
-        let dir = artifacts.join("planner/iter-1");
+        let dir = artifacts.join("planner/iter-1/plan");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("plan.md"), "# My plan\nDo stuff.").unwrap();
+        fs::write(dir.join("output.md"), "# My plan\nDo stuff.").unwrap();
 
         let pipeline = simple_pipeline();
         let io = resolve(&pipeline, &artifacts, "implementer", 1);
@@ -331,10 +330,10 @@ mod tests {
     fn output_port_returns_path_with_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
         let artifacts = tmp.path().join("artifacts");
-        let dir = artifacts.join("implementer/iter-1");
+        let dir = artifacts.join("implementer/iter-1/summary");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
-            dir.join("summary.md"),
+            dir.join("output.md"),
             "---\nverdict: PASS\nscore: 9\n---\n\n## Summary\nAll good.",
         )
         .unwrap();
@@ -370,10 +369,10 @@ mod tests {
         let artifacts = tmp.path().join("artifacts");
 
         for i in 1..=3 {
-            let dir = artifacts.join(format!("reviewer/iter-{i}"));
+            let dir = artifacts.join(format!("reviewer/iter-{i}/review"));
             fs::create_dir_all(&dir).unwrap();
             fs::write(
-                dir.join("review.md"),
+                dir.join("output.md"),
                 format!("---\nverdict: FAIL\n---\n\nIter {i} review"),
             )
             .unwrap();
@@ -446,17 +445,27 @@ mod tests {
         assert_eq!(io.inputs.len(), 1);
         assert!(io.inputs[0].repeated);
         assert_eq!(io.inputs[0].files.len(), 3);
-        assert_eq!(io.inputs[0].files[0].path, "reviewer/iter-1/review.md");
-        assert_eq!(io.inputs[0].files[1].path, "reviewer/iter-2/review.md");
-        assert_eq!(io.inputs[0].files[2].path, "reviewer/iter-3/review.md");
+        assert_eq!(
+            io.inputs[0].files[0].path,
+            "reviewer/iter-1/review/output.md"
+        );
+        assert_eq!(
+            io.inputs[0].files[1].path,
+            "reviewer/iter-2/review/output.md"
+        );
+        assert_eq!(
+            io.inputs[0].files[2].path,
+            "reviewer/iter-3/review/output.md"
+        );
     }
 
     #[test]
     fn entry_node_with_no_edges_gets_input_md() {
         let tmp = tempfile::tempdir().unwrap();
         let artifacts = tmp.path().join("artifacts");
-        fs::create_dir_all(&artifacts).unwrap();
-        fs::write(artifacts.join("_input.md"), "Do the thing").unwrap();
+        let input_dir = artifacts.join("_input");
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::write(input_dir.join("output.md"), "Do the thing").unwrap();
 
         let pipeline = simple_pipeline();
         let io = resolve(&pipeline, &artifacts, "planner", 1);
@@ -464,7 +473,7 @@ mod tests {
         assert_eq!(io.inputs.len(), 1);
         assert_eq!(io.inputs[0].port, "task");
         assert_eq!(io.inputs[0].files.len(), 1);
-        assert_eq!(io.inputs[0].files[0].path, "_input.md");
+        assert_eq!(io.inputs[0].files[0].path, "_input/output.md");
         assert!(io.inputs[0].files[0].exists);
     }
 
@@ -560,9 +569,9 @@ mod tests {
         };
 
         for dir_name in ["a", "b"] {
-            let dir = artifacts.join(format!("{dir_name}/iter-1"));
+            let dir = artifacts.join(format!("{dir_name}/iter-1/out"));
             fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("out.md"), format!("from {dir_name}")).unwrap();
+            fs::write(dir.join("output.md"), format!("from {dir_name}")).unwrap();
         }
 
         let io = resolve(&pipeline, &artifacts, "merger", 1);
