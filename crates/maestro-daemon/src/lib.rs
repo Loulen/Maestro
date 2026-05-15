@@ -1496,6 +1496,7 @@ async fn handle_node_completion(
                     })),
                 )
                 .await;
+                passthrough_switch_artifact(&spawn_ctx, node_id, chosen_branch, source_iter);
             }
             scheduler::SchedulerAction::LoopIterStarted { .. }
             | scheduler::SchedulerAction::LoopBreakReceived { .. }
@@ -1743,6 +1744,36 @@ fn resolve_run_variables(
         }
     }
     resolved_vars
+}
+
+fn passthrough_switch_artifact(
+    ctx: &SpawnContext<'_>,
+    switch_node_id: &str,
+    chosen_branch: &str,
+    source_iter: i64,
+) {
+    let in_edge = ctx
+        .pipeline
+        .edges
+        .iter()
+        .find(|e| e.target.node == switch_node_id && e.target.port == "in");
+    let Some(in_edge) = in_edge else { return };
+
+    let src_path = blackboard::artifact_path(
+        ctx.artifacts_dir,
+        &in_edge.source.node,
+        source_iter,
+        &in_edge.source.port,
+    );
+    if !src_path.exists() {
+        return;
+    }
+
+    let dst_path = blackboard::artifact_path(ctx.artifacts_dir, switch_node_id, 1, chosen_branch);
+    if let Some(parent) = dst_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::copy(&src_path, &dst_path);
 }
 
 fn resolve_source_frontmatter(
@@ -2083,7 +2114,10 @@ async fn run_diff(
     {
         Ok(o) => o,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git diff failed: {e}"),
+            )
                 .into_response();
         }
     };
@@ -2093,7 +2127,10 @@ async fn run_diff(
         if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
             return (StatusCode::NOT_FOUND, "run branch not found").into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git diff failed: {stderr}"),
+        )
             .into_response();
     }
 
@@ -2132,7 +2169,10 @@ async fn node_diff(
     {
         Ok(o) => o,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git diff failed: {e}"),
+            )
                 .into_response();
         }
     };
@@ -2142,7 +2182,10 @@ async fn node_diff(
         if stderr.contains("unknown revision") || stderr.contains("not a git repository") {
             return (StatusCode::NOT_FOUND, "node branch not found").into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("git diff failed: {stderr}"))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git diff failed: {stderr}"),
+        )
             .into_response();
     }
 
@@ -3834,6 +3877,7 @@ async fn re_evaluate_after_command(state: &AppState, run_id: &str) {
                         })),
                     )
                     .await;
+                    passthrough_switch_artifact(&spawn_ctx, node_id, chosen_branch, source_iter);
                 }
                 scheduler::SchedulerAction::LoopIterStarted { .. }
                 | scheduler::SchedulerAction::LoopBreakReceived { .. }
@@ -9078,7 +9122,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let app = build_router(state);
         let resp = app
@@ -9114,7 +9158,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Make a change on the pipeline branch
         std::fs::write(wt_dir.join("new_file.rs"), "fn hello() {}\n").unwrap();
@@ -9147,8 +9191,14 @@ edges: []
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("new_file.rs"), "diff should mention new_file.rs");
-        assert!(body.contains("fn hello()"), "diff should contain the added content");
+        assert!(
+            body.contains("new_file.rs"),
+            "diff should mention new_file.rs"
+        );
+        assert!(
+            body.contains("fn hello()"),
+            "diff should contain the added content"
+        );
     }
 
     #[tokio::test]
@@ -9163,7 +9213,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         // Create a sub-worktree for impl-1
         let sub_wt_dir = sub_worktree_path(repo, run_id, "impl-1", 1);
@@ -9201,8 +9251,14 @@ edges: []
                 .to_vec(),
         )
         .unwrap();
-        assert!(body.contains("node_file.rs"), "diff should mention node_file.rs");
-        assert!(body.contains("fn node_work()"), "diff should contain the node's changes");
+        assert!(
+            body.contains("node_file.rs"),
+            "diff should mention node_file.rs"
+        );
+        assert!(
+            body.contains("fn node_work()"),
+            "diff should contain the node's changes"
+        );
     }
 
     #[tokio::test]
@@ -9217,7 +9273,7 @@ edges: []
 
         let wt_dir = repo.join(".maestro/runs").join(run_id).join("worktree");
         let pipeline_branch = format!("maestro/run-{run_id}");
-        create_worktree(repo, &wt_dir, &pipeline_branch).unwrap();
+        create_worktree(repo, &wt_dir, &pipeline_branch, "HEAD").unwrap();
 
         let app = build_router(state);
         let resp = app
