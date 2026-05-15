@@ -165,6 +165,7 @@ export interface CreateRunRequest {
   target_repo?: string;
   source_branch?: string;
   name?: string;
+  images?: File[];
 }
 
 export interface CreateRunResponse {
@@ -172,11 +173,32 @@ export interface CreateRunResponse {
 }
 
 export async function createRun(req: CreateRunRequest): Promise<CreateRunResponse> {
-  const resp = await fetch(`${BASE}/runs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
+  const hasImages = req.images && req.images.length > 0;
+
+  let resp: Response;
+  if (hasImages) {
+    const form = new FormData();
+    form.append("pipeline", req.pipeline);
+    form.append("input", req.input);
+    form.append("variables", JSON.stringify(req.variables));
+    if (req.pipeline_id) form.append("pipeline_id", req.pipeline_id);
+    if (req.target_repo) form.append("target_repo", req.target_repo);
+    if (req.source_branch) form.append("source_branch", req.source_branch);
+    if (req.name) form.append("name", req.name);
+    for (const file of req.images!) {
+      form.append("images", file, file.name);
+    }
+    resp = await fetch(`${BASE}/runs`, { method: "POST", body: form });
+  } else {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { images: _omitted, ...jsonBody } = req;
+    resp = await fetch(`${BASE}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(jsonBody),
+    });
+  }
+
   if (!resp.ok) {
     const body = await resp.json().catch(() => null);
     throw new Error(body?.error ?? `POST /runs failed: ${resp.status}`);

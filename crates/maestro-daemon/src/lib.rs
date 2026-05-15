@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Json, Path as AxumPath, Query, State, WebSocketUpgrade};
+use axum::extract::{Json, Multipart, Path as AxumPath, Query, State, WebSocketUpgrade};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -1337,6 +1337,17 @@ async fn spawn_node(
         spawn_ctx.worktree_dir.to_path_buf()
     };
 
+    let is_entry_node = spawn_ctx
+        .pipeline
+        .edges
+        .iter()
+        .any(|e| e.target.node == node.id && spawn_ctx.pipeline.nodes.iter().any(|n| n.id == e.source.node && n.node_type == pipeline::NodeType::Start));
+    let input_images = if is_entry_node {
+        prompt_augmenter::discover_input_images(spawn_ctx.artifacts_dir)
+    } else {
+        Vec::new()
+    };
+
     let aug_ctx = prompt_augmenter::AugmentContext {
         pipeline: spawn_ctx.pipeline,
         node,
@@ -1347,6 +1358,7 @@ async fn spawn_node(
         daemon_url: &format!("http://localhost:{}", state.port),
         foreach_context,
         source_worktree_dir: has_sub_worktree.then_some(working_dir.as_path()),
+        input_images,
     };
 
     let full_prompt = prompt_augmenter::build_full_prompt(&aug_ctx, &role_prompt);
@@ -1769,9 +1781,161 @@ fn resolve_source_frontmatter(
     fields
 }
 
+struct ImageFile {
+    filename: String,
+    data: Vec<u8>,
+}
+
+const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
+
+fn sanitize_image_filename(raw: &str) -> Option<String> {
+    let name = Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(raw);
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if ALLOWED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+async fn parse_multipart_create_run(
+    mut multipart: Multipart,
+) -> std::result::Result<(CreateRunRequest, Vec<ImageFile>), String> {
+    let mut pipeline = None;
+    let mut input = None;
+    let mut variables: HashMap<String, serde_yaml::Value> = HashMap::new();
+    let mut pipeline_id = None;
+    let mut target_repo = None;
+    let mut source_branch = None;
+    let mut name = None;
+    let mut images = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "pipeline" => {
+                pipeline = Some(field.text().await.map_err(|e| format!("bad field pipeline: {e}"))?);
+            }
+            "input" => {
+                input = Some(field.text().await.map_err(|e| format!("bad field input: {e}"))?);
+            }
+            "variables" => {
+                let text = field.text().await.map_err(|e| format!("bad field variables: {e}"))?;
+                if !text.is_empty() {
+                    variables = serde_json::from_str(&text)
+                        .map_err(|e| format!("invalid variables JSON: {e}"))?;
+                }
+            }
+            "pipeline_id" => {
+                let v = field.text().await.map_err(|e| format!("bad field pipeline_id: {e}"))?;
+                if !v.is_empty() { pipeline_id = Some(v); }
+            }
+            "target_repo" => {
+                let v = field.text().await.map_err(|e| format!("bad field target_repo: {e}"))?;
+                if !v.is_empty() { target_repo = Some(v); }
+            }
+            "source_branch" => {
+                let v = field.text().await.map_err(|e| format!("bad field source_branch: {e}"))?;
+                if !v.is_empty() { source_branch = Some(v); }
+            }
+            "name" => {
+                let v = field.text().await.map_err(|e| format!("bad field name: {e}"))?;
+                if !v.is_empty() { name = Some(v); }
+            }
+            "images" => {
+                let raw_filename = field.file_name().unwrap_or("image.png").to_string();
+                let data = field.bytes().await.map_err(|e| format!("failed to read image: {e}"))?;
+                if data.is_empty() { continue; }
+                let filename = sanitize_image_filename(&raw_filename)
+                    .ok_or_else(|| format!("unsupported image type: {raw_filename}"))?;
+                images.push(ImageFile { filename, data: data.to_vec() });
+            }
+            _ => {}
+        }
+    }
+
+    let req = CreateRunRequest {
+        pipeline: pipeline.ok_or("missing field: pipeline")?,
+        input: input.ok_or("missing field: input")?,
+        variables,
+        pipeline_id,
+        target_repo,
+        source_branch,
+        name,
+    };
+    Ok((req, images))
+}
+
 async fn create_run(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateRunRequest>,
+    req: axum::extract::Request,
+) -> Response {
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let (parsed_req, images) = if content_type.starts_with("multipart/form-data") {
+        let multipart = match Multipart::from_request(req, &()).await {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("multipart parse error: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+        match parse_multipart_create_run(multipart).await {
+            Ok(r) => r,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": msg })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        let body = match axum::body::to_bytes(req.into_body(), 10_000_000).await {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("failed to read body: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+        let parsed: CreateRunRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("invalid JSON: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+        (parsed, Vec::new())
+    };
+
+    create_run_core(&state, parsed_req, images).await
+}
+
+async fn create_run_core(
+    state: &AppState,
+    req: CreateRunRequest,
+    images: Vec<ImageFile>,
 ) -> Response {
     // Validate target_repo if provided
     let run_repo_root = if let Some(ref target) = req.target_repo {
@@ -1882,6 +2046,10 @@ async fn create_run(
             run_payload["name"] = serde_json::json!(name);
         }
     }
+    if !images.is_empty() {
+        let image_names: Vec<&str> = images.iter().map(|i| i.filename.as_str()).collect();
+        run_payload["image_filenames"] = serde_json::json!(image_names);
+    }
 
     let run_started = event_log::Event {
         id: None,
@@ -1893,7 +2061,7 @@ async fn create_run(
         payload: Some(run_payload),
     };
 
-    if let Err(e) = append_event(&state, &run_started).await {
+    if let Err(e) = append_event(state, &run_started).await {
         error!("failed to append run_started: {e}");
         return (StatusCode::INTERNAL_SERVER_ERROR, "event log error").into_response();
     }
@@ -1927,9 +2095,17 @@ async fn create_run(
         error!("failed to write _input/output.md: {e}");
     }
 
-    spawn_ready_after_event(&state, &run_id).await;
+    // Write uploaded images to _input/ alongside output.md
+    for image in &images {
+        let image_path = input_dir.join(&image.filename);
+        if let Err(e) = std::fs::write(&image_path, &image.data) {
+            error!("failed to write image {}: {e}", image.filename);
+        }
+    }
 
-    spawn_manager_session(&state, &run_id, &worktree_dir);
+    spawn_ready_after_event(state, &run_id).await;
+
+    spawn_manager_session(state, &run_id, &worktree_dir);
 
     info!("Run {run_id} started for pipeline {}", pipeline.name);
 
@@ -9231,5 +9407,60 @@ edges: []
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn sanitize_image_filename_accepts_valid_extensions() {
+        assert_eq!(sanitize_image_filename("photo.png"), Some("photo.png".into()));
+        assert_eq!(sanitize_image_filename("img.JPG"), Some("img.JPG".into()));
+        assert_eq!(sanitize_image_filename("pic.jpeg"), Some("pic.jpeg".into()));
+        assert_eq!(sanitize_image_filename("anim.gif"), Some("anim.gif".into()));
+        assert_eq!(sanitize_image_filename("modern.webp"), Some("modern.webp".into()));
+        assert_eq!(sanitize_image_filename("icon.svg"), Some("icon.svg".into()));
+        assert_eq!(sanitize_image_filename("old.bmp"), Some("old.bmp".into()));
+    }
+
+    #[test]
+    fn sanitize_image_filename_rejects_non_image() {
+        assert_eq!(sanitize_image_filename("script.js"), None);
+        assert_eq!(sanitize_image_filename("data.json"), None);
+        assert_eq!(sanitize_image_filename("readme.md"), None);
+        assert_eq!(sanitize_image_filename("noext"), None);
+    }
+
+    #[test]
+    fn sanitize_image_filename_strips_path_components() {
+        assert_eq!(
+            sanitize_image_filename("../../etc/passwd.png"),
+            Some("passwd.png".into())
+        );
+        assert_eq!(
+            sanitize_image_filename("/tmp/photo.jpg"),
+            Some("photo.jpg".into())
+        );
+    }
+
+    #[test]
+    fn image_files_stored_in_input_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_dir = tmp.path().join("_input");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        std::fs::write(input_dir.join("output.md"), "hello").unwrap();
+
+        let images = vec![
+            ImageFile { filename: "screenshot.png".into(), data: vec![0x89, 0x50, 0x4E, 0x47] },
+            ImageFile { filename: "diagram.jpg".into(), data: vec![0xFF, 0xD8, 0xFF] },
+        ];
+        for image in &images {
+            std::fs::write(input_dir.join(&image.filename), &image.data).unwrap();
+        }
+
+        assert!(input_dir.join("output.md").exists());
+        assert!(input_dir.join("screenshot.png").exists());
+        assert!(input_dir.join("diagram.jpg").exists());
+        assert_eq!(
+            std::fs::read(input_dir.join("screenshot.png")).unwrap(),
+            vec![0x89, 0x50, 0x4E, 0x47]
+        );
     }
 }

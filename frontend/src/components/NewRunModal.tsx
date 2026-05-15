@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderGit2, GitBranch, Sparkles, X } from "lucide-react";
+import { ChevronDown, FolderGit2, GitBranch, ImagePlus, Sparkles, X } from "lucide-react";
 import type { PipelineListEntry } from "../types";
 import { createRun, fetchPipelines, validateRepo, listBranches } from "../api";
 import type { LibraryPipelineEntry } from "../api";
 import { useEditStore } from "../stores/editStore";
+
+const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/bmp"];
 
 const LIB_PREFIX = "__lib__";
 
@@ -35,7 +37,10 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
   const [sourceBranch, setSourceBranch] = useState("");
   const [branchesLoading, setBranchesLoading] = useState(false);
 
+  const [images, setImages] = useState<File[]>([]);
+
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Reset form state when modal opens — bounded: fires once per open toggle, no cascade.
   /* eslint-disable react-hooks/set-state-in-effect -- modal form reset on open is intentionally synchronous */
@@ -51,6 +56,7 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     setInput("");
     setOverrides({});
     setError(null);
+    setImages([]);
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -174,6 +180,46 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
     setOverrides((prev) => ({ ...prev, [key]: value }));
   }, []);
 
+  const addImages = useCallback((files: FileList | File[]) => {
+    const valid = Array.from(files).filter((f) => ACCEPTED_IMAGE_TYPES.includes(f.type));
+    if (valid.length > 0) {
+      setImages((prev) => [...prev, ...valid]);
+    }
+  }, []);
+
+  const removeImage = useCallback((index: number) => {
+    setImages((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const files = e.clipboardData?.files;
+      if (files && files.length > 0) {
+        const imageFiles = Array.from(files).filter((f) => ACCEPTED_IMAGE_TYPES.includes(f.type));
+        if (imageFiles.length > 0) {
+          e.preventDefault();
+          addImages(imageFiles);
+        }
+      }
+    },
+    [addImages],
+  );
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) {
+        addImages(files);
+      }
+    },
+    [addImages],
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
   const handleLaunch = useCallback(async () => {
     if (!repoValid || (!currentPipeline && !selectedLibraryId) || !input.trim()) return;
     setSubmitting(true);
@@ -199,19 +245,21 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
         target_repo: targetRepo.trim() || undefined,
         source_branch: sourceBranch || undefined,
         name: autoName ? undefined : runName.trim() || undefined,
+        images: images.length > 0 ? images : undefined,
       });
       onCreated(resp.run_id);
       setRunName("");
       setAutoName(true);
       setInput("");
       setOverrides({});
+      setImages([]);
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to launch run");
     } finally {
       setSubmitting(false);
     }
-  }, [currentPipeline, selectedPipeline, selectedLibraryId, input, overrides, onCreated, onClose, flushPendingSaves, repoValid, targetRepo, sourceBranch, autoName, runName]);
+  }, [currentPipeline, selectedPipeline, selectedLibraryId, input, overrides, onCreated, onClose, flushPendingSaves, repoValid, targetRepo, sourceBranch, autoName, runName, images]);
 
   const repoPipelines = useMemo(
     () => pipelines.filter((p) => p.scope === "repo"),
@@ -447,10 +495,92 @@ export default function NewRunModal({ open, onClose, onCreated, libraryPipelines
                 placeholder="Free-text prompt, a GitHub issue link, or a mix."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onPaste={handlePaste}
                 data-testid="input-textarea"
               />
               <span className="text-fg-4" style={{ fontSize: "10.5px" }}>
                 Free-text prompt, an issue link, or a mix.
+              </span>
+            </div>
+
+            {/* Image upload area */}
+            <div className="flex flex-col gap-1.5">
+              <label
+                className="font-medium text-fg-2"
+                style={{ fontSize: "11.5px" }}
+              >
+                Images
+              </label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPTED_IMAGE_TYPES.join(",")}
+                multiple
+                className="hidden"
+                data-testid="image-file-input"
+                onChange={(e) => {
+                  if (e.target.files) addImages(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <div
+                className="flex min-h-[60px] flex-wrap items-center gap-2 rounded-md border border-dashed border-line-strong bg-bg-3 px-2.5 py-2 transition-colors hover:border-fg-4"
+                data-testid="image-drop-zone"
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onPaste={handlePaste}
+              >
+                {images.length === 0 && (
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-center gap-1.5 py-1 text-fg-4 transition-colors hover:text-fg-3"
+                    style={{ fontSize: "11px" }}
+                    onClick={() => fileInputRef.current?.click()}
+                    data-testid="image-upload-button"
+                  >
+                    <ImagePlus size={14} />
+                    Paste, drag-drop, or click to add images
+                  </button>
+                )}
+                {images.map((file, idx) => (
+                  <div
+                    key={`${file.name}-${idx}`}
+                    className="group relative h-12 w-12 flex-shrink-0 overflow-hidden rounded border border-line"
+                    data-testid="image-thumbnail"
+                  >
+                    <img
+                      src={URL.createObjectURL(file)}
+                      alt={file.name}
+                      className="h-full w-full object-cover"
+                      title={file.name}
+                    />
+                    <button
+                      type="button"
+                      className="absolute -right-0.5 -top-0.5 grid h-4 w-4 place-items-center rounded-full bg-bg-4 text-fg-3 opacity-0 transition-opacity group-hover:opacity-100"
+                      onClick={() => removeImage(idx)}
+                      data-testid="image-remove-button"
+                      aria-label={`Remove ${file.name}`}
+                    >
+                      <X size={10} />
+                    </button>
+                  </div>
+                ))}
+                {images.length > 0 && (
+                  <button
+                    type="button"
+                    className="grid h-12 w-12 flex-shrink-0 place-items-center rounded border border-dashed border-line-strong text-fg-4 transition-colors hover:border-fg-3 hover:text-fg-3"
+                    onClick={() => fileInputRef.current?.click()}
+                    data-testid="image-add-more-button"
+                    aria-label="Add more images"
+                  >
+                    <ImagePlus size={14} />
+                  </button>
+                )}
+              </div>
+              <span className="text-fg-4" style={{ fontSize: "10.5px" }}>
+                {images.length > 0
+                  ? `${images.length} image${images.length > 1 ? "s" : ""} attached`
+                  : "Optional — images are passed to the entry node."}
               </span>
             </div>
           </div>
