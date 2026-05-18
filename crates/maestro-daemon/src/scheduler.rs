@@ -353,6 +353,15 @@ pub fn evaluate_loop_body_completion(
         None => return actions,
     };
 
+    // Break is unconditional termination — skip body completion check.
+    if loop_state.break_received {
+        actions.push(SchedulerAction::LoopDone {
+            loop_node_id: loop_node_id.to_string(),
+        });
+        fire_done_port(pipeline, loop_node_id, &mut actions);
+        return actions;
+    }
+
     let body_nodes = match graph_resolver::compute_body_subgraph(pipeline, loop_node_id) {
         Ok(nodes) => nodes,
         Err(_) => return actions,
@@ -373,38 +382,15 @@ pub fn evaluate_loop_body_completion(
 
     let max_iter = resolve_max_iter(loop_node, resolved_vars);
 
-    if loop_state.break_received || current_iter >= max_iter {
-        if !loop_state.break_received {
-            actions.push(SchedulerAction::LoopMaxReached {
-                loop_node_id: loop_node_id.to_string(),
-                max_iter,
-            });
-        }
-
+    if current_iter >= max_iter {
+        actions.push(SchedulerAction::LoopMaxReached {
+            loop_node_id: loop_node_id.to_string(),
+            max_iter,
+        });
         actions.push(SchedulerAction::LoopDone {
             loop_node_id: loop_node_id.to_string(),
         });
-
-        // Fire done port
-        for edge in &pipeline.edges {
-            if edge.source.node == loop_node_id && edge.source.port == "done" {
-                let target_id = &edge.target.node;
-                let end_node_id = pipeline
-                    .nodes
-                    .iter()
-                    .find(|n| n.node_type == NodeType::End)
-                    .map(|n| n.id.as_str());
-
-                if end_node_id == Some(target_id.as_str()) {
-                    actions.push(SchedulerAction::Complete);
-                } else {
-                    actions.push(SchedulerAction::Spawn {
-                        node_id: target_id.clone(),
-                        iter: 1,
-                    });
-                }
-            }
-        }
+        fire_done_port(pipeline, loop_node_id, &mut actions);
     } else {
         let next_iter = current_iter + 1;
         actions.push(SchedulerAction::LoopIterStarted {
@@ -425,6 +411,28 @@ pub fn evaluate_loop_body_completion(
     }
 
     actions
+}
+
+fn fire_done_port(pipeline: &PipelineDef, loop_node_id: &str, actions: &mut Vec<SchedulerAction>) {
+    for edge in &pipeline.edges {
+        if edge.source.node == loop_node_id && edge.source.port == "done" {
+            let target_id = &edge.target.node;
+            let end_node_id = pipeline
+                .nodes
+                .iter()
+                .find(|n| n.node_type == NodeType::End)
+                .map(|n| n.id.as_str());
+
+            if end_node_id == Some(target_id.as_str()) {
+                actions.push(SchedulerAction::Complete);
+            } else {
+                actions.push(SchedulerAction::Spawn {
+                    node_id: target_id.clone(),
+                    iter: 1,
+                });
+            }
+        }
+    }
 }
 
 pub fn foreach_resolve_collection(
@@ -2462,6 +2470,63 @@ mod tests {
         let actions = evaluate_loop_body_completion(&pipeline, &state, "loop1", &HashMap::new());
 
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn break_received_fires_done_even_with_incomplete_body() {
+        // After node invalidation, body nodes may be missing from run_state.
+        // A break must fire done unconditionally — it never waits for body
+        // completion.
+        let pipeline = PipelineDef {
+            name: "loop-break-incomplete".into(),
+            version: None,
+            variables: HashMap::new(),
+            nodes: vec![
+                make_loop_node("loop1", 5),
+                make_node("impl", &["in"], &["out"]),
+                make_node("tester", &["in"], &["out"]),
+                make_node("downstream", &["in"], &["out"]),
+            ],
+            edges: vec![
+                make_edge("loop1", "body", "impl", "in"),
+                make_edge("impl", "out", "tester", "in"),
+                make_edge("tester", "out", "loop1", "break"),
+                make_edge("loop1", "done", "downstream", "in"),
+            ],
+        };
+
+        let mut state = empty_run_state();
+        state.loop_states.insert(
+            "loop1".into(),
+            crate::event_log::LoopState {
+                loop_node_id: "loop1".into(),
+                current_iter: 1,
+                max_iter: 5,
+                break_received: true,
+                done: false,
+            },
+        );
+        // impl was invalidated — NOT in run_state.nodes
+        // tester completed (it fired the break)
+        state
+            .nodes
+            .insert("tester".into(), completed_node_iter("tester", 1));
+
+        let actions = evaluate_loop_body_completion(&pipeline, &state, "loop1", &HashMap::new());
+
+        assert!(
+            actions.contains(&SchedulerAction::LoopDone {
+                loop_node_id: "loop1".into(),
+            }),
+            "break_received must fire LoopDone regardless of body state, got {actions:?}"
+        );
+        assert!(
+            actions.contains(&SchedulerAction::Spawn {
+                node_id: "downstream".into(),
+                iter: 1,
+            }),
+            "break_received must fire done port to spawn downstream, got {actions:?}"
+        );
     }
 
     // --- seed_pending_loops tests ---
