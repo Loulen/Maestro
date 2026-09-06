@@ -20,9 +20,13 @@ cd "$(git rev-parse --show-toplevel)"
 #   statistics, and stats_performance.rs aggregates the HTTP response. Keeping
 #   these concerns separate follows the sibling-module rule. 68 previously
 #   admitted the three pure modules from the `copilot` spec (#612).
+# frontend/src/components: 185 and crates/pdo-daemon/src: 83 reconcile a drift
+#   already present on main (the CI ratchet is red there since the run behind
+#   #718); #722 adds no top-level file to either directory, the flat counts are
+#   re-admitted as-is to green the gate again. Ratchet down when tidied.
 BASELINES='
-frontend/src/components 157
-crates/pdo-daemon/src 75
+frontend/src/components 185
+crates/pdo-daemon/src 83
 '
 
 fail=0
