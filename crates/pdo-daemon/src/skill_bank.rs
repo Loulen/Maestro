@@ -41,6 +41,11 @@ pub(crate) fn skill_dir(repo_root: &Path, id: &str) -> PathBuf {
 
 pub(crate) const SKILL_MD: &str = "SKILL.md";
 
+// The seeded skill (#722, spec #719, ADR-0064) — see the `Seed` section below.
+pub(crate) const SEEDED_SKILL_ID: &str = "pdo-orchestrate";
+pub(crate) const SEEDED_FOLDER_ID: &str = "skf-pdo";
+pub(crate) const SEEDED_FOLDER_NAME: &str = "PDO";
+
 /// Where an imported skill comes from (#670, CONTEXT.md §*Source*): the
 /// repository URL (or local folder), the ref that was asked for, the commit the
 /// content was read at, and the skill's folder path inside the source. Carried
@@ -85,6 +90,10 @@ pub(crate) struct Skill {
     pub description: String,
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// Set on the skill PDO seeds at startup (#722): locked against edit and
+    /// delete, everywhere the bank is written.
+    #[serde(default)]
+    pub locked: bool,
     /// Provenance of an import. `None` for a pasted skill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Provenance>,
@@ -164,6 +173,11 @@ pub(crate) enum SkillError {
     },
     /// `from_path` (the explorer pick) is not a readable regular file.
     SourceNotAFile(String),
+    /// The seeded skill (`pdo-orchestrate`, #722): no edit, no delete, on any
+    /// bank surface — it is recreated at every daemon start.
+    Locked {
+        id: String,
+    },
     Storage(String),
 }
 
@@ -221,6 +235,11 @@ impl fmt::Display for SkillError {
                     "`{path}` is not a readable file (drop files, not folders)"
                 )
             }
+            Self::Locked { id } => write!(
+                f,
+                "`{id}` is seeded and managed by PDO: it is recreated at every daemon start \
+                 and locked against editing and deletion"
+            ),
             Self::Storage(message) => write!(f, "{message}"),
         }
     }
@@ -241,8 +260,8 @@ impl From<std::io::Error> for SkillError {
 }
 
 /// Create the two index tables if absent. Idempotent, same idiom as
-/// `agent_profile::init`. Nothing is seeded: an untouched instance has an empty
-/// bank (FP step 1).
+/// `agent_profile::init`. The seed itself runs at daemon startup ([`seed`]),
+/// not here.
 pub(crate) async fn init(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS skill_folders (
@@ -333,6 +352,7 @@ fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> Skill {
         name: row.get("name"),
         description: row.get("description"),
         folder_id: row.get("folder_id"),
+        locked: is_seeded(row.get("id")),
         source: url.map(|url| Provenance {
             url,
             git_ref: row.get("source_ref"),
@@ -640,6 +660,7 @@ pub(crate) fn write_file(
     rel: &str,
     data: &[u8],
 ) -> Result<SkillFile, SkillError> {
+    refuse_locked(id)?;
     let (rel, path) = file_path(repo_root, id, rel, false)?;
     if data.len() as u64 > MAX_FILE_BYTES {
         return Err(SkillError::FileTooLarge {
@@ -716,6 +737,7 @@ pub(crate) fn overwrite_file(
     rel: &str,
     text: &str,
 ) -> Result<SkillFile, SkillError> {
+    refuse_locked(id)?;
     let (rel, path) = file_path(repo_root, id, rel, false)?;
     if !path.is_file() {
         return Err(SkillError::FileNotFound(rel));
@@ -726,6 +748,7 @@ pub(crate) fn overwrite_file(
 /// Delete a reference file, then prune the sub-folders it leaves empty (a
 /// `examples/` that held one spec disappears with it; the skill folder stays).
 pub(crate) fn delete_file(repo_root: &Path, id: &str, rel: &str) -> Result<(), SkillError> {
+    refuse_locked(id)?;
     let (rel, path) = file_path(repo_root, id, rel, false)?;
     if !path.is_file() {
         return Err(SkillError::FileNotFound(rel));
@@ -756,6 +779,7 @@ pub(crate) async fn update_skill_md(
     id: &str,
     content: &str,
 ) -> Result<Skill, SkillError> {
+    refuse_locked(id)?;
     get(db, id).await?.ok_or(SkillError::NotFound)?;
     let parsed = validate_skill_md(content)?;
     let dir = skill_dir(repo_root, id);
@@ -774,6 +798,16 @@ pub(crate) async fn update_skill_md(
 // ---------------------------------------------------------------------------
 // Skills — writes
 // ---------------------------------------------------------------------------
+
+/// The seed lock (#722): every write verb on the seeded skill is refused with
+/// the same named error, wherever it comes from — the panel, the endpoints, an
+/// import. The seed itself writes the disk directly and never passes here.
+fn refuse_locked(id: &str) -> Result<(), SkillError> {
+    if is_seeded(id) {
+        return Err(SkillError::Locked { id: id.to_string() });
+    }
+    Ok(())
+}
 
 async fn folder_exists(db: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query("SELECT 1 FROM skill_folders WHERE id = ?")
@@ -883,6 +917,7 @@ pub(crate) async fn create_with_id(
         name,
         description: parsed.description,
         folder_id,
+        locked: false,
         source: None,
         created_at: now.clone(),
         updated_at: now,
@@ -973,6 +1008,7 @@ pub(crate) async fn create_from_dir(
         name,
         description: parsed.description,
         folder_id,
+        locked: false,
         source: Some(provenance.clone()),
         created_at: now.clone(),
         updated_at: now,
@@ -1056,6 +1092,7 @@ pub(crate) async fn update(
     name: Option<&str>,
     folder_id: Option<Option<&str>>,
 ) -> Result<Skill, SkillError> {
+    refuse_locked(id)?;
     let current = get(db, id).await?.ok_or(SkillError::NotFound)?;
     let name = match name {
         Some(candidate) => check_label_unique(db, candidate, Some(id)).await?,
@@ -1095,6 +1132,7 @@ pub(crate) async fn delete(
     repo_root: &Path,
     id: &str,
 ) -> Result<bool, SkillError> {
+    refuse_locked(id)?;
     let res = sqlx::query("DELETE FROM skills WHERE id = ?")
         .bind(id)
         .execute(db)
@@ -1107,6 +1145,223 @@ pub(crate) async fn delete(
         std::fs::remove_dir_all(&dir)?;
     }
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Seed (#722, spec #719, ADR-0064)
+// ---------------------------------------------------------------------------
+
+/// Is `id` the seeded skill? The one question the lock and the UI ask.
+pub(crate) fn is_seeded(id: &str) -> bool {
+    id == SEEDED_SKILL_ID
+}
+
+/// The seeded `SKILL.md`, versioned with this binary. Bump `skill_version` in
+/// the frontmatter whenever the guidance changes: the next start overwrites the
+/// copy in every bank, keeping ids and referents intact.
+pub(crate) const SEEDED_SKILL_MD: &str = r#"---
+name: pdo-orchestrate
+description: Orchestrate child runs with PDO — create runs from this node session, follow them, and complete truthfully.
+skill_version: 1
+---
+
+# Orchestrating with PDO
+
+You are running inside a PDO **node session**. Your identity travels in the
+environment: `PDO_RUN_ID` (your run), `PDO_NODE_ID` (your node),
+`PDO_NODE_ITER` (your iteration) and `PDO_DAEMON_URL` (the daemon to talk to).
+Every run you create from this session is **mechanically linked** to your run
+and node — the daemon sets the parent itself; you never declare it.
+
+## Creating a child run
+
+Prefer the CLI (same session, one short command):
+
+```bash
+pdo run create --pipeline <pipeline-name> --input "<what the child must do>"
+```
+
+The child inherits your run's project by default; pass `--project`, `--input`
+or `--variable key=value` to steer it. Out of a node session the same command
+works, without a parent.
+
+The HTTP surface is equivalent — the CLI is a thin client:
+
+```bash
+curl -X POST "$PDO_DAEMON_URL/runs" \
+  -H "Content-Type: application/json" \
+  -d '{"pipeline": "<pipeline-name>", "input": "<what the child must do>"}'
+```
+
+The response carries `{"run_id": "..."}`. A child is an **ordinary run**: its
+own graph, its own worktree, its own harness. Recursive orchestration works —
+a child may orchestrate in turn.
+
+## Following your children
+
+```bash
+curl -s "$PDO_DAEMON_URL/runs/$PDO_RUN_ID/children"
+```
+
+lists the runs linked to your run: title, status, start time, duration and
+cost. Check it periodically while your children work.
+
+## Completing truthfully
+
+The linkage is strong: `pdo complete` is **refused** while any of your child
+runs is still running, and your node lands in `awaiting_user` if a child
+fails — that is your cue to retry it or hand the decision to the user. Never
+declare completion while work you spawned is still in flight; the daemon
+enforces it, and the honest move is to wait, follow up, or fail loudly.
+
+## Good practice
+
+- Give each child a precise, self-sufficient input: it cannot see your context.
+- Orchestrate wide, not deep, unless the work truly nests.
+- Your children outlive your own gestures (stop, archive) — do not use that to
+  abandon them; finish what you spawned or leave it in a decided state.
+"#;
+
+/// What one pass of the seed did — logged at startup, asserted in tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SeedOutcome {
+    /// The skill was absent: row and folder written.
+    Created,
+    /// The content on disk differed from the built-in copy: overwritten.
+    Updated,
+    /// Row and content already matched: nothing written.
+    Unchanged,
+    /// The seed could not claim its identity (another skill owns the label):
+    /// nothing written, the daemon runs without the seed.
+    Skipped { reason: String },
+}
+
+/// Seed at startup: [`seed_with`] with the built-in identity and content.
+pub(crate) async fn seed(db: &SqlitePool, repo_root: &Path) -> Result<SeedOutcome, SkillError> {
+    seed_with(
+        db,
+        repo_root,
+        SEEDED_SKILL_ID,
+        SEEDED_FOLDER_ID,
+        SEEDED_FOLDER_NAME,
+        SEEDED_SKILL_MD,
+    )
+    .await
+}
+
+/// The one seed pass, parameterised for tests. Idempotent: `Created` once,
+/// then `Unchanged` until the built-in content changes.
+pub(crate) async fn seed_with(
+    db: &SqlitePool,
+    repo_root: &Path,
+    id: &str,
+    folder_id: &str,
+    folder_name: &str,
+    content: &str,
+) -> Result<SeedOutcome, SkillError> {
+    // Our own content passes the same gate a pasted SKILL.md would: the seed
+    // never writes a skill the harness would ignore.
+    let parsed = validate_skill_md(content)?;
+    let now = crate::event_log::now_iso();
+
+    // The « PDO » folder: a fixed id, or an existing root folder already
+    // carrying the name (an operator's folder named PDO is adopted, not
+    // duplicated — the folder is a UI gesture, nothing references it).
+    let folder_pk = match get_folder(db, folder_id).await? {
+        Some(_) => folder_id.to_string(),
+        None => {
+            let adopted: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM skill_folders \
+                 WHERE parent_id IS NULL AND lower(trim(name)) = lower(trim(?)) LIMIT 1",
+            )
+            .bind(folder_name)
+            .fetch_optional(db)
+            .await?;
+            match adopted {
+                Some(existing) => existing,
+                None => {
+                    sqlx::query(
+                        "INSERT INTO skill_folders (id, name, parent_id, created_at, updated_at) \
+                         VALUES (?, ?, NULL, ?, ?)",
+                    )
+                    .bind(folder_id)
+                    .bind(folder_name)
+                    .bind(&now)
+                    .bind(&now)
+                    .execute(db)
+                    .await?;
+                    folder_id.to_string()
+                }
+            }
+        }
+    };
+
+    match get(db, id).await? {
+        Some(_) => {
+            // Re-seed whenever the disk content is not exactly the built-in
+            // copy: a version bump, an erased file, a corrupted folder. The id
+            // and the references that select the skill stay put.
+            let on_disk = std::fs::read_to_string(skill_dir(repo_root, id).join(SKILL_MD)).ok();
+            if on_disk.as_deref() == Some(content) {
+                return Ok(SeedOutcome::Unchanged);
+            }
+            let dir = skill_dir(repo_root, id);
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join(SKILL_MD), content)?;
+            sqlx::query(
+                "UPDATE skills SET description = ?, folder_id = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&parsed.description)
+            .bind(&folder_pk)
+            .bind(&now)
+            .bind(id)
+            .execute(db)
+            .await?;
+            Ok(SeedOutcome::Updated)
+        }
+        None => {
+            // The label is unique in the bank: if a user skill already carries
+            // it, skip rather than fight the index — the operator renames
+            // theirs, and the next start seeds.
+            if let Some(other) = find_by_name_ci(db, &parsed.name).await? {
+                return Ok(SeedOutcome::Skipped {
+                    reason: format!(
+                        "a skill named `{}` already exists (id `{}`)",
+                        other.name, other.id
+                    ),
+                });
+            }
+            // Same order as [`create`]: validate, index, then write — a disk
+            // failure rolls the row back, leaving no half seed.
+            sqlx::query(
+                "INSERT INTO skills (id, name, description, folder_id, source, source_commit, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
+            )
+            .bind(id)
+            .bind(&parsed.name)
+            .bind(&parsed.description)
+            .bind(&folder_pk)
+            .bind(&now)
+            .bind(&now)
+            .execute(db)
+            .await?;
+
+            let dir = skill_dir(repo_root, id);
+            let written = std::fs::create_dir_all(&dir)
+                .and_then(|_| std::fs::write(dir.join(SKILL_MD), content));
+            if let Err(error) = written {
+                let _ = sqlx::query("DELETE FROM skills WHERE id = ?")
+                    .bind(id)
+                    .execute(db)
+                    .await;
+                return Err(SkillError::Storage(format!(
+                    "failed to write {}: {error}",
+                    dir.display()
+                )));
+            }
+            Ok(SeedOutcome::Created)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1774,5 +2029,169 @@ mod tests {
             .unwrap();
         assert_eq!(renamed.name, "bee");
         assert_eq!(renamed.parent_id, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Seed (#722, spec #719, ADR-0064)
+    // -----------------------------------------------------------------------
+
+    fn other_skill_md() -> String {
+        "---\nname: tdd\ndescription: Test-driven development.\n---\n\n# TDD\n\nRed, green.\n"
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn first_seed_creates_row_folder_and_content() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(seed(&db, root.path()).await.unwrap(), SeedOutcome::Created);
+        let skill = get(&db, SEEDED_SKILL_ID).await.unwrap().unwrap();
+        assert_eq!(skill.name, "pdo-orchestrate");
+        let folder = get_folder(&db, SEEDED_FOLDER_ID).await.unwrap().unwrap();
+        assert_eq!(folder.name, "PDO");
+        assert_eq!(skill.folder_id.as_deref(), Some(SEEDED_FOLDER_ID));
+        let on_disk =
+            std::fs::read_to_string(skill_dir(root.path(), SEEDED_SKILL_ID).join(SKILL_MD))
+                .unwrap();
+        assert_eq!(on_disk, SEEDED_SKILL_MD);
+    }
+
+    #[tokio::test]
+    async fn a_second_seed_is_a_noop() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        seed(&db, root.path()).await.unwrap();
+        assert_eq!(
+            seed(&db, root.path()).await.unwrap(),
+            SeedOutcome::Unchanged
+        );
+    }
+
+    #[tokio::test]
+    async fn a_version_bump_rewrites_the_content_keeping_id_and_row() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        seed(&db, root.path()).await.unwrap();
+        let before = get(&db, SEEDED_SKILL_ID).await.unwrap().unwrap();
+
+        let bumped = SEEDED_SKILL_MD.replace("skill_version: 1", "skill_version: 2");
+        let outcome = seed_with(
+            &db,
+            root.path(),
+            SEEDED_SKILL_ID,
+            SEEDED_FOLDER_ID,
+            SEEDED_FOLDER_NAME,
+            &bumped,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, SeedOutcome::Updated);
+
+        let after = get(&db, SEEDED_SKILL_ID).await.unwrap().unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.folder_id.as_deref(), Some(SEEDED_FOLDER_ID));
+        assert_ne!(after.updated_at, before.updated_at);
+        let on_disk =
+            std::fs::read_to_string(skill_dir(root.path(), SEEDED_SKILL_ID).join(SKILL_MD))
+                .unwrap();
+        assert_eq!(on_disk, bumped);
+    }
+
+    #[tokio::test]
+    async fn an_erased_or_corrupted_folder_is_reseeded() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        seed(&db, root.path()).await.unwrap();
+
+        // Erased: the whole folder is gone from disk.
+        std::fs::remove_dir_all(skill_dir(root.path(), SEEDED_SKILL_ID)).unwrap();
+        assert_eq!(seed(&db, root.path()).await.unwrap(), SeedOutcome::Updated);
+        let on_disk =
+            std::fs::read_to_string(skill_dir(root.path(), SEEDED_SKILL_ID).join(SKILL_MD))
+                .unwrap();
+        assert_eq!(on_disk, SEEDED_SKILL_MD);
+
+        // Corrupted: the file exists but its content drifted.
+        std::fs::write(
+            skill_dir(root.path(), SEEDED_SKILL_ID).join(SKILL_MD),
+            "corrupted",
+        )
+        .unwrap();
+        assert_eq!(seed(&db, root.path()).await.unwrap(), SeedOutcome::Updated);
+        let on_disk =
+            std::fs::read_to_string(skill_dir(root.path(), SEEDED_SKILL_ID).join(SKILL_MD))
+                .unwrap();
+        assert_eq!(on_disk, SEEDED_SKILL_MD);
+    }
+
+    #[tokio::test]
+    async fn a_user_skill_already_owing_the_label_is_left_alone() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        let user = create(
+            &db,
+            root.path(),
+            &other_skill_md(),
+            Some("pdo-orchestrate"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            seed(&db, root.path()).await.unwrap(),
+            SeedOutcome::Skipped { .. }
+        ));
+        assert!(get(&db, SEEDED_SKILL_ID).await.unwrap().is_none());
+        assert_eq!(
+            get(&db, &user.id).await.unwrap().unwrap().name,
+            "pdo-orchestrate"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_existing_root_folder_named_pdo_is_adopted_not_duplicated() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        let existing = create_folder(&db, "PDO", None).await.unwrap();
+        seed(&db, root.path()).await.unwrap();
+        let skill = get(&db, SEEDED_SKILL_ID).await.unwrap().unwrap();
+        assert_eq!(skill.folder_id.as_deref(), Some(existing.id.as_str()));
+        assert!(get_folder(&db, SEEDED_FOLDER_ID).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_seeded_skill_is_locked_against_every_bank_write() {
+        let db = mem_db().await;
+        let root = tempfile::tempdir().unwrap();
+        seed(&db, root.path()).await.unwrap();
+        let id = SEEDED_SKILL_ID;
+
+        assert!(matches!(
+            delete(&db, root.path(), id).await,
+            Err(SkillError::Locked { .. })
+        ));
+        assert!(matches!(
+            update(&db, id, Some("renamed"), None).await,
+            Err(SkillError::Locked { .. })
+        ));
+        assert!(matches!(
+            update_skill_md(&db, root.path(), id, &other_skill_md()).await,
+            Err(SkillError::Locked { .. })
+        ));
+        assert!(matches!(
+            write_file(root.path(), id, "notes.md", b"x"),
+            Err(SkillError::Locked { .. })
+        ));
+        assert!(matches!(
+            overwrite_file(root.path(), id, "notes.md", "x"),
+            Err(SkillError::Locked { .. })
+        ));
+        assert!(matches!(
+            delete_file(root.path(), id, "notes.md"),
+            Err(SkillError::Locked { .. })
+        ));
+        // Still there after every refusal.
+        assert!(get(&db, id).await.unwrap().is_some());
     }
 }

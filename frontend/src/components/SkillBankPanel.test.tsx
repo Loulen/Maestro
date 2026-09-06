@@ -542,6 +542,41 @@ describe("SkillBankPanel (#668)", () => {
     fireEvent.keyDown(tree, { key: "F2" });
     expect(screen.getByTestId("rename-input")).toBeInTheDocument();
   });
+
+  it("the seeded PDO skill (#722) is locked: no rename, no move, no delete, only Copy id", async () => {
+    const seeded: Skill = { ...skill("pdo-orchestrate", "pdo-orchestrate", "f-pdo", "Orchestrate with PDO."), locked: true };
+    const bank: SkillBank = {
+      root_path: "/home/user/.pdo/skills",
+      folders: [folder("f-pdo", "PDO")],
+      skills: [seeded, skill("s-tdd", "tdd", null, "Test-driven development.")],
+    };
+    fetchSkillMock.mockImplementation(async (id: string) =>
+      detailOf(id === "pdo-orchestrate" ? seeded : skill(id, id, null)),
+    );
+    setup(bank);
+
+    // Select the locked skill (expand « PDO » first): the detail shows the lock
+    // badge instead of the action buttons.
+    fireEvent.click(screen.getByLabelText("Expand PDO"));
+    fireEvent.click(screen.getByTestId("tree-skill-pdo-orchestrate"));
+    await waitFor(() => expect(screen.getByTestId("skill-detail-locked")).toBeInTheDocument());
+    expect(screen.queryByTestId("skill-detail-rename")).toBeNull();
+    expect(screen.queryByTestId("skill-detail-move")).toBeNull();
+    expect(screen.queryByTestId("skill-detail-delete")).toBeNull();
+
+    // The row has no pencil, and the kebab offers only Copy id + the lock note.
+    expect(screen.queryByLabelText("Rename pdo-orchestrate")).toBeNull();
+    fireEvent.click(screen.getByTestId("kebab-skill-pdo-orchestrate"));
+    expect(screen.queryByRole("menuitem", { name: "Rename" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Move to…" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Delete…" })).toBeNull();
+    expect(screen.getByTestId("tree-menu-locked")).toBeInTheDocument();
+
+    // Keyboard verbs are gated too: F2 does not enter rename.
+    const tree = screen.getByTestId("skill-tree");
+    fireEvent.keyDown(tree, { key: "F2" });
+    expect(screen.queryByTestId("rename-input")).toBeNull();
+  });
 });
 
 

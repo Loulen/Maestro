@@ -8,6 +8,7 @@ import {
   Folder,
   FolderInput,
   FolderPlus,
+  Lock,
   MoreVertical,
   Pencil,
   Plus,
@@ -84,6 +85,11 @@ interface Toast {
 function relativise(path: string, home: string | null): string {
   if (home && path.startsWith(home + "/")) return "~" + path.slice(home.length);
   return path;
+}
+
+/** The seeded skill (#722): locked against rename, move, edit and delete. */
+function isLocked(skill: Pick<Skill, "locked"> | null | undefined): boolean {
+  return skill?.locked ?? false;
 }
 
 /**
@@ -221,6 +227,7 @@ export default function SkillBankPanel({ bank, loaded, home, onChanged }: Props)
   const moveSkill = async (skillId: string, folderId: string | null, withUndo = true) => {
     const skill = skillById.get(skillId);
     if (!skill) return;
+    if (isLocked(skill)) return;
     if ((skill.folder_id ?? null) === folderId) return;
     const from = skill.folder_id ?? null;
     setError(null);
@@ -301,6 +308,7 @@ export default function SkillBankPanel({ bank, loaded, home, onChanged }: Props)
   };
 
   const startRename = (ref: TreeNodeRef) => {
+    if (ref.kind === "skill" && isLocked(skillById.get(ref.id))) return;
     setMenuFor(null);
     setRenameError(null);
     setSelected(ref);
@@ -325,6 +333,7 @@ export default function SkillBankPanel({ bank, loaded, home, onChanged }: Props)
   const askDelete = async (ref: TreeNodeRef) => {
     setMenuFor(null);
     setError(null);
+    if (ref.kind === "skill" && isLocked(skillById.get(ref.id))) return;
     if (ref.kind === "skill") {
       const skill = skillById.get(ref.id);
       if (!skill) return;
@@ -424,16 +433,19 @@ export default function SkillBankPanel({ bank, loaded, home, onChanged }: Props)
   const renderActions = (row: TreeRow) => {
     const ref = row.ref;
     const isMenuOpen = sameRef(menuFor, ref);
+    const lockedSkill = row.skill?.locked ?? false;
     return (
       <>
-        <button
-          type="button"
-          aria-label={`Rename ${row.folder?.name ?? row.skill?.name ?? ""}`}
-          onClick={() => startRename(ref)}
-          className="grid h-5 w-5 place-items-center rounded text-fg-4 hover:bg-bg-4 hover:text-fg"
-        >
-          <Pencil size={11} />
-        </button>
+        {!lockedSkill && (
+          <button
+            type="button"
+            aria-label={`Rename ${row.folder?.name ?? row.skill?.name ?? ""}`}
+            onClick={() => startRename(ref)}
+            className="grid h-5 w-5 place-items-center rounded text-fg-4 hover:bg-bg-4 hover:text-fg"
+          >
+            <Pencil size={11} />
+          </button>
+        )}
         <span className="relative">
           <button
             type="button"
@@ -462,6 +474,19 @@ export default function SkillBankPanel({ bank, loaded, home, onChanged }: Props)
                   <MenuItem icon={<Pencil size={12} />} label="Rename" hint="F2" onClick={() => startRename(ref)} />
                   <MenuSeparator />
                   <MenuItem icon={<Trash2 size={12} />} label="Delete folder" hint="⌫" danger onClick={() => void askDelete(ref)} />
+                </>
+              ) : lockedSkill ? (
+                <>
+                  <MenuItem icon={<Copy size={12} />} label="Copy id" onClick={() => void copyId(ref.id)} />
+                  <MenuSeparator />
+                  <div
+                    className="flex items-center gap-2 px-2 py-1.5 text-fg-4"
+                    style={{ fontSize: "11px" }}
+                    data-testid="tree-menu-locked"
+                  >
+                    <Lock size={12} className="shrink-0" />
+                    Managed by PDO
+                  </div>
                 </>
               ) : (
                 <>
@@ -1038,12 +1063,18 @@ function SkillDetailView({
   }, [files.dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   // A file drag anywhere over the detail switches to the Files tab and covers
-  // the pane with the drop overlay (#671 design 02/05).
+  // the pane with the drop overlay (#671 design 02/05) — never on a locked
+  // skill, whose files refuse every write.
+  const locked = isLocked(skill);
   const { dragging, handlers: dropHandlers } = useFileDropTarget(
-    (dataTransfer) => void files.acceptDrop(dataTransfer),
-    () => {
-      if (tab !== "files") onTab("files");
-    },
+    locked
+      ? () => {}
+      : (dataTransfer) => void files.acceptDrop(dataTransfer),
+    locked
+      ? undefined
+      : () => {
+          if (tab !== "files") onTab("files");
+        },
   );
   const frontmatter = current?.frontmatter ?? null;
   const frontmatterKeys = frontmatter
@@ -1054,13 +1085,24 @@ function SkillDetailView({
     : [];
   return (
     <div className="relative flex min-h-0 flex-1 flex-col p-5" data-testid="skill-detail" {...dropHandlers}>
-      {dragging !== null && (
+      {dragging !== null && !locked && (
         <DropOverlay count={dragging} hint="A SKILL.md replaces the skill text · folders are refused" />
       )}
       <div className="flex items-baseline gap-2">
         <h3 className="truncate font-semibold text-fg" style={{ fontSize: "17px" }} data-testid="skill-detail-name">
           {skill.name}
         </h3>
+        {locked && (
+          <span
+            className="flex shrink-0 items-center gap-1 rounded border border-line-strong bg-bg-3 px-1.5 py-0.5 text-fg-3"
+            style={{ fontSize: "9.5px" }}
+            data-testid="skill-detail-locked"
+            title="Seeded by PDO at startup: locked against editing and deletion"
+          >
+            <Lock size={10} />
+            Managed by PDO
+          </span>
+        )}
         <span className="flex items-center gap-1 font-mono text-fg-4" style={{ fontSize: "10.5px" }}>
           id {shortId(skill.id)}
           <button
@@ -1110,20 +1152,30 @@ function SkillDetailView({
       </div>
 
       <div className="mt-3 flex items-center gap-2">
-        <ActionButton icon={<Pencil size={11} />} label="Rename" onClick={onRename} testid="skill-detail-rename" />
-        <span className="relative">
-          <ActionButton icon={<FolderInput size={11} />} label="Move to…" onClick={onMove} testid="skill-detail-move" />
-          {movePickerOpen && (
-            <FolderPicker
-              folders={folders}
-              current={skill.folder_id ?? null}
-              onPick={onMoveTo}
-              onClose={() => onMoveTo(skill.folder_id ?? null)}
-            />
-          )}
-        </span>
+        {locked ? (
+          <span className="text-fg-4" style={{ fontSize: "10.5px" }} data-testid="skill-detail-locked-note">
+            Seeded by PDO at startup — it updates itself; editing and deletion are refused.
+          </span>
+        ) : (
+          <>
+            <ActionButton icon={<Pencil size={11} />} label="Rename" onClick={onRename} testid="skill-detail-rename" />
+            <span className="relative">
+              <ActionButton icon={<FolderInput size={11} />} label="Move to…" onClick={onMove} testid="skill-detail-move" />
+              {movePickerOpen && (
+                <FolderPicker
+                  folders={folders}
+                  current={skill.folder_id ?? null}
+                  onPick={onMoveTo}
+                  onClose={() => onMoveTo(skill.folder_id ?? null)}
+                />
+              )}
+            </span>
+          </>
+        )}
         <span className="flex-1" />
-        <ActionButton icon={<Trash2 size={11} />} label="Delete…" onClick={onDelete} danger testid="skill-detail-delete" />
+        {!locked && (
+          <ActionButton icon={<Trash2 size={11} />} label="Delete…" onClick={onDelete} danger testid="skill-detail-delete" />
+        )}
       </div>
 
       <div className="mt-4 flex gap-4 border-b border-line" role="tablist">
@@ -1180,7 +1232,7 @@ function SkillDetailView({
           )}
         </div>
       ) : (
-        <SkillFilesTab files={files} pathLabel={pathLabel} leaveRequest={leaveRequest} onLeaveSettled={onLeaveSettled} />
+        <SkillFilesTab files={files} pathLabel={pathLabel} leaveRequest={leaveRequest} onLeaveSettled={onLeaveSettled} locked={locked} />
       )}
     </div>
   );

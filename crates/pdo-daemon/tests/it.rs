@@ -160,6 +160,9 @@ mod skill_document;
 #[path = "skill_delivery.rs"]
 mod skill_delivery;
 
+#[path = "skill_seed.rs"]
+mod skill_seed;
+
 #[path = "sandbox_tracer.rs"]
 mod sandbox_tracer;
 

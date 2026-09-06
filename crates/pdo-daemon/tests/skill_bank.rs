@@ -49,16 +49,42 @@ async fn create_valid(daemon: &TestDaemon) -> serde_json::Value {
     resp.json().await.unwrap()
 }
 
-fn skill_dir_count(root: &Path) -> usize {
-    std::fs::read_dir(root).map(|d| d.count()).unwrap_or(0)
+/// The seeded skill (#722) shares every bank surface with user skills; these
+/// helpers keep the assertions about what the *user* created readable.
+fn user_skills(bank: &serde_json::Value) -> Vec<&serde_json::Value> {
+    bank["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["id"] != "pdo-orchestrate")
+        .collect()
+}
+
+fn user_skill_dirs(root: &Path) -> usize {
+    std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .filter(|e| e.as_ref().unwrap().file_name() != "pdo-orchestrate")
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 #[tokio::test]
-async fn fp_step_1_a_fresh_instance_has_an_empty_bank() {
+async fn fp_step_1_a_fresh_instance_has_only_the_seeded_skill() {
     let daemon = TestDaemon::spawn(|_| Ok(())).await.unwrap();
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"], serde_json::json!([]));
-    assert_eq!(bank["folders"], serde_json::json!([]));
+    // #722: the seed is the one pre-existing row — `pdo-orchestrate` in « PDO »,
+    // flagged locked; the user-owned bank itself is empty.
+    assert_eq!(user_skills(&bank), Vec::<&serde_json::Value>::new());
+    let skills = bank["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 1, "{bank}");
+    assert_eq!(skills[0]["id"], "pdo-orchestrate");
+    assert_eq!(skills[0]["locked"], true);
+    let folders = bank["folders"].as_array().unwrap();
+    assert_eq!(folders.len(), 1, "{bank}");
+    assert_eq!(folders[0]["id"], "skf-pdo");
+    assert_eq!(folders[0]["name"], "PDO");
     // The footer names the disk location: one folder per id under `.pdo/skills`.
     assert_eq!(
         bank["root_path"].as_str().unwrap(),
@@ -82,10 +108,11 @@ async fn fp_step_2_pasting_a_valid_skill_md_indexes_it_and_writes_its_folder_by_
     let on_disk = skills_root(&daemon).join(id).join("SKILL.md");
     assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), VALID);
 
-    // Listed with its name and description.
+    // Listed with its name and description (the seeded skill shares the bank).
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"].as_array().unwrap().len(), 1);
-    assert_eq!(bank["skills"][0]["name"], "tdd");
+    assert_eq!(user_skills(&bank).len(), 1);
+    assert_eq!(user_skills(&bank)[0]["name"], "tdd");
+    assert_eq!(user_skills(&bank)[0]["locked"], false);
 
     // Detail: raw content, parsed frontmatter for the table, body, files (none).
     let detail = get_json(&daemon, &format!("/settings/skills/{id}")).await;
@@ -117,8 +144,8 @@ async fn fp_step_3_missing_description_is_a_400_with_the_reason_and_nothing_on_d
 
     // Nothing appears, nothing is written.
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"], serde_json::json!([]));
-    assert_eq!(skill_dir_count(&skills_root(&daemon)), 0);
+    assert_eq!(user_skills(&bank), Vec::<&serde_json::Value>::new());
+    assert_eq!(user_skill_dirs(&skills_root(&daemon)), 0);
 }
 
 #[tokio::test]
@@ -140,7 +167,7 @@ async fn every_frontmatter_refusal_is_a_named_400() {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["code"], code);
     }
-    assert_eq!(skill_dir_count(&skills_root(&daemon)), 0);
+    assert_eq!(user_skill_dirs(&skills_root(&daemon)), 0);
 }
 
 #[tokio::test]
@@ -160,8 +187,8 @@ async fn a_case_insensitive_name_collision_is_an_explicit_409() {
     assert_eq!(body["existing_id"], first["id"]);
     assert_eq!(body["existing_name"], "tdd");
     assert!(body["error"].as_str().unwrap().contains("`tdd`"));
-    // The refused paste wrote nothing: one folder only.
-    assert_eq!(skill_dir_count(&skills_root(&daemon)), 1);
+    // The refused paste wrote nothing: one user folder only.
+    assert_eq!(user_skill_dirs(&skills_root(&daemon)), 1);
 }
 
 #[tokio::test]
@@ -194,8 +221,16 @@ async fn fp_step_4_create_a_folder_and_move_the_skill_into_it() {
 
     // The tree shows it under the folder; the disk did not move.
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"][0]["folder_id"], folder_id);
-    assert_eq!(bank["folders"][0]["id"], folder_id);
+    let row = user_skills(&bank)
+        .into_iter()
+        .find(|s| s["id"] == id)
+        .unwrap();
+    assert_eq!(row["folder_id"], folder_id);
+    assert!(bank["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["id"] == folder_id));
     assert!(skills_root(&daemon).join(id).join("SKILL.md").exists());
 
     // Back to the root with an explicit null.
@@ -244,7 +279,7 @@ async fn fp_step_5_renaming_changes_the_label_only_and_moves_nothing() {
         std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
         before
     );
-    assert_eq!(skill_dir_count(&skills_root(&daemon)), 1);
+    assert_eq!(user_skill_dirs(&skills_root(&daemon)), 1);
     let detail = get_json(&daemon, &format!("/settings/skills/{id}")).await;
     assert_eq!(detail["name"], "tdd-strict");
     assert_eq!(detail["frontmatter"]["name"], "tdd");
@@ -295,7 +330,7 @@ async fn fp_step_6_referents_are_empty_and_delete_removes_row_and_folder() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert!(!dir.exists(), "the folder on disk is removed");
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"], serde_json::json!([]));
+    assert_eq!(user_skills(&bank), Vec::<&serde_json::Value>::new());
 
     // Gone means gone: 404 on every route for that id.
     let resp = reqwest::get(format!("{}/settings/skills/{id}", daemon.url()))
@@ -380,7 +415,7 @@ async fn folder_crud_nests_renames_and_deleting_moves_content_to_the_parent() {
 
     // Listed.
     let listed = get_json(&daemon, "/settings/skill-folders").await;
-    assert_eq!(listed["folders"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["folders"].as_array().unwrap().len(), 3);
 
     // Delete `java`: its skill moves up to `ippon`; the skill itself survives.
     let resp = client
@@ -390,8 +425,12 @@ async fn folder_crud_nests_renames_and_deleting_moves_content_to_the_parent() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["folders"].as_array().unwrap().len(), 1);
-    assert_eq!(bank["skills"][0]["folder_id"], ippon_id);
+    assert_eq!(bank["folders"].as_array().unwrap().len(), 2);
+    let row = user_skills(&bank)
+        .into_iter()
+        .find(|s| s["id"] == skill["id"])
+        .unwrap();
+    assert_eq!(row["folder_id"], ippon_id);
     assert!(skills_root(&daemon)
         .join(skill["id"].as_str().unwrap())
         .join("SKILL.md")
@@ -408,7 +447,11 @@ async fn folder_crud_nests_renames_and_deleting_moves_content_to_the_parent() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert!(bank["skills"][0]["folder_id"].is_null());
+    let row = user_skills(&bank)
+        .into_iter()
+        .find(|s| s["id"] == skill["id"])
+        .unwrap();
+    assert!(row["folder_id"].is_null());
     let resp = client
         .delete(format!(
             "{}/settings/skill-folders/{ippon_id}",
@@ -504,7 +547,16 @@ async fn the_bank_survives_a_daemon_restart() {
         .json()
         .await
         .unwrap();
-    assert_eq!(bank["skills"][0]["id"], id);
+    assert_eq!(
+        bank["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["id"].clone())
+            .unwrap(),
+        id
+    );
     let detail: serde_json::Value = reqwest::get(format!("{url}/settings/skills/{id}"))
         .await
         .unwrap()
@@ -1516,9 +1568,8 @@ async fn fp670_step_1_scanning_a_git_source_lists_nested_skills_with_one_invalid
     assert!(bad["reason"].as_str().unwrap().contains("description"));
     // Nothing was written to the bank.
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"], serde_json::json!([]));
-    assert_eq!(bank["folders"], serde_json::json!([]));
-    assert_eq!(skill_dir_count(&skills_root(&daemon)), 0);
+    assert_eq!(user_skills(&bank), Vec::<&serde_json::Value>::new());
+    assert_eq!(user_skill_dirs(&skills_root(&daemon)), 0);
     // The source is remembered for the "Recent sources" list.
     let recent = get_json(&daemon, "/settings/skills/sources/recent").await;
     assert_eq!(recent["sources"][0]["url"], file_url(repo.path()));
@@ -1624,7 +1675,7 @@ async fn fp670_step_2_importing_two_skills_creates_a_source_folder_with_provenan
     // Each skill carries its own provenance and its whole folder was copied.
     let bank = get_json(&daemon, "/settings/skills").await;
     let skills = bank["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 2);
+    assert_eq!(skills.len(), 3);
     let pdf = skills.iter().find(|s| s["name"] == "pdf").unwrap();
     assert_eq!(pdf["folder_id"], folder_id);
     assert_eq!(pdf["source"]["url"], url);
@@ -1733,11 +1784,7 @@ async fn fp670_step_3_reimporting_offers_replace_rename_skip_and_never_writes_si
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(
-        bank["folders"].as_array().unwrap().len(),
-        2,
-        "no folder was created"
-    );
+    assert_eq!(user_skills(&bank).len(), 2, "no folder was created");
 
     // Change the source, then: replace `pdf`, rename `code-review`, skip nothing silently.
     std::fs::write(
@@ -1784,9 +1831,7 @@ async fn fp670_step_3_reimporting_offers_replace_rename_skip_and_never_writes_si
     assert_eq!(renamed["skill"]["name"], "code-review-anthropic");
     // The pasted `code-review` is untouched; `webapp-testing` was skipped.
     let bank = get_json(&daemon, "/settings/skills").await;
-    let names: Vec<&str> = bank["skills"]
-        .as_array()
-        .unwrap()
+    let names: Vec<&str> = user_skills(&bank)
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();

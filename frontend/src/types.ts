@@ -1616,6 +1616,8 @@ export interface Skill {
   description: string;
   /** `null` at the root of the bank. */
   folder_id: string | null;
+  /** Set on the skill PDO seeds at startup (#722): no rename, no move, no edit, no delete. */
+  locked?: boolean;
   /** Provenance of an import; absent for a pasted skill. */
   source?: SkillProvenance | null;
   created_at: string;
