@@ -3136,6 +3136,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![EdgeDef {
                 source: EdgeEndpoint {
@@ -3195,6 +3196,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![EdgeDef {
                 source: EdgeEndpoint {

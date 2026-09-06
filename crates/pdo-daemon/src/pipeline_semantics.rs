@@ -158,6 +158,12 @@ struct NodeProjection<'a> {
     /// byte-identical to its pre-résilience content hash.
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_fail: Option<bool>,
+    /// Semantic (#723/#724, ADR-0064): the « Orchestrator » toggle changes the
+    /// node's completion contract. `skip_serializing_if` keeps a node without the
+    /// toggle byte-identical to its pre-#723 content hash, the same discipline
+    /// `auto_fail` above uses.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    orchestrator: bool,
     /// Where the node's NodeRun works (#653, ADR-0060). Semantic: moving a node
     /// between the Run worktree and one of its own changes what the pipeline
     /// does — a parallel pair that shared a tree does not become the same
@@ -186,6 +192,7 @@ impl<'a> NodeProjection<'a> {
             agent_choice,
             skills,
             auto_fail,
+            orchestrator,
             isolated_worktree,
         } = node;
         let _layout = view; // LAYOUT_FIELDS["node"]
@@ -201,6 +208,7 @@ impl<'a> NodeProjection<'a> {
             max_iter: max_iter.as_ref().map(canon_yaml),
             over: over.as_deref(),
             auto_fail: *auto_fail,
+            orchestrator: *orchestrator,
             isolated_worktree: *isolated_worktree,
             inputs: inputs.iter().map(PortProjection::of).collect(),
             outputs: outputs.iter().map(PortProjection::of).collect(),

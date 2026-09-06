@@ -2456,6 +2456,7 @@ edges:
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         }
     }
 
@@ -2496,6 +2497,7 @@ edges:
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         }
     }
 
@@ -2536,6 +2538,7 @@ edges:
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         }
     }
 

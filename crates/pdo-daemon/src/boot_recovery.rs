@@ -326,6 +326,7 @@ mod tests {
         let mut rs = event_log::RunState::new(run_id.into(), "test".into());
         rs.node_defs.push(event_log::NodeDefInfo {
             isolated_worktree: Some(isolated),
+            orchestrator: false,
             id: node_id.into(),
             name: None,
             node_type: "agent".into(),

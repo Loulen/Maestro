@@ -53,6 +53,12 @@ pub struct NodeDefInfo {
     /// when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolated_worktree: Option<bool>,
+    /// The « Orchestrator » toggle (#723/#724, ADR-0064) as the Run's snapshot
+    /// froze it at start: `true` ⇒ the strong orchestrator↔children binding
+    /// holds this node's NodeRun. `false` (default) keeps every pre-#723 run
+    /// unbound; `skip_serializing_if` keeps the wire byte-identical when unset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub orchestrator: bool,
     pub view_x: Option<f64>,
     pub view_y: Option<f64>,
     pub inputs: Vec<PortBrief>,

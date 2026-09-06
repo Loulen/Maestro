@@ -94,6 +94,21 @@ pub(crate) enum CompletionRefusal {
     MergeResolverFailed {
         reason: String,
     },
+    /// Liaison forte orchestrateur ↔ enfants (#724 / ADR-0064) : le nœud est
+    /// orchestrator (toggle gelé au démarrage du Run) et ses runs enfants (mêmes
+    /// `parent_run_id` + `parent_node_id`) ne sont pas tous terminaux. Le nœud
+    /// reste vivant : aucun événement terminal n'est appendé, la livraison n'a
+    /// pas lieu. Avec au moins un enfant `failed`, le NodeRun est parqué
+    /// `AwaitingUser` (le `NodeAwaitingUser` porte `reason: "children_pending"`)
+    /// et la décision appartient à l'utilisateur — retry de l'enfant ou forçage
+    /// (`mark_node_done`), jamais à l'agent.
+    ChildrenPending {
+        node_id: String,
+        /// Enfants encore non terminaux (running / awaiting_user / paused).
+        active: usize,
+        /// Enfants `failed` — ceux que l'utilisateur doit trancher.
+        failed: usize,
+    },
 }
 
 impl CompletionRefusal {
@@ -116,6 +131,7 @@ impl CompletionRefusal {
             Self::MergeResolutionFailed { .. } => "merge_resolution_failed",
             Self::MergeResolverSpawned { .. } => "merge_resolver_spawned",
             Self::MergeResolverFailed { .. } => "merge_resolver_failed",
+            Self::ChildrenPending { .. } => "children_pending",
         }
     }
 
@@ -125,7 +141,12 @@ impl CompletionRefusal {
     pub(crate) fn recoverable(&self) -> bool {
         matches!(
             self,
-            Self::MissingOutputs { .. } | Self::FrontmatterRetryPending { .. }
+            Self::MissingOutputs { .. }
+                | Self::FrontmatterRetryPending { .. }
+                // Des enfants simplement en cours : l'agent garde la main — il
+                // attend qu'ils se terminent et re-complète. Avec un enfant
+                // `failed`, c'est l'utilisateur qui tranche (exit 4).
+                | Self::ChildrenPending { failed: 0, .. }
         )
     }
 
@@ -149,7 +170,8 @@ impl CompletionRefusal {
             | Self::SecondaryRepoDirtied { .. }
             | Self::MergeResolutionFailed { .. }
             | Self::MergeResolverSpawned { .. }
-            | Self::MergeResolverFailed { .. } => StatusCode::CONFLICT,
+            | Self::MergeResolverFailed { .. }
+            | Self::ChildrenPending { .. } => StatusCode::CONFLICT,
         }
     }
 
@@ -185,6 +207,16 @@ impl CompletionRefusal {
             }
             Self::MergeResolverSpawned { node_id } => serde_json::json!({
                 "message": format!("merge conflict on {node_id}: resolver spawned")
+            }),
+            Self::ChildrenPending {
+                node_id,
+                active,
+                failed,
+            } => serde_json::json!({
+                "node_id": node_id,
+                "active": active,
+                "failed": failed,
+                "message": children_pending_message(node_id, *active, *failed),
             }),
         }
     }
@@ -225,7 +257,30 @@ impl CompletionRefusal {
             Self::MergeResolverFailed { reason } => {
                 format!("merge resolver spawn failed: {reason}")
             }
+            Self::ChildrenPending {
+                node_id,
+                active,
+                failed,
+            } => children_pending_message(node_id, *active, *failed),
         }
+    }
+}
+
+/// Le message « avec compteur » du refus de liaison (#724) : l'agent (et la
+/// surface) voient COMBIEN d'enfants retiennent encore le nœud, et lesquels
+/// réclament l'utilisateur.
+fn children_pending_message(node_id: &str, active: usize, failed: usize) -> String {
+    if failed > 0 {
+        format!(
+            "orchestrator node `{node_id}` is held by its child runs: {active} active, \
+             {failed} failed — the node is awaiting the user: retry the failed child run or \
+             force-complete the node"
+        )
+    } else {
+        format!(
+            "orchestrator node `{node_id}` is held by its child runs: {active} active — \
+             complete again once every child run is terminal"
+        )
     }
 }
 
@@ -308,6 +363,11 @@ mod tests {
             CompletionRefusal::MergeResolverFailed {
                 reason: "spawn failed".into(),
             },
+            CompletionRefusal::ChildrenPending {
+                node_id: "orch".into(),
+                active: 2,
+                failed: 1,
+            },
         ];
 
         // Plancher de couverture : le `match` sans joker force à nommer chaque
@@ -330,6 +390,7 @@ mod tests {
                 CompletionRefusal::MergeResolutionFailed { .. } => "MergeResolutionFailed",
                 CompletionRefusal::MergeResolverSpawned { .. } => "MergeResolverSpawned",
                 CompletionRefusal::MergeResolverFailed { .. } => "MergeResolverFailed",
+                CompletionRefusal::ChildrenPending { .. } => "ChildrenPending",
             };
             seen.insert(key);
         }
@@ -391,9 +452,41 @@ mod tests {
                 r,
                 CompletionRefusal::MissingOutputs { .. }
                     | CompletionRefusal::FrontmatterRetryPending { .. }
+                    // La liaison forte laisse la main à l'agent tant qu'aucun
+                    // enfant n'a échoué (#724).
+                    | CompletionRefusal::ChildrenPending { failed: 0, .. }
             );
             assert_eq!(r.recoverable(), expected, "{} recoverable()", r.slug());
         }
+        // Avec un enfant `failed`, la décision est à l'utilisateur (exit 4).
+        let failed_child = CompletionRefusal::ChildrenPending {
+            node_id: "orch".into(),
+            active: 1,
+            failed: 1,
+        };
+        assert!(!failed_child.recoverable());
+    }
+
+    /// Le refus de liaison compte : le message porte les deux compteurs (#724).
+    #[test]
+    fn children_pending_message_counts_active_and_failed() {
+        let r = CompletionRefusal::ChildrenPending {
+            node_id: "orch".into(),
+            active: 2,
+            failed: 0,
+        };
+        let reason = r.reason();
+        assert!(reason.contains("2 active"), "{reason}");
+        assert!(!reason.contains("failed"), "{reason}");
+
+        let r = CompletionRefusal::ChildrenPending {
+            node_id: "orch".into(),
+            active: 1,
+            failed: 3,
+        };
+        let reason = r.reason();
+        assert!(reason.contains("1 active"), "{reason}");
+        assert!(reason.contains("3 failed"), "{reason}");
     }
 
     /// « Jamais `2xx` » **≠** « toujours `409` ».
