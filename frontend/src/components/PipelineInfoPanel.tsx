@@ -1,10 +1,10 @@
 import { useState, useMemo, useRef, useEffect } from "react";
-import { Info, Terminal, X, FileText, Code, Box, Loader, Bot, Copy, Download, ChevronDown, ChevronRight } from "lucide-react";
+import { Info, Terminal, X, FileText, Code, Box, Loader, Bot, Copy, Download, ChevronDown, ChevronRight, Play, PowerOff } from "lucide-react";
 import { SectionHead } from "./InspectorPrimitives";
 import TmuxTerminal from "./TmuxTerminal";
 import DiffSection from "./DiffSection";
 import type { LibraryPipelineEntry } from "../api";
-import { fetchPipelineDocument, fetchPipelineSkillsSidecar, fetchRunPipelineDocument, fetchRunPipelineSkillsSidecar, openLibraryAssistant } from "../api";
+import { fetchPipelineDocument, fetchPipelineSkillsSidecar, fetchRunPipelineDocument, fetchRunPipelineSkillsSidecar, openLibraryAssistant, startRunManager, stopRunManager } from "../api";
 import type { RunState, PipelineDef } from "../types";
 import { isLiveRun } from "../types";
 import { formatDuration, useRunDuration } from "../lib/runDuration";
@@ -53,6 +53,14 @@ interface Props {
    *  the assistant which template to work on (the daemon's focus does), and no
    *  longer owns its lifecycle (`useLibassistLifecycle`, mounted in `App`). */
   assistantId?: string | null;
+  /** Manager on demand: refetch the Run state after a start/stop, so
+   *  `has_manager` flips and the tab swaps its empty state for the terminal
+   *  (the WS push usually lands first; this is the belt to its braces). */
+  onRefreshRun?: () => void;
+  /** Manager on demand: the empty state's « enable it for every run in
+   *  Settings » link — the host opens the surface on Agents › Pipeline
+   *  Manager (the existing programmatic entry, #690 story 18). */
+  onOpenSettings?: () => void;
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -72,30 +80,42 @@ export default function PipelineInfoPanel({
   initialTab,
   scrollToLine,
   assistantId,
+  onRefreshRun,
+  onOpenSettings,
 }: Props) {
   const pipelineName = run?.pipeline_name ?? pipeline?.name ?? "Untitled";
   const variables = pipeline?.variables ?? {};
   const variableEntries = Object.entries(variables);
   const managerSession = run ? `pdo-mgr-${run.run_id}` : null;
 
-  const hasManager = !!managerSession;
+  // Manager on demand: the Manager tab shows for EVERY live Run — an empty
+  // state with a Start button when no session exists (the new default
+  // posture), the terminal when one does. It also stays for a
+  // completed/archived Run whose session survives until cleanup (post-mortem
+  // interrogation). Only a template (no Run at all) hides it — the Assistant
+  // tab covers templates instead (#302).
   // #302: the Assistant is the mirror of the Manager — it exists only for a
   // library *template* (no live Run) with a resolvable pipeline id. Manager and
   // Assistant are therefore never both shown.
   const hasAssistant = !run && !!assistantId;
   const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "info");
   const resolvedTab =
-    (activeTab === "manager" && !hasManager) ||
+    (activeTab === "manager" && !run) ||
     (activeTab === "assistant" && !hasAssistant)
       ? "info"
       : activeTab;
 
   const tabs: { id: TabId; label: string; icon: typeof Info; show: boolean }[] = [
     { id: "info", label: "Info", icon: FileText, show: true },
-    { id: "manager", label: "Manager", icon: Terminal, show: hasManager },
+    { id: "manager", label: "Manager", icon: Terminal, show: run != null },
     { id: "assistant", label: "Assistant", icon: Bot, show: hasAssistant },
     { id: "yaml", label: "YAML", icon: Code, show: true },
   ];
+
+  // The quiet nudge (manager on demand): the exact moment a manager helps most
+  // is when the Run is parked on the user — an amber dot on the tab points it
+  // out without banners or auto-switching.
+  const nudgeManager = run?.status === "awaiting_user" && !(run.has_manager ?? false);
 
   return (
     <aside
@@ -138,6 +158,13 @@ export default function PipelineInfoPanel({
             >
               <t.icon size={12} />
               {t.label}
+              {t.id === "manager" && nudgeManager && (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-st-await"
+                  aria-hidden
+                  data-testid="manager-tab-dot"
+                />
+              )}
             </button>
           ))}
       </div>
@@ -152,29 +179,14 @@ export default function PipelineInfoPanel({
         />
       )}
 
-      {resolvedTab === "manager" && managerSession && run && (
-        <div
-          className="flex min-h-0 flex-1 flex-col"
-          style={{ fontSize: "11.5px" }}
-        >
-          <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-            <Terminal size={14} className="text-fg-3" />
-            <span className="text-fg-2" style={{ fontSize: "11px" }}>
-              Pipeline Manager
-            </span>
-            <span
-              className="font-mono text-fg-4"
-              style={{ fontSize: "10px" }}
-            >
-              {managerSession}
-            </span>
-          </div>
-          <TmuxTerminal
-            session={managerSession}
-            expanded
-            status={run.status}
-          />
-        </div>
+      {resolvedTab === "manager" && run && managerSession && (
+        <ManagerTab
+          key={run.run_id}
+          run={run}
+          session={managerSession}
+          onRefreshRun={onRefreshRun}
+          onOpenSettings={onOpenSettings}
+        />
       )}
 
       {resolvedTab === "assistant" && hasAssistant && assistantId && (
@@ -193,6 +205,223 @@ export default function PipelineInfoPanel({
         />
       )}
     </aside>
+  );
+}
+
+/**
+ * The Manager tab body (manager on demand): the Run's Pipeline Manager, started
+ * only when the user asks for it. Four states, keyed on the OBSERVED
+ * `run.has_manager` fact the daemon probes in tmux at fetch time — never on a
+ * constructed session name (the pre-change code would happily mount a terminal
+ * for a session that did not exist):
+ *
+ * - **empty** — the new default posture: a centered card explaining what the
+ *   manager would do and what it costs, a Start button, and a link to flip the
+ *   per-Run default in Settings;
+ * - **starting** — the POST round-trip plus the gap until the next run-state
+ *   fetch flips `has_manager` (the same beat the Assistant tab has);
+ * - **error** — a failed spawn, with a Retry, mirroring `AssistantTab`;
+ * - **live** — today's terminal, unchanged, plus a Stop control with a
+ *   confirmation: cost control is the point of the feature, so the session
+ *   must be killable from the panel, not only by the orphan sweep.
+ *
+ * The tab (and its Run) can be left and revisited freely: nothing here stops
+ * the session — the manager outlives Run completion for post-mortem questions.
+ */
+function ManagerTab({
+  run,
+  session,
+  onRefreshRun,
+  onOpenSettings,
+}: {
+  run: RunState;
+  session: string;
+  onRefreshRun?: () => void;
+  onOpenSettings?: () => void;
+}) {
+  const hasManager = run.has_manager ?? false;
+  const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const start = async () => {
+    setError(null);
+    setStarting(true);
+    try {
+      // Idempotent on the daemon (a double-click is a benign re-answer). The
+      // "starting" state holds until the refreshed run state flips
+      // `has_manager` — the terminal mounts then, not here.
+      await startRunManager(run.run_id);
+      onRefreshRun?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStarting(false);
+    }
+  };
+
+  const stop = async () => {
+    setStopping(true);
+    try {
+      await stopRunManager(run.run_id);
+      onRefreshRun?.();
+      setConfirmingStop(false);
+      // Done with the transient state: once the refreshed run state lands, the
+      // empty state — not a stale "starting…" — must be what the tab shows.
+      setStarting(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStopping(false);
+    }
+  };
+
+  if (hasManager) {
+    return (
+      <div
+        className="flex min-h-0 flex-1 flex-col"
+        style={{ fontSize: "11.5px" }}
+        data-testid="manager-live"
+      >
+        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+          <Terminal size={14} className="shrink-0 text-fg-3" />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="text-fg-2" style={{ fontSize: "11px" }}>
+              Pipeline Manager
+            </span>
+            <span
+              className="truncate font-mono text-fg-4"
+              style={{ fontSize: "10px" }}
+            >
+              {session}
+            </span>
+          </div>
+          {confirmingStop ? (
+            <span className="flex shrink-0 items-center gap-1.5">
+              <span className="text-fg-3" style={{ fontSize: "10.5px" }}>
+                Stop the manager?
+              </span>
+              <button
+                onClick={() => void stop()}
+                disabled={stopping}
+                className="rounded border border-st-failed/40 bg-st-failed-bg px-2 py-0.5 text-st-failed transition-colors hover:border-st-failed disabled:opacity-40"
+                style={{ fontSize: "10.5px" }}
+                data-testid="manager-stop-confirm"
+              >
+                {stopping ? "Stopping…" : "Stop"}
+              </button>
+              <button
+                onClick={() => setConfirmingStop(false)}
+                className="rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 transition-colors hover:text-fg-2"
+                style={{ fontSize: "10.5px" }}
+                data-testid="manager-stop-cancel"
+              >
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              onClick={() => setConfirmingStop(true)}
+              className="flex shrink-0 items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-1 text-fg-3 transition-colors hover:border-st-failed hover:text-st-failed"
+              style={{ fontSize: "10.5px" }}
+              data-testid="manager-stop"
+              title="Stop the manager session (survives until cleanup otherwise)"
+            >
+              <PowerOff size={11} />
+              Stop
+            </button>
+          )}
+        </div>
+        {error && (
+          <div
+            className="border-b border-st-failed/30 bg-st-failed-bg px-3 py-1.5 text-st-failed"
+            style={{ fontSize: "10.5px" }}
+            role="alert"
+            data-testid="manager-error"
+          >
+            {error}
+          </div>
+        )}
+        <TmuxTerminal session={session} expanded status={run.status} />
+      </div>
+    );
+  }
+
+  if (starting) {
+    return (
+      <div
+        className="flex flex-1 flex-col items-center justify-center gap-3 text-fg-4"
+        style={{ fontSize: "11.5px" }}
+        data-testid="manager-starting"
+      >
+        <Loader size={18} className="animate-spin text-acc" />
+        Starting the manager…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div
+        className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+        style={{ fontSize: "11.5px" }}
+        data-testid="manager-start-error"
+      >
+        <div className="text-st-failed" role="alert">
+          Failed to start the manager: {error}
+        </div>
+        <button
+          onClick={() => void start()}
+          className="rounded-md bg-acc px-3 py-1.5 font-medium text-[#04140d] transition-colors hover:bg-acc-dim"
+          style={{ fontSize: "11.5px" }}
+          data-testid="manager-retry"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center"
+      style={{ fontSize: "11.5px" }}
+      data-testid="manager-empty-state"
+    >
+      <div className="grid h-11 w-11 place-items-center rounded-lg bg-bg-3 text-fg-3">
+        <Terminal size={18} />
+      </div>
+      <div className="font-medium text-fg" style={{ fontSize: "13px" }}>
+        No manager on this run
+      </div>
+      <p
+        className="max-w-[260px] text-fg-3"
+        style={{ fontSize: "11.5px", lineHeight: 1.55 }}
+      >
+        The manager is a conversational agent that can drive this run — retry
+        nodes, resolve merges, unblock it when it waits on you. It is off by
+        default to keep costs down.
+      </p>
+      <button
+        onClick={() => void start()}
+        className="mt-1 flex items-center gap-1.5 rounded-md bg-acc px-3.5 py-2 font-medium text-[#04140d] transition-colors hover:bg-acc-dim"
+        style={{ fontSize: "12px" }}
+        data-testid="manager-start"
+      >
+        <Play size={12} />
+        Start manager
+      </button>
+      <div className="text-fg-4" style={{ fontSize: "10.5px" }}>
+        or{" "}
+        <button
+          onClick={() => onOpenSettings?.()}
+          className="cursor-pointer text-fg-3 underline decoration-fg-5 underline-offset-2 transition-colors hover:text-fg"
+          data-testid="manager-enable-settings"
+        >
+          enable it for every run in Settings
+        </button>
+      </div>
+    </div>
   );
 }
 

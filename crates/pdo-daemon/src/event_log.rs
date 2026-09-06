@@ -195,6 +195,22 @@ pub enum EventKind {
     /// prep failure emits `RunFailed` instead (no dedicated failed-prep event). Wire
     /// form: `"sandbox_prep_ready"`.
     SandboxPrepReady,
+    /// Informational (manager on demand): a Pipeline Manager session was
+    /// **reserved** for this Run. Written by every spawn path (the automatic
+    /// spawn at create when `manager_enabled` resolves on, and the manual start
+    /// endpoint) — the durable event lands FIRST, the tmux spawn after, so the
+    /// orphan sweep's reservation-before-spawn invariant (ADR-0038) holds for a
+    /// mid-Run start too. Projects nothing: the wire's `has_manager` is an
+    /// OBSERVED fact (the live tmux session), never derived from this log — a
+    /// spawn that failed after the reservation reads `false`, not `true`.
+    /// Wire form: `"manager_started"`.
+    ManagerStarted,
+    /// Informational (manager on demand): the Run's Pipeline Manager session
+    /// was stopped by the user (the Manager tab's Stop control). A stop on a
+    /// session that is already gone is a calm no-op that still writes the event.
+    /// Projects nothing — same observed-fact discipline as
+    /// [`EventKind::ManagerStarted`]. Wire form: `"manager_stopped"`.
+    ManagerStopped,
     CommandIssued,
 }
 
@@ -1507,6 +1523,10 @@ pub(crate) fn project(events: &[Event]) -> Option<RunState> {
 
             // Informational only: the node stays Running, no node/run state touched.
             EventKind::NodeBlockedOnLimit | EventKind::NodeAutoCompleteObserved => {}
+
+            // Informational only (manager on demand): the manager's existence is
+            // an observed tmux fact, never projected — see the variants' docs.
+            EventKind::ManagerStarted | EventKind::ManagerStopped => {}
 
             EventKind::CommandIssued => apply_command_event(&mut state, event),
         }

@@ -296,6 +296,9 @@ async fn wait_for_manager_session(daemon: &TestDaemon, run_id: &str) -> bool {
 #[tokio::test]
 async fn run_harness_moves_the_free_node_and_manager() {
     let daemon = TestDaemon::spawn(seed).await.unwrap();
+    // Manager on demand: this test asserts the auto-spawned manager, so it opts
+    // back in explicitly (the new default starts every Run managerless).
+    daemon.enable_manager().await;
     let run_id = create_run_with_harness(&daemon, Some("opencode")).await;
     let evs = wait_for_both_started(&daemon, &run_id).await;
 

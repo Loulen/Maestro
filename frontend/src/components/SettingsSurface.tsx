@@ -112,6 +112,8 @@ interface DraftValues {
   defaultSandbox: string;
   autocompleteTurnEnd: boolean;
   defaultAutoName: boolean;
+  managerEnabled: boolean;
+  managerProfile: string;
 }
 
 function seedFrom(settings: InstanceSettings): DraftValues {
@@ -127,6 +129,9 @@ function seedFrom(settings: InstanceSettings): DraftValues {
     defaultSandbox: settings.default_sandbox.effective ?? "off",
     autocompleteTurnEnd: settings.autocomplete_turn_end.effective,
     defaultAutoName: settings.default_auto_name.effective,
+    managerEnabled: settings.manager_enabled.effective,
+    // "" = « Follow the Run » (the clear sentinel on the wire too).
+    managerProfile: settings.manager_profile.stored ?? "",
   };
 }
 
@@ -187,6 +192,10 @@ function computeDirty(values: DraftValues, settings: InstanceSettings): Set<Sett
     dirty.add("harness-models");
   }
   if (values.defaultSandbox !== settings.default_sandbox.effective) dirty.add("default-sandbox");
+  if (values.managerEnabled !== settings.manager_enabled.effective) dirty.add("manager-enabled");
+  if (values.managerProfile !== (settings.manager_profile.stored ?? "")) {
+    dirty.add("manager-profile");
+  }
   return dirty;
 }
 
@@ -294,6 +303,15 @@ export default function SettingsSurface({
     values.defaultSandbox !== "" &&
     !settings.sandbox_profiles.some((p) => p.name === values.defaultSandbox);
 
+  // Manager on demand (#432 tombstone): a stored pin whose profile no longer
+  // exists (deleted or renamed) is never silently rewritten — the select keeps
+  // the stored value under a « missing » option and a warning names the
+  // fallback the spawn will take.
+  const missingManagerProfile =
+    !!values &&
+    values.managerProfile !== "" &&
+    !agentProfiles.some((profile) => profile.name === values.managerProfile);
+
   /** Validate and build the PUT payload from the draft. `null` + error when invalid. */
   const buildPatch = (): { patch: UpdateSettingsRequest } | { error: string } => {
     if (!values || !settings) return { patch: {} };
@@ -364,6 +382,15 @@ export default function SettingsSurface({
     }
     if (values.defaultAutoName !== settings.default_auto_name.effective) {
       patch.default_auto_name = values.defaultAutoName;
+    }
+    // Manager on demand: the flag is a plain bool (`false` persists as a stored
+    // `0`); the pin is a profile NAME with `""` as the clear sentinel (« Follow
+    // the Run »).
+    if (values.managerEnabled !== settings.manager_enabled.effective) {
+      patch.manager_enabled = values.managerEnabled;
+    }
+    if (values.managerProfile !== (settings.manager_profile.stored ?? "")) {
+      patch.manager_profile = values.managerProfile.trim();
     }
     return { patch };
   };
@@ -646,7 +673,9 @@ export default function SettingsSurface({
                             gives it a short descriptive name. Turn this off and such a Run
                             keeps a stable <span className="font-mono">Untitled run …</span>{" "}
                             placeholder instead. This is only the <strong>default</strong>: the
-                            New Run box and each Trigger can override it.
+                            New Run box and each Trigger can override it. Naming is the
+                            manager's job, so a managerless Run stays unnamed until its first
+                            manager start (which passes the same instruction).
                           </>
                         }
                         source={defaultAutoNameSourceNote(settings.default_auto_name)}
@@ -799,6 +828,90 @@ export default function SettingsSurface({
                   />
                 </Section>
                 <Section section={item.sections[2]}>
+                  {/* Manager on demand: the auto-start flag (off by default — a
+                      Run starts managerless) and the profile pin, both part of
+                      the instance form (Save). A manual start from the Manager
+                      tab is ALWAYS available — the flag is a default, not a
+                      permission. */}
+                  <CheckboxRow
+                    id="manager-enabled"
+                    checked={values.managerEnabled}
+                    onChange={(v) => setField("managerEnabled", v)}
+                    dirty={rollup.fields.has("manager-enabled")}
+                    label="Start the manager with each Run"
+                    help={
+                      <>
+                        When on, every Run launch spawns its{" "}
+                        <span className="font-mono">pdo-mgr-…</span> session — the
+                        pre-change behaviour. When off (the new default), the Run
+                        starts managerless and you start one from the Manager tab
+                        when you want it. This is only the <strong>default</strong>: a
+                        manual start is never blocked.
+                      </>
+                    }
+                    source={managerEnabledSourceNote(settings.manager_enabled)}
+                  />
+                  {/* The pin. Stored as a profile NAME: a stored name whose
+                      profile was later deleted (or renamed) gets the #432
+                      tombstone treatment — a « missing » option and a warning,
+                      never a silent rewrite. The spawn itself falls back to
+                      « Follow the Run ». */}
+                  <FieldBlock
+                    label="Manager profile"
+                    htmlFor="setting-manager-profile"
+                    dirty={rollup.fields.has("manager-profile")}
+                    help={
+                      <>
+                        Which agent preset the manager runs as. « Follow the Run »
+                        keeps today's rule — the manager mirrors the Run's harness
+                        and lands on the default profile for model and effort. A
+                        named profile <strong>pins</strong> the manager to that
+                        harness · model · effort, whatever the Run chose (e.g. a
+                        cheaper model, since a manager mostly talks). Picks from
+                        Settings › Agents › Agent profiles.
+                      </>
+                    }
+                    source={managerProfileSourceNote(settings.manager_profile)}
+                    sourceTestId="setting-source-manager-profile"
+                  >
+                    <select
+                      id="setting-manager-profile"
+                      data-testid="setting-manager-profile"
+                      value={values.managerProfile}
+                      onChange={(e) => setField("managerProfile", e.target.value)}
+                      className={`w-[280px] rounded-md border bg-bg-3 px-2.5 py-1.5 text-fg transition-colors focus:border-acc focus:outline-none ${
+                        rollup.fields.has("manager-profile") ? "border-st-await" : "border-line-strong"
+                      }`}
+                      style={{ fontSize: "12px" }}
+                    >
+                      {/* "" = unset = « Follow the Run » — today's rule, unchanged. */}
+                      <option value="">Follow the Run</option>
+                      {agentProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.name}>
+                          {profile.name}
+                        </option>
+                      ))}
+                      {/* Tombstone (#432): a stored name is NEVER silently rewritten. */}
+                      {missingManagerProfile && (
+                        <option value={values.managerProfile} data-testid="setting-manager-profile-missing">
+                          {values.managerProfile} — missing
+                        </option>
+                      )}
+                    </select>
+                    {missingManagerProfile && (
+                      <div
+                        className="text-st-await"
+                        style={{ fontSize: "10.5px" }}
+                        data-testid="setting-manager-profile-missing-note"
+                      >
+                        No agent profile named « {values.managerProfile} » any more. The manager
+                        falls back to « Follow the Run » until you pick another one (or clear
+                        this).
+                      </div>
+                    )}
+                  </FieldBlock>
+                </Section>
+                <Section section={item.sections[3]}>
                   {/* #669/ADR-0062: the instance tier of the skills selection — part of the
                       instance form (Save), unlike the bank below it. */}
                   <SkillSelector
@@ -2014,6 +2127,33 @@ function defaultAutoNameSourceNote(field: BoolSettingField): string {
     return `Source: env ${envDisplay ?? "PDO_DEFAULT_AUTO_NAME"}.`;
   }
   return `Source: built-in default (${onOff(field.default)}).`;
+}
+
+/** Which tier the manager auto-start flag comes from (manager on demand). A real
+ *  built-in default (`off`), and both directions of a save are a stored decision —
+ *  same shape as {@link defaultAutoNameSourceNote}. */
+function managerEnabledSourceNote(field: BoolSettingField): string {
+  const onOff = (v: boolean) => (v ? "on" : "off");
+  const envDisplay = field.env != null ? `PDO_MANAGER_ENABLED=${onOff(field.env)}` : null;
+  if (field.source === "stored") {
+    const base = `Source: stored value (${onOff(field.effective)}).`;
+    return envDisplay
+      ? `${base} Env ${envDisplay} is set but overridden.`
+      : `${base} Overrides env and default.`;
+  }
+  if (field.source === "env") {
+    return `Source: env ${envDisplay ?? "PDO_MANAGER_ENABLED"}.`;
+  }
+  return `Source: built-in default (${onOff(field.default)}) — runs start managerless.`;
+}
+
+/** Which tier the manager profile pin comes from (manager on demand). No env tier
+ *  and no stored default value: unset IS « Follow the Run ». */
+function managerProfileSourceNote(field: StringSettingField): string {
+  if (field.source === "stored" && field.stored) {
+    return `Source: stored value (pins the manager to « ${field.stored} »).`;
+  }
+  return "Source: unset — the manager follows the Run.";
 }
 
 /** Which tier the instance default_sandbox comes from (#410). Unlike `default_model` there

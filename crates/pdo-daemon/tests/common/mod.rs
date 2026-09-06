@@ -545,6 +545,28 @@ impl TestDaemon {
         format!("http://{}", self.addr)
     }
 
+    /// Manager on demand: flip the instance auto-start flag ON for this daemon.
+    ///
+    /// The default is now OFF — a Run starts managerless — so any test asserting
+    /// the auto-spawned manager (its session, its preamble, or the `claude`
+    /// staging set it fills as the Run's first claude session) must opt back in
+    /// explicitly, the same way a user would. Per-daemon through `PUT /settings`
+    /// (the stored tier), never a process-global `std::env::set_var` (#181).
+    /// Call it after [`TestDaemon::spawn`] and BEFORE creating the Run.
+    pub async fn enable_manager(&self) {
+        let resp = reqwest::Client::new()
+            .put(format!("{}/settings", self.url()))
+            .json(&serde_json::json!({ "manager_enabled": true }))
+            .send()
+            .await
+            .expect("PUT /settings (manager_enabled)");
+        assert!(
+            resp.status().is_success(),
+            "enabling the manager failed: {}",
+            resp.status()
+        );
+    }
+
     pub fn repo_root(&self) -> &Path {
         self.tempdir.path()
     }
