@@ -148,6 +148,9 @@ mod runs_list_target_repo;
 #[path = "run_provenance.rs"]
 mod run_provenance;
 
+#[path = "orchestrator_binding.rs"]
+mod orchestrator_binding;
+
 #[path = "sandbox_observability.rs"]
 mod sandbox_observability;
 

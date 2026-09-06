@@ -1186,6 +1186,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![],
             loops: Vec::new(),
@@ -1460,6 +1461,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         });
         pipeline.edges.push(EdgeDef {
             source: EdgeEndpoint {
@@ -1605,6 +1607,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         });
         pipeline.edges.push(EdgeDef {
             source: EdgeEndpoint {
@@ -1669,6 +1672,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         });
 
         let node = &pipeline.nodes[1]; // implementer
@@ -1705,6 +1709,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         });
         pipeline.edges.push(EdgeDef {
             source: EdgeEndpoint {
@@ -1755,6 +1760,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         });
         pipeline.edges.push(EdgeDef {
             source: EdgeEndpoint {
@@ -1911,6 +1917,7 @@ mod tests {
                     harnesses: Default::default(),
                     agent_choice: None,
                     auto_fail: None,
+                    orchestrator: false,
                 },
                 NodeDef {
                     skills: Vec::new(),
@@ -1938,6 +1945,7 @@ mod tests {
                     harnesses: Default::default(),
                     agent_choice: None,
                     auto_fail: None,
+                    orchestrator: false,
                 },
                 NodeDef {
                     skills: Vec::new(),
@@ -1988,6 +1996,7 @@ mod tests {
                     harnesses: Default::default(),
                     agent_choice: None,
                     auto_fail: None,
+                    orchestrator: false,
                 },
             ],
             edges: vec![
@@ -2105,6 +2114,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![],
             loops: Vec::new(),
@@ -2435,6 +2445,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![],
             loops: Vec::new(),
@@ -2492,6 +2503,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![],
             loops: Vec::new(),
@@ -2544,6 +2556,7 @@ mod tests {
                 harnesses: Default::default(),
                 agent_choice: None,
                 auto_fail: None,
+                orchestrator: false,
             }],
             edges: vec![],
             loops: Vec::new(),

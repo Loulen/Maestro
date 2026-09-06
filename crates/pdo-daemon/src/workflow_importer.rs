@@ -514,6 +514,7 @@ impl Importer {
             agent_choice: None,
             skills: Vec::new(),
             auto_fail: None,
+            orchestrator: false,
         };
         self.nodes.push(node);
         self.prompts.insert(id.clone(), prompt_body);
@@ -896,6 +897,7 @@ fn start_node() -> NodeDef {
         agent_choice: None,
         skills: Vec::new(),
         auto_fail: None,
+        orchestrator: false,
     }
 }
 
@@ -919,6 +921,7 @@ fn end_node(agent_count: usize) -> NodeDef {
         agent_choice: None,
         skills: Vec::new(),
         auto_fail: None,
+        orchestrator: false,
     }
 }
 

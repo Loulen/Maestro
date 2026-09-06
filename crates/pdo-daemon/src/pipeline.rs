@@ -234,6 +234,15 @@ pub(crate) struct NodeDef {
     /// the pipeline does, so it enters the diff and the library content hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolated_worktree: Option<bool>,
+    /// The « Orchestrator » toggle (#723, ADR-0064). `true` ⇒ the node's NodeRun
+    /// is held by the strong orchestrator↔children binding (#724): the completion
+    /// gate refuses `pdo complete` while the child runs spawned from this node's
+    /// sessions (same `parent_run_id` + `parent_node_id`) are non-terminal. It is
+    /// NOT a node type — the spawn capacity stays universal; the toggle only adds
+    /// the binding contract (plus the #723 prompt amendment and skill reference).
+    /// Semantic, not layout — in the diff and the library content hash.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub orchestrator: bool,
 }
 
 impl NodeDef {
@@ -2835,6 +2844,7 @@ skills:
             agent_choice: None,
             skills: Vec::new(),
             auto_fail: None,
+            orchestrator: false,
         };
         let yaml = serde_yaml::to_string(&node).unwrap();
         assert!(yaml.contains("type: script"), "serializes to kebab: {yaml}");

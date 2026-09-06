@@ -4962,7 +4962,7 @@ pub(crate) async fn append_event_with(
 /// them once the staging is purged. The walk runs detached, so it never adds latency
 /// or a failure mode to the terminal transition; it is idempotent, so a double-fire
 /// is safe.
-async fn append_event(state: &AppState, event: &event_log::Event) -> Result<()> {
+pub(crate) async fn append_event(state: &AppState, event: &event_log::Event) -> Result<()> {
     append_event_with(&state.db, &state.event_tx, event).await?;
     if matches!(
         event.kind,
@@ -4977,7 +4977,7 @@ async fn append_event(state: &AppState, event: &event_log::Event) -> Result<()> 
 }
 
 /// Whether a run_id has been tombstoned by forget (ADR-0024).
-async fn run_is_forgotten(db: &sqlx::SqlitePool, run_id: &str) -> Result<bool> {
+pub(crate) async fn run_is_forgotten(db: &sqlx::SqlitePool, run_id: &str) -> Result<bool> {
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM forgotten_runs WHERE run_id = ? LIMIT 1")
             .bind(run_id)
@@ -5120,7 +5120,7 @@ async fn load_events(db: &sqlx::SqlitePool, run_id: &str) -> Result<Vec<event_lo
     Ok(rows.into_iter().map(|r| r.into_event()).collect())
 }
 
-async fn load_all_run_ids(db: &sqlx::SqlitePool) -> Result<Vec<String>> {
+pub(crate) async fn load_all_run_ids(db: &sqlx::SqlitePool) -> Result<Vec<String>> {
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT DISTINCT run_id FROM events ORDER BY run_id DESC")
             .fetch_all(db)
@@ -14715,6 +14715,12 @@ pub(crate) enum CompletionSource {
     /// fallback. Records `NodeAutoCompleted` like `TurnEnded`, differing only in the
     /// log label. The two are idempotent: whichever arrives second gets a `NoOp`.
     StopHook,
+    /// The strong binding settled (#724 / ADR-0064): the binding-parked
+    /// orchestrator node's watcher saw every child run terminal with no failure
+    /// and completed the node itself — « le nœud se complète ». Goes through the
+    /// SAME body as every other source (`complete_node_iteration`); the payload
+    /// signs WHO decided: the binding, not the agent.
+    ChildrenSettled,
 }
 
 impl CompletionSource {
@@ -14727,6 +14733,19 @@ impl CompletionSource {
             CompletionSource::TurnEnded => event_log::EventKind::NodeAutoCompleted,
             // Reuse the SAME event kind: no new projection / transition-guard arm.
             CompletionSource::StopHook => event_log::EventKind::NodeAutoCompleted,
+            // A truthful completion: the node IS complete, its children settled.
+            // `NodeAutoCompleted` would lie about WHO decided — the binding did.
+            CompletionSource::ChildrenSettled => event_log::EventKind::NodeCompleted,
+        }
+    }
+
+    /// The terminal event's payload. `None` keeps the historical wire shape for
+    /// the agent-driven sources; the daemon-driven one signs its verdict, the
+    /// same way `mark_node_done` signs `source: "mark_node_done"`.
+    fn payload(self) -> Option<serde_json::Value> {
+        match self {
+            Self::ChildrenSettled => Some(serde_json::json!({ "source": "children_settled" })),
+            _ => None,
         }
     }
 
@@ -14736,6 +14755,7 @@ impl CompletionSource {
             CompletionSource::Explicit => "node_done",
             CompletionSource::TurnEnded => "node_done(auto:turn_ended)",
             CompletionSource::StopHook => "node_done(auto:stop_hook)",
+            CompletionSource::ChildrenSettled => "node_done(children_settled)",
         }
     }
 }
@@ -14945,7 +14965,7 @@ fn secondary_repos_dirtied_refusal(
 /// refusal built here has already appended its own parking events — the caller
 /// only projects it.
 #[allow(clippy::too_many_arguments)]
-async fn deliver_node_run(
+pub(crate) async fn deliver_node_run(
     state: &Arc<AppState>,
     events: &[event_log::Event],
     run_state: &event_log::RunState,
@@ -15211,7 +15231,7 @@ async fn deliver_node_run(
     }
 }
 
-async fn complete_node_iteration(
+pub(crate) async fn complete_node_iteration(
     state: &Arc<AppState>,
     run_id: String,
     node_id: String,
@@ -15284,6 +15304,26 @@ async fn complete_node_iteration(
         };
     }
 
+    // Liaison forte orchestrateur ↔ enfants (#724 / ADR-0064): a node with the
+    // « Orchestrator » toggle does not terminate while its child runs are
+    // non-terminal. The gate sits after the transition guard but BEFORE any
+    // effect (delivery, validation): a refusal leaves the node alive and its
+    // session intact — and, with a `failed` child, parks the node
+    // `AwaitingUser` for the user's arbitration (retry the child, or force
+    // through `mark_node_done`, which is deliberately NOT gated).
+    if let Some(refusal) = run_advance::orchestrator_binding_refusal(
+        state,
+        &events,
+        &pre_run_state,
+        &run_id,
+        &node_id,
+        iter,
+    )
+    .await
+    {
+        return CompletionAttempt::refused(refusal);
+    }
+
     // Must sit here: after the transition gate but BEFORE any merge or terminal
     // event. Non-terminal by design — the node stays alive, so once the agent reverts
     // the tracked change and re-completes, the guard passes.
@@ -15335,11 +15375,12 @@ async fn complete_node_iteration(
         ts: event_log::now_iso(),
         // `NodeAutoCompleted` on the sweep path — same projection, same guard, but
         // the log must say the completion was automatic. Deliberately the event KIND
-        // and not a `source` field in the payload.
+        // and not a `source` field in the payload. The binding's own verdict
+        // (#724) signs its payload instead: the log says WHO completed and why.
         kind: source.event_kind(),
         node_id: Some(node_id.clone()),
         iter: Some(iter),
-        payload: None,
+        payload: source.payload(),
     };
 
     if let Err(e) = append_event(state, &event).await {
@@ -18433,6 +18474,10 @@ fn node_def_from_pipeline(n: &pipeline::NodeDef) -> event_log::NodeDefInfo {
         // what the completion path reads back to know whether a sub-worktree has
         // to be merged, without re-deriving it from a type that no longer says.
         isolated_worktree: n.isolated_worktree,
+        // #723/#724/ADR-0064: the « Orchestrator » toggle, frozen at run start —
+        // what the strong binding gate reads to know whether this node's NodeRun
+        // is held while its child runs are non-terminal.
+        orchestrator: n.orchestrator,
         view_x: n.view.as_ref().map(|v| v.x),
         view_y: n.view.as_ref().map(|v| v.y),
         inputs: n.inputs.iter().map(|p| port_brief(p, "left")).collect(),
@@ -18664,7 +18709,7 @@ fn resolve_run_pipeline_path(
 ///
 /// `Option<CompletionRefusal>` and not `Result<_, Response>`: `Response` is 128
 /// bytes, exactly the `clippy::result_large_err` threshold CI treats as an error.
-async fn check_output_validation_with_retry(
+pub(crate) async fn check_output_validation_with_retry(
     state: &AppState,
     pipeline_path: &std::path::Path,
     node_id: &str,
@@ -18842,7 +18887,7 @@ fn pane_snapshot_path(
 /// keeps working after the session is gone — then kills the session. A capture/write
 /// failure MUST still proceed to the kill, or a terminal node leaks a live session
 /// toward the tmux-collapse point.
-fn reap_node_session(
+pub(crate) fn reap_node_session(
     state: &AppState,
     repo_root: &std::path::Path,
     run_id: &str,
@@ -24824,6 +24869,7 @@ mod tests {
         let mut rs = event_log::RunState::new(run_id.into(), "test".into());
         rs.node_defs.push(event_log::NodeDefInfo {
             isolated_worktree: None,
+            orchestrator: false,
             id: node_id.into(),
             name: None,
             node_type: node_type.into(),
@@ -24892,6 +24938,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         }
     }
 
@@ -34194,6 +34241,7 @@ edges: []
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         };
         let pipeline = pipeline::PipelineDef {
             name: "spawn-unit".into(),

@@ -15,8 +15,9 @@
 //!
 //! Don't collapse the per-caller tail divergence ratified by ADR-0023.
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
+use crate::completion_refusal;
 use crate::event_log;
 use crate::node_spawn::{spawn_node, SpawnContext, SpawnDeps};
 use crate::pipeline;
@@ -26,9 +27,9 @@ use crate::scheduler_interpreter::{self, SpawnDedup};
 use crate::transition_guard;
 use crate::worktree_ops::worktree_dir_for_run;
 use crate::{
-    append_event, effective_repo_root, handle_node_completion, load_events,
-    resolve_completed_frontmatter, resolve_run_pipeline_path, resolve_run_variables,
-    retry_waiting_nodes, AppState,
+    append_event, effective_repo_root, handle_node_completion, load_all_run_ids, load_events,
+    reload_run_state_with, resolve_completed_frontmatter, resolve_run_pipeline_path,
+    resolve_run_variables, retry_waiting_nodes, run_is_forgotten, AppState,
 };
 
 /// Advance one Run by a single tick: spawn whatever the scheduler says is ready
@@ -482,6 +483,305 @@ pub(crate) async fn complete_node(
     }
 }
 
+// ─ Liaison forte orchestrateur ↔ enfants (#724, ADR-0064) ────────────────────
+//
+// Le NodeRun d’un nœud « orchestrator » (toggle gelé au démarrage du Run,
+// `NodeDefInfo::orchestrator`) ne se termine pas pendant que ses runs enfants
+// (mêmes `parent_run_id` + `parent_node_id`, ADR-0064) sont non terminaux :
+//
+// - la **porte** ([`orchestrator_binding_refusal`]) refuse `pdo complete` tant
+//   que des enfants tournent, avec un message qui compte ; au moins un enfant
+//   `failed` parque le nœud `AwaitingUser` — l’agent a rendu la main, c’est
+//   l’utilisateur qui tranche (retry de l’enfant ou forçage `mark_node_done`,
+//   qui n’est PAS gated : c’est le forçage) — et pose le **pilote**
+//   ([`spawn_children_settled_watcher`]) qui complétera le nœud de lui-même
+//   quand tous les enfants seront terminaux — « le nœud se complète ».
+//
+// Aucune propagation de mort vers le bas : la liaison ne fait que RETENIR le
+// parent ; stop du nœud, archive et forget du parent ne touchent aucun enfant,
+// et un restart ré-adopte les enfants vivants (ils sont relus à chaque verdict,
+// jamais mis en cache).
+
+/// Le marqueur que la porte pose sur le NodeRun au refus : un `NodeAwaitingUser`
+/// portant cette raison. C’est lui qui distingue « l’orchestrator a rendu la
+/// main et attend ses enfants » d’un agent encore au travail (auquel on ne
+/// arrache jamais la main) et d’un nœud interactif simplement `AwaitingUser`.
+pub(crate) const BINDING_MARKER_REASON: &str = "children_pending";
+
+/// L’état des runs enfants d’UN nœud du Run parent, au moment de la lecture.
+#[derive(Debug, Default)]
+pub(crate) struct ChildrenSnapshot {
+    pub(crate) total: usize,
+    pub(crate) failed: Vec<String>,
+    pub(crate) active: Vec<String>,
+}
+
+/// Le verdict de la liaison sur un [`ChildrenSnapshot`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChildrenVerdict {
+    /// Aucun enfant : la liaison ne dit rien (un toggle sans spawn n’engage
+    /// rien — l’agent peut aussi n’avoir pas encore créé ses enfants).
+    NoChildren,
+    /// Tous les enfants sont terminaux, aucun n’est `failed` : le nœud peut
+    /// se compléter.
+    AllSettled,
+    /// Au moins un enfant est non terminal : le nœud attend. `failed` compte
+    /// les enfants `failed` — dès qu’il y en a un, l’arbitrage est à
+    /// l’utilisateur.
+    Pending { active: usize, failed: usize },
+}
+
+impl ChildrenSnapshot {
+    /// Terminal pour la liaison = non-vivant (`Completed`/`Skipped`/`Halted`/
+    /// `Archived`/`Failed`) ; `Failed` est le seul terminal qui parque le nœud
+    /// en attente utilisateur. Un enfant `Running`/`AwaitingUser`/`Paused`
+    /// retient le nœud — sauf s’il est tombstoné (forgotten) : son
+    /// propriétaire l’a explicitement abandonné, la liaison ne retient pas un
+    /// run qui n’existe plus.
+    pub(crate) fn verdict(&self) -> ChildrenVerdict {
+        if self.total == 0 {
+            return ChildrenVerdict::NoChildren;
+        }
+        let active = self.active.len();
+        if active == 0 && self.failed.is_empty() {
+            return ChildrenVerdict::AllSettled;
+        }
+        ChildrenVerdict::Pending {
+            active,
+            failed: self.failed.len(),
+        }
+    }
+}
+
+/// Lit les runs enfants du nœud `node_id` du Run `run_id` : tout Run dont le
+/// `RunStarted` mécanique porte ces deux valeurs de provenance. Recharge tout
+/// à chaque appel — c’est ce qui rend la ré-adoption au restart gratuite.
+pub(crate) async fn children_snapshot(
+    state: &AppState,
+    run_id: &str,
+    node_id: &str,
+) -> ChildrenSnapshot {
+    let mut snapshot = ChildrenSnapshot::default();
+    let Ok(run_ids) = load_all_run_ids(&state.db).await else {
+        error!("binding: failed to list runs for children of {node_id} in {run_id}");
+        return snapshot;
+    };
+    for child_id in run_ids {
+        if child_id == run_id {
+            continue;
+        }
+        let Ok(events) = load_events(&state.db, &child_id).await else {
+            continue;
+        };
+        let Some(child) = event_log::project(&events) else {
+            continue;
+        };
+        if child.parent_run_id.as_deref() != Some(run_id)
+            || child.parent_node_id.as_deref() != Some(node_id)
+        {
+            continue;
+        }
+        snapshot.total += 1;
+        match child.status {
+            event_log::RunStatus::Failed => snapshot.failed.push(child.run_id),
+            status if status.is_live() => {
+                // Un enfant oublié (tombstoné, ADR-0024) ne retient pas la
+                // liaison : il ne projetera jamais d’état terminal.
+                match run_is_forgotten(&state.db, &child.run_id).await {
+                    Ok(true) => {}
+                    _ => snapshot.active.push(child.run_id),
+                }
+            }
+            _ => {}
+        }
+    }
+    snapshot
+}
+
+/// La porte de complétion de la liaison forte. `None` ⇒ la complétion peut
+/// continuer ; `Some(refusal)` ⇒ refus avec compteur, marqueur d’attente posé
+/// (nœud parqué `AwaitingUser`) et pilote détaché (le watcher).
+pub(crate) async fn orchestrator_binding_refusal(
+    state: &std::sync::Arc<AppState>,
+    events: &[event_log::Event],
+    run_state: &event_log::RunState,
+    run_id: &str,
+    node_id: &str,
+    iter: i64,
+) -> Option<completion_refusal::CompletionRefusal> {
+    // Nœud sans toggle : aucune retenue — le comportement est inchangé.
+    if !run_state
+        .node_defs
+        .iter()
+        .any(|nd| nd.id == node_id && nd.orchestrator)
+    {
+        return None;
+    }
+    let snapshot = children_snapshot(state, run_id, node_id).await;
+    let ChildrenVerdict::Pending { active, failed } = snapshot.verdict() else {
+        return None;
+    };
+    // Marque l’attente de la liaison sur le NodeRun (idempotent : la porte est
+    // re-frappée à chaque tentative de complétion, l’événement ne s’empile pas).
+    // Le statut projeté passe à `AwaitingUser` — la surface montre un nœud qui
+    // attend — et le pilote ([`spawn_children_settled_watcher`]) saura que
+    // l’agent a rendu la main.
+    if !binding_marker_present(events, node_id, iter) {
+        let marker = event_log::Event {
+            id: None,
+            run_id: run_id.to_string(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::NodeAwaitingUser,
+            node_id: Some(node_id.to_string()),
+            iter: Some(iter),
+            payload: Some(serde_json::json!({
+                "reason": BINDING_MARKER_REASON,
+                "active": active,
+                "failed": failed,
+            })),
+        };
+        if let Err(e) = append_event(state, &marker).await {
+            error!(
+                "binding: failed to append the children_pending marker for {node_id} \
+                 iter-{iter} in {run_id}: {e}"
+            );
+        }
+    }
+    // Le pilote part à CHAQUE refus : idempotent par construction (le watcher
+    // sort au premier verdict, et une complétion déjà posée est un NoOp), il
+    // couvre aussi le cas « un watcher précédent est sorti sur un refus ».
+    spawn_children_settled_watcher(
+        std::sync::Arc::clone(state),
+        run_id.to_string(),
+        node_id.to_string(),
+        iter,
+    );
+    Some(completion_refusal::CompletionRefusal::ChildrenPending {
+        node_id: node_id.to_string(),
+        active,
+        failed,
+    })
+}
+
+/// Le **pilote** de la liaison — une tâche détachée (le « watcher ») posée par
+/// la porte à chaque refus. Tant que le nœud attend (marqueur `children_pending`,
+/// itération courante), il revérifie périodiquement le verdict : dès que tous
+/// les enfants sont terminaux sans échec, il complète le nœud de lui-même —
+/// « le nœud se complète » — par la voie commune
+/// ([`crate::complete_node_iteration`], source `ChildrenSettled`) : livraison,
+/// validation, événement terminal et advance sont exactement ceux d’un
+/// `pdo complete`. Ré-entrance bénigne : une complétion déjà posée est un NoOp
+/// (garde de transition), deux watchers qui s’évitent ne produisent qu’un
+/// `NodeCompleted`.
+///
+/// Pourquoi un watcher plutôt qu’un réveil à l’événement enfant : la liaison
+/// relit TOUT à chaque tick (provenance gelée, jamais mise en cache), ce qui
+/// rend la ré-adoption au restart gratuite et résiste à n’importe quel chemin
+/// par lequel un enfant se termine (`pdo complete`, `pdo fail`, forçage,
+/// sweep, restart de l’enfant).
+pub(crate) fn spawn_children_settled_watcher(
+    state: std::sync::Arc<AppState>,
+    run_id: String,
+    node_id: String,
+    iter: i64,
+) {
+    tokio::spawn(async move {
+        // Backoff : réactif au début (les tests comme les humains attendent un
+        // enfant qui vient de se terminer), économe ensuite (un orchestrator
+        // peut attendre des enfants pendant des heures — c’est le contrat).
+        let mut delay = std::time::Duration::from_millis(250);
+        loop {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(std::time::Duration::from_secs(5));
+
+            // Un run oublié (ADR-0024) ne pilote plus rien.
+            if run_is_forgotten(&state.db, &run_id).await.unwrap_or(true) {
+                return;
+            }
+            let Some((parent_events, parent_state)) =
+                reload_run_state_with(&state.db, &run_id).await
+            else {
+                return;
+            };
+            let Some(node) = parent_state.nodes.get(&node_id) else {
+                return;
+            };
+            // Une itération plus récente possède désormais l’attente : ce
+            // watcher est périmé (restart du nœud → ré-adoption par la porte
+            // elle-même, qui relit les enfants vivants).
+            if node.iter != iter {
+                return;
+            }
+            if !matches!(
+                node.status,
+                event_log::NodeStatus::Running | event_log::NodeStatus::AwaitingUser
+            ) {
+                return; // déjà terminal, stoppé ou incident : plus rien à piloter
+            }
+            // Sans le marqueur, l’agent n’a pas encore rendu la main : on ne
+            // lui arrache jamais la complétion parce que ses enfants ont fini
+            // tôt — il re-complètera quand il voudra.
+            if !binding_marker_present(&parent_events, &node_id, iter) {
+                return;
+            }
+
+            let snapshot = children_snapshot(&state, &run_id, &node_id).await;
+            if snapshot.verdict() != ChildrenVerdict::AllSettled {
+                continue; // enfants encore actifs ou échoués : la liaison attend
+            }
+
+            info!(
+                "binding: every child run of orchestrator {node_id} iter-{iter} in run \
+                 {run_id} is terminal — completing the node"
+            );
+            match crate::complete_node_iteration(
+                &state,
+                run_id.clone(),
+                node_id.clone(),
+                iter,
+                crate::CompletionSource::ChildrenSettled,
+            )
+            .await
+            {
+                crate::CompletionAttempt::Completed => {
+                    info!(
+                        "binding: orchestrator {node_id} completed in run {run_id} \
+                         (children settled)"
+                    );
+                }
+                crate::CompletionAttempt::NoOp { reason } => {
+                    info!("binding: auto-completion was a no-op: {reason}");
+                }
+                crate::CompletionAttempt::Refused { refusal } => {
+                    // La porte commune a refusé (livraison, validation) : on
+                    // rend la main — une prochaine tentative de complétion
+                    // re-posera un watcher, et l’agent garde sa session.
+                    warn!(
+                        "binding: auto-completion of {node_id} in {run_id} refused ({}): {}",
+                        refusal.slug(),
+                        refusal.reason()
+                    );
+                }
+            }
+            return;
+        }
+    });
+}
+
+/// Le marqueur `children_pending` est-il déjà posé sur cette itération ?
+fn binding_marker_present(events: &[event_log::Event], node_id: &str, iter: i64) -> bool {
+    events.iter().any(|e| {
+        e.kind == event_log::EventKind::NodeAwaitingUser
+            && e.node_id.as_deref() == Some(node_id)
+            && e.iter == Some(iter)
+            && e.payload
+                .as_ref()
+                .and_then(|p| p.get("reason"))
+                .and_then(|v| v.as_str())
+                == Some(BINDING_MARKER_REASON)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +830,7 @@ mod tests {
             harnesses: Default::default(),
             agent_choice: None,
             auto_fail: None,
+            orchestrator: false,
         }
     }
 
@@ -551,6 +852,7 @@ mod tests {
     fn node_def_info(id: &str) -> NodeDefInfo {
         NodeDefInfo {
             isolated_worktree: None,
+            orchestrator: false,
             id: id.into(),
             name: None,
             node_type: "agent".into(),
@@ -559,6 +861,74 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
         }
+    }
+
+    // ─ Liaison forte (#724) : le verdict est pur, il se teste sans daemon ──
+
+    fn snap(total: usize, failed: &[&str], active: &[&str]) -> ChildrenSnapshot {
+        ChildrenSnapshot {
+            total,
+            failed: failed.iter().map(|s| s.to_string()).collect(),
+            active: active.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn binding_verdicts_follow_the_contract() {
+        // Pas d'enfant : la liaison ne dit rien — un toggle sans spawn, ou un
+        // agent qui n'a pas encore créé ses enfants, complète normalement.
+        assert_eq!(snap(0, &[], &[]).verdict(), ChildrenVerdict::NoChildren);
+        // Tous terminaux (completed/skipped/…), aucun failed → complétion.
+        assert_eq!(snap(2, &[], &[]).verdict(), ChildrenVerdict::AllSettled);
+        // Un enfant actif (running / awaiting_user / paused) → le nœud attend.
+        assert_eq!(
+            snap(2, &[], &["c1"]).verdict(),
+            ChildrenVerdict::Pending {
+                active: 1,
+                failed: 0
+            }
+        );
+        // Un enfant failed (terminal) → arbitrage utilisateur, mais les autres
+        // enfants actifs comptent toujours dans l'attente.
+        assert_eq!(
+            snap(3, &["c1"], &["c2"]).verdict(),
+            ChildrenVerdict::Pending {
+                active: 1,
+                failed: 1
+            }
+        );
+        // Tous échoués : plus rien d'actif, mais le verdict reste un refus.
+        assert_eq!(
+            snap(2, &["c1", "c2"], &[]).verdict(),
+            ChildrenVerdict::Pending {
+                active: 0,
+                failed: 2
+            }
+        );
+    }
+
+    #[test]
+    fn binding_marker_is_detected_on_the_right_iteration_only() {
+        let marker = event_log::Event {
+            id: None,
+            run_id: "r".into(),
+            ts: "t".into(),
+            kind: event_log::EventKind::NodeAwaitingUser,
+            node_id: Some("orch".into()),
+            iter: Some(2),
+            payload: Some(serde_json::json!({ "reason": BINDING_MARKER_REASON })),
+        };
+        // Le NodeAwaitingUser d'un nœud interactif (payload vide) n'est pas un
+        // marqueur : la liaison ne doit pas le confondre avec son attente.
+        let interactive_spawn = event_log::Event {
+            kind: event_log::EventKind::NodeAwaitingUser,
+            payload: None,
+            ..marker.clone()
+        };
+        assert!(binding_marker_present(&[marker.clone()], "orch", 2));
+        assert!(!binding_marker_present(&[marker.clone()], "orch", 1));
+        assert!(!binding_marker_present(&[marker.clone()], "other", 2));
+        assert!(!binding_marker_present(&[interactive_spawn], "orch", 2));
     }
 
     fn completed_node(id: &str) -> NodeState {
