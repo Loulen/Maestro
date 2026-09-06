@@ -10,6 +10,31 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.66.0
+
+**`pdo run create <pipeline>` — créer un run enfant depuis une session de nœud** (#721 ; story #709,
+spec #719, ADR-0064). Nouvelle sous-commande CLI, client mince de `POST /runs` : chaque champ de
+creation passe en flag (input, variables, skills, agent_choice, harness, sandbox, target_repo(s),
+source_branch, name, auto_name, auto_fail, provisioning). L'identité voyage avec la session,
+jamais dans le corps : lancée depuis une session de nœud (`PDO_RUN_ID` / `PDO_NODE_ID`), la
+sous-commande crée un run mécaniquement lié à ce run + nœud ; hors session, le run est racine et
+`--target-repo` devient obligatoire (refus lisible du daemon, ADR-0033). Le projet de l'enfant
+vaut par défaut celui du parent. Les refus du daemon remontent tels quels sur stderr avec un code
+non nul.
+
+## 1.67.0
+
+**La liste de runs rend visible et navigable la provenance « orchestré »** (#725 ; story #709).
+Tout run enfant porte un badge neutre (GitFork) à côté du badge trigger — accent/Zap pour un
+trigger, gris/GitFork pour un enfant orchestré, les deux coexistent ; un orphelin (parent
+oublié) reste visible mais dimmé et inerte. Le badge est cliquable : il ouvre le run parent
+dans la vue et le met en surbrillance (`stopPropagation`, scroll-into-view). Quatrième axe de
+filtre « racines seules » (chip icon-only GitFork, ON par défaut, offert seulement s'il existe
+au moins un run orchestré) : les enfants disparaissent, le filtre s'applique avant le split
+actifs/archivés, et le ✕ « Clear filters » réinitialise le toggle. Tout est calcul de vue sur
+`parent_run_id` (#720) — aucun endpoint nouveau, symboles seuls dans la liste, mots dans les
+`title` (tooltips comptés : nom du trigger, total d'enfants).
+
 ## 1.65.0
 
 **Un run créé depuis une session de nœud porte sa provenance mécaniquement** (#720 ; story #709,

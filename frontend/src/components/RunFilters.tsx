@@ -1,4 +1,4 @@
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown, GitFork, X } from "lucide-react";
 import type { RunListEntry, Trigger } from "../types";
 import {
   DropdownMenu,
@@ -10,6 +10,8 @@ import {
   EMPTY_RUN_FILTER,
   MANUAL_TRIGGER,
   NONE,
+  isFilterActive,
+  isRootRun,
   pipelineKey,
   repoKey,
   triggerKey,
@@ -133,7 +135,12 @@ export default function RunFilters({
         : triggers.find((t) => t.id === v)?.name ?? v,
   }));
 
-  const anyActive = value.repo !== null || value.pipeline !== null || value.trigger !== null;
+  // #725 — the orchestrated toggle is offered only when at least one orchestrated
+  // run exists: an instance that never orchestrates sees exactly the old strip.
+  // Counted over ALL runs, not the filtered view, so the toggle never flickers
+  // away while it is doing the hiding.
+  const childCount = runs.filter((r) => !isRootRun(r)).length;
+  const anyActive = isFilterActive(value);
 
   return (
     <div className="flex shrink-0 items-center gap-1 border-b border-line px-2 py-1.5">
@@ -158,6 +165,34 @@ export default function RunFilters({
         selected={value.trigger}
         onSelect={(trigger) => onChange({ ...value, trigger })}
       />
+      {/* #725 — « show orchestrated runs » as an icon-only chip (lucide GitFork;
+          the words live in the tooltip — user decision 2026-09-06). Deliberate
+          inversion vs the dropdowns, where accent means "narrowing": here ON
+          (accent) means everything is shown; OFF greys the chip and narrows the
+          list to roots. The clear ✕ appearing alongside keeps the strip honest. */}
+      {childCount > 0 && (
+        <button
+          type="button"
+          data-testid="run-filter-orchestrated"
+          aria-pressed={value.showOrchestrated}
+          title={
+            value.showOrchestrated
+              ? `Orchestrated runs shown — click to hide the ${childCount} run${childCount === 1 ? "" : "s"} started by another run (roots only).`
+              : `Orchestrated runs hidden — ${childCount} run${childCount === 1 ? "" : "s"} started by another run. Click to show them.`
+          }
+          aria-label={
+            value.showOrchestrated ? "Hide orchestrated runs" : "Show orchestrated runs"
+          }
+          className={`flex shrink-0 cursor-pointer items-center rounded border bg-bg-3 px-2 py-[3px] transition-colors hover:bg-bg-4 ${
+            value.showOrchestrated
+              ? "border-acc text-acc"
+              : "border-line-strong text-fg-4"
+          }`}
+          onClick={() => onChange({ ...value, showOrchestrated: !value.showOrchestrated })}
+        >
+          <GitFork size={10} />
+        </button>
+      )}
       {anyActive && (
         <button
           data-testid="run-filter-clear"

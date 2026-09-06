@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, FileUp, Pause, Pencil, Play, Plus, RotateCcw, SquareTerminal, Trash2, X, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, FileUp, GitFork, Pause, Pencil, Play, Plus, RotateCcw, SquareTerminal, Trash2, X, Zap } from "lucide-react";
 import { isLiveRun, isTerminalRun, type RunListEntry, type RunStatus, type PipelineListEntry, type Trigger, type Project } from "../types";
 import type { LibraryPipelineEntry } from "../api";
 import { cleanupRun, createPipeline, duplicatePipeline, forgetRun, importPipelineDocument, importWorkflow, openRunShell, pauseRun, renameRun, resumeRun, retryAll } from "../api";
@@ -19,7 +19,7 @@ import ForgetRunModal from "./ForgetRunModal";
 import LibraryRow from "./LibraryRow";
 import ProjectEditModal from "./ProjectEditModal";
 import RunFilters from "./RunFilters";
-import { EMPTY_RUN_FILTER, runMatchesFilter } from "./runFilter";
+import { EMPTY_RUN_FILTER, isFilterActive, runMatchesFilter } from "./runFilter";
 import RunShellModal from "./RunShellModal";
 import SelectControl from "./SelectControl";
 import TriggersListPanel from "./TriggersListPanel";
@@ -283,6 +283,7 @@ export default function UnifiedLeftPanel({
     return (
       <button
         key={run.run_id}
+        data-run-row={run.run_id}
         onClick={() => onSelectRun(run.run_id)}
         className={`group flex w-full cursor-pointer items-center gap-2 border-b border-l-2 border-line-soft px-3 py-2 text-left transition-colors ${
           rowSelected
@@ -337,12 +338,20 @@ export default function UnifiedLeftPanel({
             <span className="truncate" data-testid="run-pipeline-name">
               {run.pipeline_name}
             </span>
+            {/* #725 — provenance badges, icon-only (user decision 2026-09-06):
+                the words live in the `title`; `aria-label` carries the word for
+                AT. Same bordered 9px-chip shape so both read as "provenance",
+                different colours so they are never confused: the trigger is
+                accent-green, orchestrated is neutral grey. Both can coexist
+                (a child run may also be trigger-launched). */}
             {run.triggered_by && (
               <span
                 role="button"
-                title="Created by a trigger — open the Triggers tab"
-                className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded border border-acc px-1 text-acc"
-                style={{ fontSize: "9px" }}
+                aria-label="trigger"
+                title={`Created by trigger “${
+                  triggers.find((t) => t.id === run.triggered_by)?.name ?? run.triggered_by
+                }” — click to open it in the Triggers tab`}
+                className="flex shrink-0 cursor-pointer items-center rounded border border-acc px-1.5 py-[2px] text-acc transition-colors hover:bg-acc-bg"
                 data-testid="run-trigger-badge"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -350,10 +359,42 @@ export default function UnifiedLeftPanel({
                   setActiveTab("triggers");
                 }}
               >
-                <Zap size={8} />
-                trigger
+                <Zap size={9} />
               </span>
             )}
+            {run.parent_run_id &&
+              (() => {
+                // Parent resolved client-side from the list (no fetch). An
+                // orphan (parent forgotten) keeps its badge — the run WAS
+                // orchestrated — but dimmed and inert.
+                const parent = runs.find((r) => r.run_id === run.parent_run_id);
+                return (
+                  <span
+                    role="button"
+                    aria-label="orchestrated"
+                    aria-disabled={parent ? undefined : true}
+                    title={
+                      parent
+                        ? `Orchestrated by “${parent.name || parent.run_id}” — click to open the parent run`
+                        : "Orchestrated by a run that was forgotten"
+                    }
+                    className={`flex shrink-0 items-center rounded border border-fg-4 px-1.5 py-[2px] text-fg-3 transition-colors ${
+                      parent
+                        ? "cursor-pointer hover:border-fg-3 hover:text-fg-2"
+                        : "cursor-default opacity-70"
+                    }`}
+                    data-testid="run-orchestrated-badge"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!parent) return;
+                      setScrollRequest(parent.run_id);
+                      if (parent.run_id !== selectedRunId) onSelectRun(parent.run_id);
+                    }}
+                  >
+                    <GitFork size={9} />
+                  </span>
+                );
+              })()}
           </div>
         </div>
         {!isRenaming && (
@@ -475,8 +516,22 @@ export default function UnifiedLeftPanel({
     () => runs.filter((r) => runMatchesFilter(r, runFilter)),
     [runs, runFilter],
   );
-  const filterActive =
-    runFilter.repo !== null || runFilter.pipeline !== null || runFilter.trigger !== null;
+  const filterActive = isFilterActive(runFilter);
+
+  // #725 — after an orchestrated-badge click, scroll the parent's row into view:
+  // the parent is usually above its children but can sit off-screen on long
+  // lists (and inside the Archived section, whose auto-expand only lands after
+  // the selection re-renders). The request rides STATE (not a ref) so the row
+  // mapper stays ref-free (react-hooks/refs); the effect consumes it one-shot.
+  const runsScrollRef = useRef<HTMLDivElement>(null);
+  const [scrollRequest, setScrollRequest] = useState<string | null>(null);
+  useEffect(() => {
+    if (scrollRequest === null || selectedRunId !== scrollRequest) return;
+    setScrollRequest(null);
+    runsScrollRef.current
+      ?.querySelector(`[data-run-row="${scrollRequest}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [scrollRequest, selectedRunId]);
 
   // #136 — archived runs live in their own flat, collapsible section below the
   // active list; the active list keeps the #258 per-repo grouping.
@@ -709,6 +764,7 @@ export default function UnifiedLeftPanel({
           />
         )}
         <div
+          ref={runsScrollRef}
           className="flex-1 overflow-y-auto outline-none"
           tabIndex={-1}
           onKeyDown={(e) =>

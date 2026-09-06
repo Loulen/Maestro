@@ -805,6 +805,31 @@ pub(crate) fn build_preamble(ctx: &AugmentContext<'_>) -> String {
         );
     }
 
+    // CLI capabilities (#721, ADR-0064): `pdo run create` is the universal
+    // create-child-Run lever, documented like `pdo complete` above — any node
+    // session (agent or script) can orchestrate, the provenance is the
+    // daemon's business, never the caller's.
+    preamble.push_str("## Orchestration — creating child Runs\n\n");
+    preamble.push_str(
+        "You can create child Runs from this session with the `pdo run create` CLI \
+         capability — a thin client of the daemon's `POST /runs`:\n\
+         ```\n\
+         pdo run create <pipeline> [--input \"…\"] [--name \"…\"] [--target-repo /path/to/repo]\n\
+         ```\n\n\
+         - Run from a node session (like this one), the created Run is \
+         mechanically linked to this Run and this node — provenance is never \
+         declared by the caller, and the daemon refuses any parent field in the body.\n\
+         - The child's project defaults to this Run's project; override it \
+         explicitly with `--target-repo`.\n\
+         - Every creation field passes through as a flag: `--input`, \
+         `--variables '<json>'`, `--skills a,b`, `--agent-choice '<json>'`, \
+         `--harness`, `--sandbox`, `--target-repo`, `--target-repos '<json>'`, \
+         `--source-branch`, `--name`, `--auto-name`, `--auto-fail`, \
+         `--provisioning '<json>'`.\n\
+         - The daemon's refusals (unknown pipeline, …) print on stderr with a \
+         non-zero exit.\n\n",
+    );
+
     if !ctx.variables.is_empty() {
         preamble.push_str("## Pipeline Variables\n\n");
         for (name, value) in ctx.variables {
@@ -1538,6 +1563,11 @@ mod tests {
         assert!(preamble.contains("pdo fail --reason"));
         // #245: non-interactive nodes learn the graceful no-op primitive.
         assert!(preamble.contains("pdo skip --reason"));
+        // #721 / ADR-0064: run creation is a documented CLI capability of every
+        // node session — provenance follows the session, never the caller.
+        assert!(preamble.contains("pdo run create"));
+        assert!(preamble.contains("mechanically linked"));
+        assert!(preamble.contains("--target-repo"));
     }
 
     #[test]
