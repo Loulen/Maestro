@@ -940,7 +940,11 @@ export default function App() {
         }
       />
       <SettingsSurface
-        key={settingsEntry.key}
+        // #717: keys MUST be namespaced per sibling — two always-mounted siblings sharing a
+        // bare numeric key (both started at 0) collide in React 19's mapRemainingChildren,
+        // which keys its lookup map by fiber.key alone; the wrong fiber wins the update and
+        // the surface becomes permanently unclosable.
+        key={"settings-" + settingsEntry.key}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         liveSessions={sessions.live}
@@ -951,7 +955,8 @@ export default function App() {
         onRequestUpdate={() => setUpdateConfirmOpen(true)}
       />
       <StatsModal
-        key={statsEntry.key}
+        // #717: see the SettingsSurface key above — sibling keys must never collide.
+        key={"stats-" + statsEntry.key}
         open={statsOpen}
         onClose={() => setStatsOpen(false)}
         initialTab={statsEntry.intent?.tab}

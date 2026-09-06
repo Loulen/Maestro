@@ -10,6 +10,17 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.63.1
+
+**La page Settings se referme à nouveau** (#717). `SettingsSurface` et `StatsModal`, deux
+siblings toujours montés dans `App`, partageaient la même clé React (`0`) ; React 19
+(`mapRemainingChildren`) indexant ses enfants restants par `fiber.key` seul, le second
+écrasait le premier et la mise à jour d'ouverture atterrissait sur la mauvaise fiber — la
+surface devenait définitivement inclosable (✕ / Cancel / Escape morts, DOM gelé). Clés
+namespacées (`settings-N` / `stats-N`) + test de régression `App.settingsClose.test.tsx`
+qui monte la vraie `App` et couvre les trois chemins de fermeture (✕ après un cycle
+Stats, Cancel, Escape).
+
 ## 1.63.0
 
 **Story #702 livrée** (spec #704) : `pi` devient le troisième harnais first-party. Fusion de
