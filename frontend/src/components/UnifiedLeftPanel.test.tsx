@@ -1619,6 +1619,150 @@ describe("UnifiedLeftPanel run filters (#336)", () => {
 });
 
 // #577 — multi-select + bulk actions on the Runs list.
+// #725 — provenance badge « orchestrated » on child runs (click → parent) and
+// the « show orchestrated runs » toggle in the filter strip (ON by default; OFF
+// narrows to roots). Same session-only filter state; the clear ✕ resets it.
+describe("UnifiedLeftPanel orchestrated badge + roots-only toggle (#725)", () => {
+  const trig: Trigger = {
+    id: "trg-1",
+    name: "Nightly audit",
+    pipeline_id: "auditor",
+    pipeline_name: "auditor",
+    input_template: "",
+    variables: {},
+    cron: "0 9 * * *",
+    overlap_policy: "skip",
+    auto_name: true,
+    enabled: true,
+  };
+
+  const runs: RunListEntry[] = [
+    { run_id: "epic", pipeline_name: "orchestrate-epic", status: "running", started_at: null, name: "Refonte auth — orchestrateur" },
+    { run_id: "kid", pipeline_name: "implement-loop", status: "running", started_at: null, name: "#731 login form", parent_run_id: "epic" },
+    { run_id: "kid-trig", pipeline_name: "implement-loop", status: "running", started_at: null, name: "#733 logout — nightly", parent_run_id: "epic", triggered_by: "trg-1" },
+    { run_id: "orphan", pipeline_name: "implement-loop", status: "failed", started_at: null, name: "#700 spike", parent_run_id: "forgotten" },
+    { run_id: "arch-kid", pipeline_name: "implement-loop", status: "archived", started_at: null, name: "old child", parent_run_id: "epic" },
+  ];
+
+  it("shows the orchestrated badge on a child run and not on a root", () => {
+    renderPanel({ runs: [runs[0], runs[1]] });
+    expect(screen.getByTestId("run-orchestrated-badge")).toBeInTheDocument();
+    // Only the child row carries it — one badge for one child.
+    expect(screen.getAllByTestId("run-orchestrated-badge")).toHaveLength(1);
+  });
+
+  it("coexists with the trigger badge on the same run", () => {
+    renderPanel({ runs: [runs[2]] });
+    expect(screen.getByTestId("run-trigger-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("run-orchestrated-badge")).toBeInTheDocument();
+  });
+
+  it("names the parent run in the badge tooltip", () => {
+    renderPanel({ runs: [runs[0], runs[1]] });
+    expect(screen.getByTestId("run-orchestrated-badge")).toHaveAttribute(
+      "title",
+      "Orchestrated by “Refonte auth — orchestrateur” — click to open the parent run",
+    );
+  });
+
+  it("clicking the badge selects the parent run, not the child", () => {
+    const onSelectRun = vi.fn();
+    render(
+      <UnifiedLeftPanel
+        runs={[runs[0], runs[1]]}
+        selectedRunId={null}
+        onSelectRun={onSelectRun}
+        onNewRun={noop}
+        libraryPipelines={[]}
+        onLibraryPipelinesChanged={noop}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("run-orchestrated-badge"));
+    expect(onSelectRun).toHaveBeenCalledTimes(1);
+    expect(onSelectRun).toHaveBeenCalledWith("epic");
+  });
+
+  it("dims an orphan badge (parent forgotten) and makes its click a no-op", () => {
+    const onSelectRun = vi.fn();
+    render(
+      <UnifiedLeftPanel
+        runs={[runs[3]]}
+        selectedRunId={null}
+        onSelectRun={onSelectRun}
+        onNewRun={noop}
+        libraryPipelines={[]}
+        onLibraryPipelinesChanged={noop}
+      />,
+    );
+    const badge = screen.getByTestId("run-orchestrated-badge");
+    expect(badge).toHaveAttribute("aria-disabled", "true");
+    expect(badge).toHaveAttribute(
+      "title",
+      "Orchestrated by a run that was forgotten",
+    );
+    fireEvent.click(badge);
+    expect(onSelectRun).not.toHaveBeenCalled();
+  });
+
+  it("tooltip of the trigger badge names the trigger", () => {
+    renderPanel({ runs: [runs[2]], triggers: [trig] });
+    expect(screen.getByTestId("run-trigger-badge")).toHaveAttribute(
+      "title",
+      "Created by trigger “Nightly audit” — click to open it in the Triggers tab",
+    );
+  });
+
+  it("hides the toggle when no orchestrated run exists", () => {
+    renderPanel({ runs: [runs[0]] });
+    expect(screen.queryByTestId("run-filter-orchestrated")).not.toBeInTheDocument();
+  });
+
+  it("shows the toggle pressed ON by default and hides children when switched off", async () => {
+    const user = userEvent.setup();
+    renderPanel({ runs });
+    const toggle = screen.getByTestId("run-filter-orchestrated");
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(toggle);
+    expect(screen.getByTestId("run-filter-orchestrated")).toHaveAttribute("aria-pressed", "false");
+    // Only roots remain — the epic; every child (incl. the archived one) hides,
+    // and with zero archived runs left the whole section disappears.
+    const labels = screen.getAllByTestId("run-display-label").map((el) => el.textContent);
+    expect(labels).toEqual(["Refonte auth — orchestrateur"]);
+    expect(screen.queryByTestId("run-archived-section")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("run-filter-orchestrated"));
+    expect(screen.getAllByTestId("run-display-label")).toHaveLength(4);
+  });
+
+  it("composes with the other filter axes (AND)", async () => {
+    const user = userEvent.setup();
+    renderPanel({ runs });
+
+    await user.click(screen.getByTestId("run-filter-orchestrated"));
+    await user.click(screen.getByTestId("run-filter-pipeline"));
+    await user.click(await screen.findByTestId("run-filter-option-implement-loop"));
+
+    // implement-loop runs are all children; roots-only leaves nothing.
+    expect(screen.queryAllByTestId("run-display-label")).toHaveLength(0);
+    expect(screen.getByTestId("run-filter-empty")).toBeInTheDocument();
+  });
+
+  it("the clear control resets the toggle to ON", async () => {
+    const user = userEvent.setup();
+    renderPanel({ runs });
+
+    await user.click(screen.getByTestId("run-filter-orchestrated"));
+    // Narrowed to roots ⇒ the strip grew a clear ✕.
+    expect(screen.getByTestId("run-filter-clear")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("run-filter-clear"));
+    expect(screen.getByTestId("run-filter-orchestrated")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("run-filter-clear")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("run-display-label")).toHaveLength(4);
+  });
+});
+
 describe("UnifiedLeftPanel run multi-select (#577)", () => {
   const twoRuns: RunListEntry[] = [
     { run_id: "r1", pipeline_name: "p", status: "completed", started_at: null, name: "Run One", effective_repo: "/repo/a" },

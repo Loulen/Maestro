@@ -604,6 +604,12 @@ export interface RunListEntry {
   /** Provenance: the id of the Trigger that created this Run, if any (#160). */
   triggered_by?: string | null;
   /**
+   * Provenance (#720, ADR-0064): the id of the run that orchestrated this one,
+   * if any. Shipped by the daemon on every `GET /runs` entry; declared optional
+   * so existing test fixtures that omit it still typecheck.
+   */
+  parent_run_id?: string | null;
+  /**
    * Resolved target repo for "group by project" (#258): the run's `target_repo`,
    * or the daemon's `repo_root` when unset. Always sent by the daemon; declared
    * optional so existing test fixtures that omit it still typecheck.

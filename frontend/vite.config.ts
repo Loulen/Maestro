@@ -64,5 +64,10 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     exclude: ['e2e/**', 'node_modules/**'],
+    // Heavy App/EditCanvas jsdom renders routinely exceed vitest's 5s default
+    // when the suite runs on a loaded machine (parallel workers); the failures
+    // were pure timeouts moving between unrelated heavy tests run to run.
+    // 20s matches the per-test bump already used for the mermaid import test.
+    testTimeout: 20_000,
   },
 })
