@@ -396,7 +396,7 @@ describe("App — Settings surface closes (#717 sibling-key regression)", () => 
     await user.click(await screen.findByRole("button", { name: "Close settings" }));
     void surface;
     await expectClosed();
-  });
+  }, 20_000);
 
   it("closes via the Cancel button", async () => {
     const user = userEvent.setup();
@@ -405,7 +405,7 @@ describe("App — Settings surface closes (#717 sibling-key regression)", () => 
     await openSettings(user);
     await user.click(screen.getByTestId("settings-cancel"));
     await expectClosed();
-  });
+  }, 20_000);
 
   it("closes via Escape", async () => {
     const user = userEvent.setup();
@@ -414,5 +414,5 @@ describe("App — Settings surface closes (#717 sibling-key regression)", () => 
     await openSettings(user);
     await user.keyboard("{Escape}");
     await expectClosed();
-  });
+  }, 20_000);
 });

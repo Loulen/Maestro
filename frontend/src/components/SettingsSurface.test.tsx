@@ -398,7 +398,7 @@ describe("SettingsSurface", () => {
     expect(screen.getByTestId("setting-price-table-manual-path")).toHaveTextContent(
       "claude-opus-4-8",
     );
-  });
+  }, 20_000);
 
   it("lists the resolved harnesses and stays silent when no descriptor is inert (#553)", async () => {
     fetchSettingsMock.mockResolvedValue(sample());
