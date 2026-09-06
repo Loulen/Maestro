@@ -23,6 +23,9 @@ mod admission_concurrency;
 #[path = "cli_complete_does_not_panic.rs"]
 mod cli_complete_does_not_panic;
 
+#[path = "cli_run_create.rs"]
+mod cli_run_create;
+
 #[path = "cost_prices.rs"]
 mod cost_prices;
 
