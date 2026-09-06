@@ -230,6 +230,76 @@ pub enum Commands {
         #[command(subcommand)]
         action: DocsAction,
     },
+    /// Talk to a running daemon's Run surface.
+    Run {
+        #[command(subcommand)]
+        action: Box<RunAction>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RunAction {
+    /// Create a Run — the thin CLI client of the daemon's `POST /runs`
+    /// (issue #721, ADR-0064).
+    ///
+    /// Identity travels with the session, never in the body: run from a node
+    /// session (the `PDO_RUN_ID` / `PDO_NODE_ID` env vars the session is
+    /// wrapped with), the created Run is mechanically linked to that Run + node
+    /// (`parent_run_id` / `parent_node_id`); run from a plain terminal, it is a
+    /// root Run. The child's project defaults to the parent's — `--target-repo`
+    /// overrides it explicitly. Daemon refusals (unknown pipeline, a refused
+    /// session claim, …) print the daemon's own `error` sentence and exit
+    /// non-zero.
+    Create {
+        /// The pipeline to run, resolved by the daemon against its pipeline stores.
+        pipeline: String,
+        /// Prompt for the Run's start node. A prompt-optional pipeline accepts
+        /// the empty default.
+        #[arg(short, long, default_value = "")]
+        input: String,
+        /// Run variables as a JSON object: `--variables '{"pool":"a"}'`.
+        #[arg(long)]
+        variables: Option<String>,
+        /// Skills selected at the Run tier (#669, ADR-0062): comma-separated
+        /// ids (`--skills a,b`) or a JSON list of `{id, name}` objects.
+        #[arg(long)]
+        skills: Option<String>,
+        /// Agentic profile at the Run tier (ADR-0057) as JSON —
+        /// `{"mode":"profile","profile_id":"…"}` or
+        /// `{"mode":"custom","harness":"…","model":"…","effort":"…"}`.
+        #[arg(long)]
+        agent_choice: Option<String>,
+        /// Agentic harness (ADR-0046): free text, validated at spawn.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Sandbox isolation: `off`, or the name of a staging profile.
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Primary target repo (path or URL, like the UI's create modal).
+        /// Overrides the parent Run's project — ADR-0033 keeps the boundary.
+        #[arg(long)]
+        target_repo: Option<String>,
+        /// Secondary repos as a JSON list of `{repo, base_branch?, read_only?}`
+        /// (ADR-0042).
+        #[arg(long)]
+        target_repos: Option<String>,
+        /// Branch the primary repo starts from (default: its local HEAD).
+        #[arg(long)]
+        source_branch: Option<String>,
+        /// Display name for the Run.
+        #[arg(long)]
+        name: Option<String>,
+        /// Whether the manager may auto-name the Run (default: resolved by the
+        /// daemon from the presence of `--name`).
+        #[arg(long)]
+        auto_name: Option<bool>,
+        /// The Run's `auto_fail` preference (ADR-0049).
+        #[arg(long)]
+        auto_fail: Option<bool>,
+        /// Run-level provisioning rules as JSON (ADR-0061).
+        #[arg(long)]
+        provisioning: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1069,6 +1139,157 @@ pub fn run_skip(reason: String) -> Result<()> {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         anyhow::bail!("daemon returned {status}: {body}");
+    }
+    Ok(())
+}
+
+/// The session identity this CLI process carries via the `PDO_RUN_ID` /
+/// `PDO_NODE_ID` env vars every node session is wrapped with
+/// (`tmux_session_manager::wrap_with_env`). Only a non-empty PAIR is a claim —
+/// a lone var means out of session (mirror of the daemon's
+/// `session_claim_from_headers`): the created Run is then a root.
+fn session_env_claim() -> Option<(String, String)> {
+    let clean = |v: Result<String, std::env::VarError>| {
+        v.ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let run_id = clean(std::env::var("PDO_RUN_ID"))?;
+    let node_id = clean(std::env::var("PDO_NODE_ID"))?;
+    Some((run_id, node_id))
+}
+
+/// Parse a JSON-typed flag. The error names the flag, so an agent reading the
+/// stderr knows which argument was malformed.
+fn parse_json_arg(flag: &str, raw: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(raw).with_context(|| format!("invalid JSON for --{flag}: {raw}"))
+}
+
+/// `--skills`: comma-separated ids (`a,b`) or a JSON list of `{id, name}`
+/// objects. Ids become `{id}` objects — the wire shape of the Run tier's
+/// `SkillRef` list (`name` defaults; #668: identity is the id).
+fn parse_skills_arg(raw: &str) -> Result<serde_json::Value> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') {
+        return parse_json_arg("skills", trimmed);
+    }
+    let refs: Vec<serde_json::Value> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|id| serde_json::json!({ "id": id }))
+        .collect();
+    Ok(serde_json::json!(refs))
+}
+
+/// One-shot `pdo run create` (issue #721, ADR-0064): the thin CLI client of the
+/// daemon's `POST /runs`. Like the other one-shots, blocking `reqwest` and no
+/// tokio runtime (see `main.rs`); plain `Result` → `0`/`1` exit mapping — only
+/// `pdo complete` owns an exit-code contract (#490).
+///
+/// The body is built field by field rather than by serialising a struct, so the
+/// pass-through stays visibly in lock-step with the daemon's
+/// `CREATE_RUN_FIELDS` — and provenance never enters it: identity travels in
+/// the session headers, exactly like the UI's fetch calls.
+pub fn run_run_create(action: RunAction) -> Result<()> {
+    let RunAction::Create {
+        pipeline,
+        input,
+        variables,
+        skills,
+        agent_choice,
+        harness,
+        sandbox,
+        target_repo,
+        target_repos,
+        source_branch,
+        name,
+        auto_name,
+        auto_fail,
+        provisioning,
+    } = action;
+
+    let url = cli_daemon_url();
+
+    let mut body = serde_json::Map::new();
+    body.insert("pipeline".into(), serde_json::json!(pipeline));
+    body.insert("input".into(), serde_json::json!(input));
+    if let Some(v) = variables {
+        body.insert("variables".into(), parse_json_arg("variables", &v)?);
+    }
+    if let Some(v) = skills {
+        body.insert("skills".into(), parse_skills_arg(&v)?);
+    }
+    if let Some(v) = agent_choice {
+        body.insert("agent_choice".into(), parse_json_arg("agent-choice", &v)?);
+    }
+    if let Some(v) = harness {
+        // No validation here (ADR-0045) — the daemon refuses an unknown one at
+        // spawn, naming it.
+        body.insert("harness".into(), serde_json::json!(v));
+    }
+    if let Some(v) = sandbox {
+        body.insert("sandbox".into(), serde_json::json!(v));
+    }
+    if let Some(v) = target_repo {
+        body.insert("target_repo".into(), serde_json::json!(v));
+    }
+    if let Some(v) = target_repos {
+        body.insert("target_repos".into(), parse_json_arg("target-repos", &v)?);
+    }
+    if let Some(v) = source_branch {
+        body.insert("source_branch".into(), serde_json::json!(v));
+    }
+    if let Some(v) = name {
+        body.insert("name".into(), serde_json::json!(v));
+    }
+    if let Some(v) = auto_name {
+        body.insert("auto_name".into(), serde_json::json!(v));
+    }
+    if let Some(v) = auto_fail {
+        body.insert("auto_fail".into(), serde_json::json!(v));
+    }
+    if let Some(v) = provisioning {
+        body.insert("provisioning".into(), parse_json_arg("provisioning", &v)?);
+    }
+
+    let session = session_env_claim();
+    let mut req = reqwest::blocking::Client::new()
+        .post(format!("{url}/runs"))
+        .json(&body);
+    if let Some((run_id, node_id)) = &session {
+        req = req
+            .header(SESSION_RUN_HEADER, run_id)
+            .header(SESSION_NODE_HEADER, node_id);
+    }
+    let resp = req.send().context("failed to reach daemon")?;
+
+    let status = resp.status();
+    let raw = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        // Readable: surface the daemon's own `error` sentence when there is one
+        // (unknown pipeline, refused session claim, …), the raw body otherwise.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let detail = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or(raw.as_str());
+        anyhow::bail!("daemon refused run creation ({status}): {detail}");
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("unreadable success body from daemon: {raw}"))?;
+    let run_id = parsed
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("`run_id` missing from daemon response: {raw}"))?
+        .to_string();
+
+    match session {
+        Some((parent_run, parent_node)) => {
+            println!("Run {run_id} created — child of run {parent_run} (node {parent_node}).")
+        }
+        None => println!("Run {run_id} created (root run)."),
     }
     Ok(())
 }
@@ -28196,6 +28417,146 @@ edges:
     fn cli_service_requires_an_action() {
         // `pdo service` with no subcommand is a usage error, not a silent no-op.
         assert!(Cli::try_parse_from(["pdo", "service"]).is_err());
+    }
+
+    #[test]
+    fn cli_parses_run_create_bare() {
+        // The one-argument common case: pipeline positional, everything else
+        // deferred to the daemon (empty input, session-derived parent).
+        let cli = Cli::try_parse_from(["pdo", "run", "create", "my-pipeline"]).unwrap();
+        let Commands::Run { action } = cli.command else {
+            panic!("expected Run subcommand")
+        };
+        let RunAction::Create {
+            pipeline,
+            input,
+            variables,
+            skills,
+            harness,
+            target_repo,
+            name,
+            ..
+        } = *action;
+        assert_eq!(pipeline, "my-pipeline");
+        assert_eq!(
+            input, "",
+            "empty input defers to the pipeline's prompt_required"
+        );
+        assert!(variables.is_none());
+        assert!(skills.is_none());
+        assert!(harness.is_none());
+        assert!(target_repo.is_none());
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn cli_parses_run_create_flags() {
+        let cli = Cli::try_parse_from([
+            "pdo",
+            "run",
+            "create",
+            "my-pipeline",
+            "--input",
+            "do the work",
+            "--variables",
+            r#"{"pool":"a"}"#,
+            "--skills",
+            "alpha,beta",
+            "--agent-choice",
+            r#"{"mode":"custom","harness":"pi"}"#,
+            "--harness",
+            "pi",
+            "--sandbox",
+            "off",
+            "--target-repo",
+            "/somewhere/repo",
+            "--target-repos",
+            r#"[{"repo":"/somewhere/other","read_only":true}]"#,
+            "--source-branch",
+            "feat/x",
+            "--name",
+            "child run",
+            "--auto-name",
+            "false",
+            "--auto-fail",
+            "true",
+            "--provisioning",
+            r#"{}"#,
+        ])
+        .unwrap();
+        let Commands::Run { action } = cli.command else {
+            panic!("expected Run subcommand")
+        };
+        let RunAction::Create {
+            pipeline,
+            input,
+            variables,
+            skills,
+            agent_choice,
+            harness,
+            sandbox,
+            target_repo,
+            target_repos,
+            source_branch,
+            name,
+            auto_name,
+            auto_fail,
+            provisioning,
+        } = *action;
+        assert_eq!(pipeline, "my-pipeline");
+        assert_eq!(input, "do the work");
+        assert_eq!(variables.as_deref(), Some(r#"{"pool":"a"}"#));
+        assert_eq!(skills.as_deref(), Some("alpha,beta"));
+        assert_eq!(
+            agent_choice.as_deref(),
+            Some(r#"{"mode":"custom","harness":"pi"}"#)
+        );
+        assert_eq!(harness.as_deref(), Some("pi"));
+        assert_eq!(sandbox.as_deref(), Some("off"));
+        assert_eq!(target_repo.as_deref(), Some("/somewhere/repo"));
+        assert_eq!(
+            target_repos.as_deref(),
+            Some(r#"[{"repo":"/somewhere/other","read_only":true}]"#)
+        );
+        assert_eq!(source_branch.as_deref(), Some("feat/x"));
+        assert_eq!(name.as_deref(), Some("child run"));
+        assert_eq!(auto_name, Some(false));
+        assert_eq!(auto_fail, Some(true));
+        assert_eq!(provisioning.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn cli_run_requires_an_action() {
+        assert!(Cli::try_parse_from(["pdo", "run"]).is_err());
+    }
+
+    #[test]
+    fn run_create_skills_arg_accepts_ids_and_json() {
+        // Comma-separated ids become the wire shape of the Run tier's SkillRef
+        // list — `{id}` objects whose `name` the daemon defaults (#668).
+        let parsed = parse_skills_arg("alpha, beta ,,gamma").unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!([{ "id": "alpha" }, { "id": "beta" }, { "id": "gamma" }])
+        );
+        // A JSON list passes through verbatim — `{id, name}` labels survive.
+        let parsed = parse_skills_arg(r#"[{"id":"a","name":"A"}]"#).unwrap();
+        assert_eq!(parsed, serde_json::json!([{ "id": "a", "name": "A" }]));
+        assert!(parse_skills_arg("[broken").is_err());
+    }
+
+    #[test]
+    fn run_create_session_env_claim_needs_a_pair() {
+        // Mirror of the daemon's `session_claim_from_headers`: only a non-empty
+        // PAIR is a claim. Gated on the vars being unset, so this can't race a
+        // real session's env (same guard pattern as the nested-context tests).
+        if std::env::var("PDO_RUN_ID").is_ok() || std::env::var("PDO_NODE_ID").is_ok() {
+            return;
+        }
+        assert!(
+            session_env_claim().is_none(),
+            "no env vars ⇒ out of session"
+        );
     }
 
     // --- Layer 3a: `run_service` against a recording fake env (#156, D4).
