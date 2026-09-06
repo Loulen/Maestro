@@ -9180,7 +9180,8 @@ async fn spawn_manager_session(
     let session_name = tmux_session_manager::manager_session_name(run_id);
     // The manager follows the harness OF THE RUN — `Run → instance → floor`, no node
     // tier and deliberately no model/effort — so "this Run runs on X" holds with no
-    // exception. An unknown name falls back to `claude` with a warning rather than
+    // exception … unless a stored `manager_profile` pin says otherwise (applied
+    // just below). An unknown name falls back to `claude` with a warning rather than
     // failing the Run: the first NODE spawn is where an unknown harness fails fast
     // (ADR-0037), and the manager is a best-effort assist that must not wedge the Run.
     let run_state = reload_run_state(state, run_id)
@@ -9198,7 +9199,29 @@ async fn spawn_manager_session(
         &profiles,
         agent_profile::DEFAULT_PROFILE_ID,
     );
-    let manager_harness_name = manager_agent.combo.harness.clone();
+    // The stored `manager_profile` pin, applied AFTER « Follow the Run » so a pin
+    // fully wins (design §2.2): the profile's harness · model · effort replace the
+    // Run-tier combo entirely — a pin that only replaced the floor would almost
+    // never fire, since the Run tier always resolves. A pin naming a profile that
+    // was deleted (or renamed) AFTER registration warns and falls back to « Follow
+    // the Run » — loud, and the stored value is never rewritten (#432 tombstone).
+    let stored_pin = config
+        .as_ref()
+        .and_then(|cfg| cfg.manager_profile.as_deref())
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let found = match stored_pin {
+        Some(pin) => agent_profile::find_by_name_ci(&state.db, pin)
+            .await
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    };
+    let (manager_combo, pin_warning) =
+        apply_manager_profile_pin(stored_pin, found, manager_agent.combo.clone());
+    if let Some(warning) = &pin_warning {
+        warn!("manager for run {run_id}: {warning}");
+    }
+    let manager_harness_name = manager_combo.harness.clone();
     // Resolve against the DISK TIER, through the same registry the node spawns use,
     // so "this Run runs on X" holds even when X is a user-declared harness.
     let harness_home_root = sandbox_run::sandbox_home_roots(state)
@@ -9258,8 +9281,8 @@ async fn spawn_manager_session(
         // being read as a node's.
         tmux_session_manager::SessionTail::Agent {
             harness: &manager_harness,
-            model: manager_agent.combo.model.as_deref(),
-            effort: manager_agent.combo.effort.as_deref(),
+            model: manager_combo.model.as_deref(),
+            effort: manager_combo.effort.as_deref(),
             session_id: None,
         },
         sandbox_wrap.as_ref(),
@@ -9270,6 +9293,42 @@ async fn spawn_manager_session(
         error!("failed to spawn manager tmux session: {e}");
     } else {
         info!("Spawned manager session: {session_name}");
+    }
+}
+
+/// Apply the stored `manager_profile` pin to the manager's « Follow the Run »
+/// combo (design §2.2 « Manager profile »). `stored` is the trimmable
+/// instance-config value; `found` is the `agent_profile::find_by_name_ci` answer
+/// for it (errors stringified so the helper stays pure and unit-testable).
+///
+/// Returns the combo to launch with — the named profile's harness · model ·
+/// effort when the pin resolves, otherwise the « Follow the Run » combo
+/// untouched — plus a warning for a pin that could not fire (profile missing or
+/// unreadable): the fallback is loud, and the stored value is never rewritten.
+fn apply_manager_profile_pin(
+    stored: Option<&str>,
+    found: Result<Option<agent_profile::AgentProfile>, String>,
+    follow_run: agent_choice::ResolvedCombo,
+) -> (agent_choice::ResolvedCombo, Option<String>) {
+    let Some(pin) = stored else {
+        return (follow_run, None);
+    };
+    match found {
+        Ok(Some(profile)) => (profile.combo(), None),
+        Ok(None) => (
+            follow_run,
+            Some(format!(
+                "manager profile `{pin}` names no agent profile — falling back to \
+                 « Follow the Run »"
+            )),
+        ),
+        Err(e) => (
+            follow_run,
+            Some(format!(
+                "cannot read agent profile `{pin}` ({e}) — falling back to \
+                 « Follow the Run »"
+            )),
+        ),
     }
 }
 
@@ -9731,7 +9790,11 @@ async fn build_settings_view(state: &AppState) -> Result<serde_json::Value, sqlx
     // The profile pin: a stored agent-profile NAME, or unset (« Follow the
     // Run »). No env tier — unlike the flag, a pin is a pure stored decision.
     let mp_stored = cfg.manager_profile.as_deref().filter(|s| !s.is_empty());
-    let mp_source = if mp_stored.is_some() { "stored" } else { "default" };
+    let mp_source = if mp_stored.is_some() {
+        "stored"
+    } else {
+        "default"
+    };
 
     // Not a `settings_field` — it has no stored/env/default tier. Folded in here so
     // the modal learns the default AND whether Docker can run a sandbox in ONE fetch.
@@ -37727,7 +37790,10 @@ edges:
         assert_eq!(fresh["manager_enabled"]["effective"], false);
         assert_eq!(fresh["manager_enabled"]["source"], "default");
         assert_eq!(fresh["manager_enabled"]["default"], false);
-        assert_eq!(fresh["manager_profile"]["effective"], serde_json::Value::Null);
+        assert_eq!(
+            fresh["manager_profile"]["effective"],
+            serde_json::Value::Null
+        );
 
         let (status, view) = put_settings_resp(&state, r#"{"manager_enabled": true}"#).await;
         assert_eq!(status, StatusCode::OK, "got {view}");
@@ -37759,15 +37825,9 @@ edges:
     #[tokio::test]
     async fn put_settings_persists_and_clears_the_manager_profile_pin() {
         let state = test_state().await;
-        let profile = agent_profile::create(
-            &state.db,
-            "reviewer",
-            "claude",
-            Some("sonnet"),
-            None,
-        )
-        .await
-        .unwrap();
+        let profile = agent_profile::create(&state.db, "reviewer", "claude", Some("sonnet"), None)
+            .await
+            .unwrap();
 
         let (status, view) = put_settings_resp(&state, r#"{"manager_profile": "reviewer"}"#).await;
         assert_eq!(status, StatusCode::OK, "got {view}");
@@ -37778,7 +37838,10 @@ edges:
         // SQL NULL, never as an empty string that would win precedence.
         let (status, view) = put_settings_resp(&state, r#"{"manager_profile": ""}"#).await;
         assert_eq!(status, StatusCode::OK, "got {view}");
-        assert_eq!(view["manager_profile"]["effective"], serde_json::Value::Null);
+        assert_eq!(
+            view["manager_profile"]["effective"],
+            serde_json::Value::Null
+        );
         assert_eq!(view["manager_profile"]["source"], "default");
         assert_eq!(
             instance_config::get(&state.db)
@@ -37803,7 +37866,10 @@ edges:
         let (status, body) = put_settings_resp(&state, r#"{"manager_profile": "ghost"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
         assert!(
-            body["error"].as_str().unwrap().contains("unknown manager profile `ghost`"),
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown manager profile `ghost`"),
             "got {body}"
         );
         assert_eq!(
@@ -37814,6 +37880,77 @@ edges:
             None,
             "a refused edit must persist nothing"
         );
+    }
+
+    #[test]
+    fn no_pin_leaves_the_follow_the_run_combo_untouched() {
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "codex".into(),
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+        };
+        let (combo, warning) = apply_manager_profile_pin(None, Ok(None), follow_run.clone());
+        assert_eq!(combo, follow_run);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn a_resolved_pin_fully_replaces_the_follow_the_run_combo() {
+        // Strong pin (design §2.2, decision #3): harness, model AND effort come
+        // from the profile — the Run tier never leaks through.
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "codex".into(),
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+        };
+        let profile = agent_profile::AgentProfile {
+            id: "p1".into(),
+            name: "CheapManager".into(),
+            harness: "claude".into(),
+            model: Some("haiku".into()),
+            effort: None,
+            created_at: "2026-01-01".into(),
+            updated_at: "2026-01-01".into(),
+        };
+        let (combo, warning) =
+            apply_manager_profile_pin(Some("CheapManager"), Ok(Some(profile)), follow_run);
+        assert_eq!(combo.harness, "claude");
+        assert_eq!(combo.model.as_deref(), Some("haiku"));
+        assert_eq!(combo.effort, None);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn a_pin_to_a_missing_profile_falls_back_with_a_warning_naming_it() {
+        // #432 tombstone discipline: the profile was deleted after the pin was
+        // stored — the spawn falls back to « Follow the Run », loudly, and the
+        // stored value is never rewritten (nothing here persists anything).
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "codex".into(),
+            model: None,
+            effort: None,
+        };
+        let (combo, warning) =
+            apply_manager_profile_pin(Some("ghost"), Ok(None), follow_run.clone());
+        assert_eq!(combo, follow_run);
+        let warning = warning.expect("a missing pin must warn");
+        assert!(warning.contains("`ghost`"), "got: {warning}");
+        assert!(warning.contains("Follow the Run"), "got: {warning}");
+    }
+
+    #[test]
+    fn a_pin_that_cannot_be_looked_up_falls_back_with_a_warning() {
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "claude".into(),
+            model: None,
+            effort: None,
+        };
+        let (combo, warning) =
+            apply_manager_profile_pin(Some("p"), Err("db locked".into()), follow_run.clone());
+        assert_eq!(combo, follow_run);
+        let warning = warning.expect("a failed lookup must warn");
+        assert!(warning.contains("db locked"), "got: {warning}");
+        assert!(warning.contains("Follow the Run"), "got: {warning}");
     }
 
     #[tokio::test]
