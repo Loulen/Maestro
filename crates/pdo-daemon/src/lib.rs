@@ -2414,6 +2414,29 @@ pub async fn serve_with_config(
 
     init_db(&db).await?;
 
+    // #722: the seeded skill lands at every startup — created if absent, its
+    // content rewritten when the built-in copy (versioned with PDO) differs.
+    // A failed seed is logged, never fatal: the daemon must come up even when
+    // the bank is in an unexpected state.
+    //
+    // A dedicated connection, closed as soon as the seed is done: the seed
+    // must not leave its statements in the serving pool's caches.
+    match sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rwc", db_path.display())).await {
+        Ok(seed_db) => {
+            match skill_bank::seed(&seed_db, &repo_root).await {
+                Ok(outcome) => match &outcome {
+                    skill_bank::SeedOutcome::Skipped { reason } => {
+                        warn!("skill seed skipped: {reason}")
+                    }
+                    _ => info!("skill seed: {outcome:?}"),
+                },
+                Err(error) => error!("skill seed failed: {error}"),
+            }
+            seed_db.close().await;
+        }
+        Err(error) => error!("skill seed connection failed: {error}"),
+    }
+
     // Must sit after the schema is up (the reader PRAGMA-probes the columns) and
     // before anything can consume a setting — the only moment where "one line per
     // boot" is a fact rather than a hope.
@@ -10798,6 +10821,7 @@ fn skill_error_code(error: &skill_bank::SkillError) -> &'static str {
         E::FileNotFound(_) => "file_not_found",
         E::FileTooLarge { .. } => "file_too_large",
         E::SourceNotAFile(_) => "source_not_a_file",
+        E::Locked { .. } => "locked",
         E::Storage(_) => "storage",
     }
 }
@@ -10806,6 +10830,7 @@ fn skill_error_response(error: skill_bank::SkillError) -> Response {
     use skill_bank::SkillError as E;
     let status = match &error {
         E::NotFound | E::FileNotFound(_) => StatusCode::NOT_FOUND,
+        E::Locked { .. } => StatusCode::FORBIDDEN,
         E::DuplicateName { .. } => StatusCode::CONFLICT,
         E::FileTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         E::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,

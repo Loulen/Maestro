@@ -10,6 +10,17 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.64.0
+
+**Le skill `pdo-orchestrate` est semé dans la Banque de skills** (#722). Premier mécanisme de
+seed du produit : à chaque démarrage du daemon, le skill est écrit dans un dossier « PDO » —
+créé si absent, contenu réécrit si la copie versionnée avec le binaire diffère, re-seedé si le
+dossier disque est effacé ou corrompu. Il est verrouillé : toute écriture via la banque
+(édition, renommage, suppression, fichiers) répond 403 `locked`, la surface affiche un badge
+« Managed by PDO » et masque les gestes d'édition. Il reste sélectionnable et livrable comme
+tout skill (ADR-0062). Le ratchet de layout est realigné sur main (dérive présente depuis
+#718, aucun nouveau fichier racine ajouté ici).
+
 ## 1.63.1
 
 **La page Settings se referme à nouveau** (#717). `SettingsSurface` et `StatsModal`, deux

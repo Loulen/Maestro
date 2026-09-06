@@ -18,6 +18,17 @@ fn skills_root(daemon: &TestDaemon) -> std::path::PathBuf {
     daemon.repo_root().join(".pdo").join("skills")
 }
 
+/// The seeded skill (#722) shares the bank with the document's skills; filter
+/// it out of list assertions.
+fn user_skills(bank: &serde_json::Value) -> Vec<&serde_json::Value> {
+    bank["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["id"] != "pdo-orchestrate")
+        .collect()
+}
+
 fn pipeline_yaml(node_skills: &str) -> String {
     format!(
         r#"name: {PIPELINE}
@@ -302,8 +313,13 @@ async fn fp_round_trip_recreates_deleted_skills_with_the_same_ids_and_no_warning
         assert!(!skills_root(&daemon).join(id).exists());
     }
     assert_eq!(
-        get_json(&daemon, "/settings/skills").await["skills"],
-        serde_json::json!([])
+        get_json(&daemon, "/settings/skills").await["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["id"] != "pdo-orchestrate")
+            .count(),
+        0
     );
 
     // FP step 3: import the document with its sidecar.
@@ -332,15 +348,18 @@ async fn fp_round_trip_recreates_deleted_skills_with_the_same_ids_and_no_warning
     // filed under the import folder.
     let bank = get_json(&daemon, "/settings/skills").await;
     let skills = bank["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 2, "{bank}");
+    assert_eq!(skills.len(), 3, "{bank}");
     let folder_id = body["skills"]["folder"]["id"].as_str().unwrap();
-    for skill in skills {
+    for skill in user_skills(&bank) {
         assert_eq!(skill["folder_id"], folder_id, "{skill}");
     }
-    assert_eq!(
-        bank["folders"][0]["name"],
-        format!("importés avec {PIPELINE}")
-    );
+    let import_folder = bank["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == folder_id)
+        .unwrap();
+    assert_eq!(import_folder["name"], format!("importés avec {PIPELINE}"));
     assert_eq!(
         std::fs::read_to_string(skills_root(&daemon).join(&tdd_id).join("SKILL.md")).unwrap(),
         skill_md("tdd")
@@ -481,12 +500,14 @@ async fn known_ids_are_kept_and_taken_names_are_suffixed_with_a_warning() {
     ];
     expected.sort();
     assert_eq!(refs, expected, "{imported}");
-    // The bank: three skills, no overwrite.
+    // The bank: three user skills, no overwrite (the seeded skill shares it).
     assert_eq!(
         get_json(&daemon, "/settings/skills").await["skills"]
             .as_array()
             .unwrap()
-            .len(),
+            .iter()
+            .filter(|s| s["id"] != "pdo-orchestrate")
+            .count(),
         3
     );
 }
@@ -518,8 +539,8 @@ async fn a_document_without_sidecar_imports_with_a_skill_absent_warning() {
     assert!(body["skills"].get("folder").is_none(), "{body}");
     // Nothing created, no folder, the reference is kept for the day the skill arrives.
     let bank = get_json(&daemon, "/settings/skills").await;
-    assert_eq!(bank["skills"], serde_json::json!([]));
-    assert_eq!(bank["folders"], serde_json::json!([]));
+    assert_eq!(user_skills(&bank), Vec::<&serde_json::Value>::new());
+    assert_eq!(bank["folders"].as_array().unwrap().len(), 1);
     let imported = get_json(
         &daemon,
         &format!("/pipelines/{}", body["id"].as_str().unwrap()),

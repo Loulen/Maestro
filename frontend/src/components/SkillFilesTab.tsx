@@ -15,6 +15,8 @@ interface Props {
    */
   leaveRequest: (() => void) | null;
   onLeaveSettled: () => void;
+  /** The seeded skill (#722): files are read-only — no drop, no add, no delete, no save. */
+  locked?: boolean;
 }
 
 /**
@@ -23,7 +25,7 @@ interface Props {
  * Keep / Delete on the trash, the drop bar with Browse…, and — when a row is
  * clicked — the plain-text editor beside the list.
  */
-export default function SkillFilesTab({ files, pathLabel, leaveRequest, onLeaveSettled }: Props) {
+export default function SkillFilesTab({ files, pathLabel, leaveRequest, onLeaveSettled, locked = false }: Props) {
   const { detail, editor } = files;
   const skillMdSize = detail?.content ? new TextEncoder().encode(detail.content).length : null;
   const editorOpen = editor !== null;
@@ -65,7 +67,7 @@ export default function SkillFilesTab({ files, pathLabel, leaveRequest, onLeaveS
                   : null
             }
             compact={editorOpen}
-            deletable={!row.isSkillMd}
+            deletable={!row.isSkillMd && !locked}
             confirming={files.confirmDeleteFor === row.path}
             onOpen={() => requestOpen(row.path)}
             onAskDelete={() => files.setConfirmDeleteFor(row.path)}
@@ -98,13 +100,15 @@ export default function SkillFilesTab({ files, pathLabel, leaveRequest, onLeaveS
           </div>
         ))}
         <div className="mt-1">
-          <SkillFileDropZone
-            compact={editorOpen}
-            testId="skill-files-drop"
-            onBrowse={() => files.setExplorerOpen(true)}
-            onPickFiles={files.acceptPickedFiles}
-            label={editorOpen ? "Drop or" : "Drop files here to add them (a SKILL.md replaces the skill text), or"}
-          />
+          {!locked && (
+            <SkillFileDropZone
+              compact={editorOpen}
+              testId="skill-files-drop"
+              onBrowse={() => files.setExplorerOpen(true)}
+              onPickFiles={files.acceptPickedFiles}
+              label={editorOpen ? "Drop or" : "Drop files here to add them (a SKILL.md replaces the skill text), or"}
+            />
+          )}
         </div>
         {!editorOpen && (
           <p className="mt-1 text-fg-4" style={{ fontSize: "10.5px" }} data-testid="skill-files-footer">
@@ -124,13 +128,14 @@ export default function SkillFilesTab({ files, pathLabel, leaveRequest, onLeaveS
           files={files}
           leave={leave}
           onLeaveSettled={settleLeave}
+          locked={locked}
         />
       )}
       {!editorOpen && (
         <p className="sr-only">Switching file or skill with unsaved changes asks first · SKILL.md edits re-run the five checks before saving</p>
       )}
 
-      {files.explorerOpen && (
+      {files.explorerOpen && !locked && (
         <FsExplorerModal
           mode="file"
           multiple
@@ -261,10 +266,12 @@ function FileEditor({
   files,
   leave,
   onLeaveSettled,
+  locked = false,
 }: {
   files: SkillFiles;
   leave: (() => void) | null;
   onLeaveSettled: () => void;
+  locked?: boolean;
 }) {
   const editor = files.editor!;
   const binary = editor.content?.binary ?? false;
@@ -272,6 +279,7 @@ function FileEditor({
   const isSkillMd = editor.path === SKILL_MD;
 
   const onKeyDown = (event: React.KeyboardEvent) => {
+    if (locked) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
       void files.save();
@@ -369,6 +377,7 @@ function FileEditor({
         <textarea
           value={editor.draft}
           onChange={(event) => files.setDraft(event.target.value)}
+          readOnly={locked}
           spellCheck={false}
           aria-label={`${editor.path} text`}
           aria-invalid={editor.error ? true : undefined}
@@ -392,28 +401,36 @@ function FileEditor({
       {!binary && !editor.loading && (
         <div className="flex items-center gap-2 border-t border-line px-3 py-2" style={{ fontSize: "10.5px" }}>
           <span className="text-fg-4">
-            {editor.savedAt ? "Saved just now" : "On disk"} · {formatBytes(new TextEncoder().encode(editor.saved).length)}
-            {isSkillMd ? " · five checks re-run before saving" : ""}
+            {locked
+              ? "Read-only — managed by PDO"
+              : editor.savedAt
+                ? "Saved just now"
+                : "On disk"} · {formatBytes(new TextEncoder().encode(editor.saved).length)}
+            {!locked && isSkillMd ? " · five checks re-run before saving" : ""}
           </span>
           <span className="flex-1" />
-          <button
-            type="button"
-            onClick={files.revert}
-            disabled={!dirty}
-            data-testid="skill-file-revert"
-            className="rounded-md border border-line-strong bg-bg-4 px-2.5 py-1 text-fg-2 hover:border-acc disabled:opacity-40"
-          >
-            Revert
-          </button>
-          <button
-            type="button"
-            onClick={() => void files.save()}
-            disabled={!dirty || files.saving}
-            data-testid="skill-file-save"
-            className="rounded-md bg-acc px-2.5 py-1 font-medium text-bg-1 hover:opacity-90 disabled:opacity-40"
-          >
-            {files.saving ? "Saving…" : "Save"}
-          </button>
+          {!locked && (
+            <>
+              <button
+                type="button"
+                onClick={files.revert}
+                disabled={!dirty}
+                data-testid="skill-file-revert"
+                className="rounded-md border border-line-strong bg-bg-4 px-2.5 py-1 text-fg-2 hover:border-acc disabled:opacity-40"
+              >
+                Revert
+              </button>
+              <button
+                type="button"
+                onClick={() => void files.save()}
+                disabled={!dirty || files.saving}
+                data-testid="skill-file-save"
+                className="rounded-md bg-acc px-2.5 py-1 font-medium text-bg-1 hover:opacity-90 disabled:opacity-40"
+              >
+                {files.saving ? "Saving…" : "Save"}
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
