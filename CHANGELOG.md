@@ -10,6 +10,22 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.65.0
+
+**Un run créé depuis une session de nœud porte sa provenance mécaniquement** (#720 ; story #709,
+spec #719, ADR-0064). `POST /runs` lit l'identité de session (headers `X-PDO-Session-Run-Id` /
+`X-PDO-Session-Node-Id`, alimentés par `PDO_RUN_ID` / `PDO_NODE_ID` dans le sandbox) et, après
+vérification d'une session de nœud **vivante**, gèle `parent_run_id` + `parent_node_id` dans le
+`RunStarted` — la provenance ne se déclare jamais : toute clé de parent fournie dans le corps
+répond 400 en champ inconnu, et un claim invalide (run inconnu, nœud inconnu, nœud sans session
+vivante) répond 403 avant tout effet. Sans claim, le run est racine ; le projet de l'enfant vaut
+par défaut celui du parent, overridable explicitement, sans héritage spécial sandbox/harnais.
+`RunState` et la liste de runs projettent les deux champs, et le nouvel endpoint
+`GET /runs/{id}/children` groupe les enfants par nœud parent avec statut, `started_at`,
+`completed_at` et coût **dérivé à la lecture** via le cache existant (jamais persisté, ADR-0052 —
+indisponible ⇒ clé absente, jamais `$0`). Un enfant reste un run ordinaire : il s'ouvre dans
+l'éditeur avec son propre graphe.
+
 ## 1.64.0
 
 **Le skill `pdo-orchestrate` est semé dans la Banque de skills** (#722). Premier mécanisme de

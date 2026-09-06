@@ -2116,7 +2116,9 @@ async fn dispatch(state: Arc<AppState>, run_id: String, cmd: RunCommand) -> Resp
                     .map(|scoped| scoped.rules.clone())
                     .unwrap_or_default(),
             };
-            let new_run_resp = create_run_core(&state, new_run_req, Vec::new()).await;
+            // ADR-0064: a retried Run is created by the daemon, not from a node
+            // session — it is a root even when the archived original had a parent.
+            let new_run_resp = create_run_core(&state, new_run_req, Vec::new(), None).await;
 
             info!("retry_all: archived run {run_id}, created new run");
             new_run_resp
