@@ -1093,6 +1093,19 @@ pub struct RunState {
     /// Provenance: the id of the Trigger that created this Run, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggered_by: Option<String>,
+    /// Provenance: the Run whose node session created this one (ADR-0064).
+    /// **Mechanical**: posed by the daemon at create time from the caller's
+    /// verified live node session — never declared by the caller, whose body may
+    /// not even carry a parent field. `None` on a **root run** — every historical
+    /// Run, and any Run created outside a node session. Immutable, like
+    /// [`RunState::triggered_by`]: frozen into `RunStarted`, never mutated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    /// The parent Run's node whose session created this Run (ADR-0064) — the key
+    /// `GET /runs/{id}/children` groups by. Frozen with
+    /// [`RunState::parent_run_id`], same posture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_node_id: Option<String>,
     /// The library pipeline id this Run was created from (#377). Written to the
     /// `RunStarted` payload going forward; consumers (aggregated "by pipeline"
     /// stats) fall back to `pipeline_name` when it is absent — historical runs,
@@ -1164,6 +1177,8 @@ impl RunState {
             skills: Vec::new(),
             auto_fail: None,
             triggered_by: None,
+            parent_run_id: None,
+            parent_node_id: None,
             pipeline_id: None,
             sessions_spawned: 0,
             loc: None,
@@ -1785,6 +1800,14 @@ fn apply_run_event(state: &mut RunState, event: &Event) {
                 }
                 if let Some(tb) = payload.get("triggered_by").and_then(|v| v.as_str()) {
                     state.triggered_by = Some(tb.to_string());
+                }
+                // ADR-0064: the mechanical parent provenance the daemon froze at
+                // create. Absent keys ⇒ a root run (every historical Run).
+                if let Some(pr) = payload.get("parent_run_id").and_then(|v| v.as_str()) {
+                    state.parent_run_id = Some(pr.to_string());
+                }
+                if let Some(pn) = payload.get("parent_node_id").and_then(|v| v.as_str()) {
+                    state.parent_node_id = Some(pn.to_string());
                 }
                 if let Some(pid) = payload.get("pipeline_id").and_then(|v| v.as_str()) {
                     state.pipeline_id = Some(pid.to_string());
@@ -3249,6 +3272,33 @@ mod tests {
         assert_eq!(state.sandbox, SandboxMode::Profile("full".into()));
         assert_eq!(state.sandbox_entries, None);
         assert_eq!(state.sandbox_entries_raw_error, None);
+    }
+
+    /// ADR-0064: the mechanical parent provenance is projected when the payload
+    /// carries it, and stays `None` on every historical payload (a root run).
+    #[test]
+    fn parent_provenance_projects_from_run_started_and_defaults_to_root() {
+        let with_parent = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({
+                "pipeline_name": "p",
+                "parent_run_id": "run-parent",
+                "parent_node_id": "worker",
+            }),
+        )];
+        let state = project(&with_parent).unwrap();
+        assert_eq!(state.parent_run_id.as_deref(), Some("run-parent"));
+        assert_eq!(state.parent_node_id.as_deref(), Some("worker"));
+
+        let legacy = vec![make_event_with_payload(
+            EventKind::RunStarted,
+            None,
+            serde_json::json!({ "pipeline_name": "p" }),
+        )];
+        let state = project(&legacy).unwrap();
+        assert_eq!(state.parent_run_id, None);
+        assert_eq!(state.parent_node_id, None);
     }
 
     /// A present-but-unreadable list keeps its RAW value, so the prep can name it in the

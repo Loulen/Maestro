@@ -145,6 +145,9 @@ mod run_shell;
 #[path = "runs_list_target_repo.rs"]
 mod runs_list_target_repo;
 
+#[path = "run_provenance.rs"]
+mod run_provenance;
+
 #[path = "sandbox_observability.rs"]
 mod sandbox_observability;
 

@@ -670,6 +670,13 @@ struct RunListEntry {
     /// Provenance: the Trigger that created this Run, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     triggered_by: Option<String>,
+    /// Provenance: the parent Run + node whose session created this Run
+    /// (ADR-0064) — the key the "orchestrated" badge and the "root runs only"
+    /// filter read. `None` on a root run. Mechanical: never caller-declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_node_id: Option<String>,
     /// Resolved target repo for "group by project": the run's `target_repo`, or
     /// the daemon's `repo_root` when unset. Only runs predating the hardened
     /// create boundary (ADR-0033) can be unset — this is a READ, so keep the
@@ -4104,6 +4111,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/reapable", get(list_reapable_runs))
         .route("/sessions", get(sessions))
         .route("/runs/{run_id}", get(get_run).delete(forget_run))
+        .route("/runs/{run_id}/children", get(list_run_children))
         .route("/runs/{run_id}/events", get(get_run_events))
         .route("/runs/{run_id}/nodes/{node_id}/done", post(node_done))
         .route("/runs/{run_id}/nodes/{node_id}/fail", post(node_fail))
@@ -5594,7 +5602,7 @@ async fn fire_one_trigger(
                 auto_fail: None,
                 provisioning: provisioning::ProvisioningRules::default(),
             };
-            let record = match create_run_inner(state, req, Vec::new()).await {
+            let record = match create_run_inner(state, req, Vec::new(), None).await {
                 Ok(run_id) => trigger_store::FireRecord {
                     outcome: "fired".to_string(),
                     reason: None,
@@ -7817,7 +7825,80 @@ async fn parse_multipart_create_run(
     Ok((req, images))
 }
 
+/// The session identity a `POST /runs` caller carries via the
+/// `X-PDO-Session-Run-Id` / `X-PDO-Session-Node-Id` headers — the exact values
+/// of the `PDO_RUN_ID` / `PDO_NODE_ID` env vars every node session is wrapped
+/// with (`tmux_session_manager::wrap_with_env`). Never a body field: provenance
+/// is mechanical (ADR-0064), so the daemon — not the caller — decides the
+/// parent, and any parent key in the body is refused as unknown.
+#[derive(Debug, Clone)]
+struct SessionClaim {
+    run_id: String,
+    node_id: String,
+}
+
+const SESSION_RUN_HEADER: &str = "X-PDO-Session-Run-Id";
+const SESSION_NODE_HEADER: &str = "X-PDO-Session-Node-Id";
+
+/// Read the session claim from the request headers. Only a pair of non-empty
+/// values is a claim — a lone header is not (the caller is out of session).
+fn session_claim_from_headers(headers: &HeaderMap) -> Option<SessionClaim> {
+    let run_id = headers
+        .get(SESSION_RUN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let node_id = headers
+        .get(SESSION_NODE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(SessionClaim {
+        run_id: run_id.to_string(),
+        node_id: node_id.to_string(),
+    })
+}
+
+/// Verify a session claim for mechanical provenance (ADR-0064) and hand back the
+/// claimed parent Run's projected state — the child's project defaults to it.
+///
+/// The session is the only witness the provenance trusts, and the daemon knows
+/// it already: a claim is accepted only when the named Run projects a node that
+/// **currently holds a live session** ([`event_log::NodeStatus::holds_session`]).
+/// A stale or invented claim is refused before any effect — no worktree, no
+/// event. A claim on a node that is `Waiting` (admission-throttled) is refused
+/// too: no session exists there to speak.
+async fn verify_session_claim(
+    state: &Arc<AppState>,
+    claim: &SessionClaim,
+) -> Result<event_log::RunState, (StatusCode, serde_json::Value)> {
+    let refuse = |msg: String| (StatusCode::FORBIDDEN, serde_json::json!({ "error": msg }));
+    let Some((_, parent)) = reload_run_state_with(&state.db, &claim.run_id).await else {
+        return Err(refuse(format!(
+            "session claim refused: run `{}` does not exist (or has no run log)",
+            claim.run_id
+        )));
+    };
+    let Some(node) = parent.nodes.get(&claim.node_id) else {
+        return Err(refuse(format!(
+            "session claim refused: run `{}` has no node `{}`",
+            claim.run_id, claim.node_id
+        )));
+    };
+    if !node.status.holds_session() {
+        return Err(refuse(format!(
+            "session claim refused: node `{}` of run `{}` holds no live session \
+             (status: {:?}); provenance follows a live node session",
+            claim.node_id, claim.run_id, node.status
+        )));
+    }
+    Ok(parent)
+}
+
 async fn create_run(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
+    // ADR-0064: read the session claim BEFORE the body is consumed — identity
+    // travels in headers, never in the body (whose parent fields are refused).
+    let session = session_claim_from_headers(req.headers());
     let content_type = req
         .headers()
         .get(header::CONTENT_TYPE)
@@ -7885,7 +7966,7 @@ async fn create_run(State(state): State<Arc<AppState>>, req: axum::extract::Requ
         (parsed, Vec::new())
     };
 
-    create_run_core(&state, parsed_req, images).await
+    create_run_core(&state, parsed_req, images, session).await
 }
 
 /// Validate the user input against the pipeline's `prompt_required` flag. A
@@ -7936,8 +8017,9 @@ async fn create_run_core(
     state: &Arc<AppState>,
     req: CreateRunRequest,
     images: Vec<ImageFile>,
+    session: Option<SessionClaim>,
 ) -> Response {
-    match create_run_inner(state, req, images).await {
+    match create_run_inner(state, req, images, session).await {
         Ok(run_id) => (StatusCode::CREATED, Json(CreateRunResponse { run_id })).into_response(),
         Err((status, body)) => (status, Json(body)).into_response(),
     }
@@ -7946,12 +8028,22 @@ async fn create_run_core(
 /// The Run-creation logic, returning the new `run_id` on success or a
 /// `(status, body)` pair on failure. `create_run_core` wraps this into an HTTP
 /// `Response`; the trigger scheduler calls it directly to learn the run id for
-/// `triggered_by` provenance.
+/// `triggered_by` provenance — with `session: None`, a fired Run is always a
+/// root (a Trigger is not a node session).
 async fn create_run_inner(
     state: &Arc<AppState>,
     req: CreateRunRequest,
     images: Vec<ImageFile>,
+    session: Option<SessionClaim>,
 ) -> Result<String, (StatusCode, serde_json::Value)> {
+    // ADR-0064: provenance is mechanical. Verify the session claim FIRST — before
+    // any effect (worktree, snapshots, event) — and keep the parent's projected
+    // state: the child's project defaults to it when the request names none.
+    let parent = match &session {
+        Some(claim) => Some(verify_session_claim(state, claim).await?),
+        None => None,
+    };
+
     // The target repo is REQUIRED at the creation boundary (ADR-0033): the daemon's
     // own `repo_root` stays its storage root but is never an implicit Run target, or
     // a Run mutates code in a repository nobody named. The read side keeps its
@@ -7960,6 +8052,11 @@ async fn create_run_inner(
     // Normalise the multi-repo shape down to the scalar here, so the ENTIRE
     // downstream primary path (worktree, merge-back, cost) stays unchanged and the
     // array only ever ADDS secondaries.
+    //
+    // One exception, itself mechanical (ADR-0064): a Run created from a node
+    // session defaults to the PARENT's project when the request names none — an
+    // orchestrated child is an ordinary run whose common case inherits the
+    // orchestrator's repo. An explicit `target_repo`/`target_repos` always wins.
     let effective_target_repo: Option<String> = req
         .target_repo
         .clone()
@@ -7969,6 +8066,11 @@ async fn create_run_inner(
                 .first()
                 .map(|r| r.repo.clone())
                 .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| {
+            parent
+                .as_ref()
+                .map(|p| effective_repo_root(state, p).to_string_lossy().into_owned())
         });
     let run_repo_root = match required_target_repo(effective_target_repo.as_deref()) {
         Ok(p) => p,
@@ -8430,6 +8532,14 @@ async fn create_run_inner(
         if !trigger_id.is_empty() {
             run_payload["triggered_by"] = serde_json::json!(trigger_id);
         }
+    }
+    // ADR-0064: FREEZE the mechanical parent provenance — decided by the daemon
+    // from the verified session claim, never read from the body (which refuses
+    // any parent key outright). Written ONLY when the create came from a live
+    // node session, so an out-of-session create keeps the historical root shape.
+    if let (Some(parent), Some(claim)) = (&parent, &session) {
+        run_payload["parent_run_id"] = serde_json::json!(parent.run_id);
+        run_payload["parent_node_id"] = serde_json::json!(claim.node_id);
     }
     // Carry the library pipeline id so aggregated "by pipeline" stats survive a
     // pipeline rename. The consumer falls back to `pipeline_name` when absent.
@@ -12184,6 +12294,8 @@ async fn list_runs(State(state): State<Arc<AppState>>) -> Response {
                 awaiting_reason_code: run_state.awaiting_reason_code,
                 name: run_state.name,
                 triggered_by: run_state.triggered_by,
+                parent_run_id: run_state.parent_run_id,
+                parent_node_id: run_state.parent_node_id,
                 effective_repo,
             });
         }
@@ -12439,6 +12551,165 @@ fn inject_frozen_node_provisioning(response: &mut serde_json::Value, events: &[e
             }
         }
     }
+}
+
+/// One child Run of `GET /runs/{run_id}/children` — the read model the
+/// Orchestration view consumes. Ordinary projection fields, plus a cost
+/// **derived on read** through the cost cache, never persisted (ADR-0052):
+/// `None` means unavailable and the surface renders "—", never `$0`.
+#[derive(Serialize)]
+struct RunChildEntry {
+    run_id: String,
+    pipeline_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    status: event_log::RunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    /// Derived on read via the cost cache (ADR-0052) — never persisted. Absent
+    /// (JSON `null`/omitted) when the cost is unavailable: the surface renders
+    /// "—", never `$0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<event_log::CostStat>,
+}
+
+/// One group of `GET /runs/{run_id}/children`: all children spawned by ONE
+/// node's sessions of the parent Run. `node_id: None` groups the (theoretically
+/// impossible but tolerated) children whose `RunStarted` carried no node id —
+/// grouped last, never dropped.
+#[derive(Serialize)]
+struct RunChildrenGroup {
+    node_id: Option<String>,
+    children: Vec<RunChildEntry>,
+}
+
+#[derive(Serialize)]
+struct RunChildrenResponse {
+    run_id: String,
+    nodes: Vec<RunChildrenGroup>,
+}
+
+/// `GET /runs/{run_id}/children` — the dedicated children read (ADR-0064):
+/// every Run whose mechanical `parent_run_id` is this Run, grouped by parent
+/// node, in the parent's node-definition order (unknown/absent node last),
+/// children chronological within a group. Cost and duration live HERE, not on
+/// `GET /runs` — the global list stays cheap (ADR-0052: derived on read, never
+/// persisted).
+async fn list_run_children(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    // The parent must exist, so a typo'd id is a 404 — not a silent empty list
+    // (which would be indistinguishable from a childless Run).
+    let Some((_, parent_state)) = reload_run_state_with(&state.db, &run_id).await else {
+        return (StatusCode::NOT_FOUND, "run not found").into_response();
+    };
+
+    let run_ids = match load_all_run_ids(&state.db).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("error: {e}")).into_response();
+        }
+    };
+
+    let mut by_node: HashMap<Option<String>, Vec<RunChildEntry>> = HashMap::new();
+    for child_id in run_ids {
+        if child_id == run_id {
+            continue;
+        }
+        let events = match load_events(&state.db, &child_id).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let Some(child) = event_log::project(&events) else {
+            continue;
+        };
+        if child.parent_run_id.as_deref() != Some(run_id.as_str()) {
+            continue;
+        }
+        let cost = derive_run_cost(&state, &child, &events);
+        let entry = RunChildEntry {
+            run_id: child.run_id,
+            pipeline_name: child.pipeline_name,
+            name: child.name,
+            status: child.status,
+            started_at: child.started_at,
+            completed_at: child.completed_at,
+            cost,
+        };
+        by_node.entry(child.parent_node_id).or_default().push(entry);
+    }
+
+    // Group order: the parent's own node-definition order, so the response reads
+    // like the pipeline; a group keyed by an unknown or absent node id lands last.
+    let mut nodes: Vec<RunChildrenGroup> = Vec::new();
+    let mut seen: std::collections::HashSet<Option<String>> = Default::default();
+    let mut push_group = |node_id: Option<String>, by_node: &mut HashMap<_, _>| {
+        if !seen.insert(node_id.clone()) {
+            return;
+        }
+        let mut children: Vec<RunChildEntry> = by_node.remove(&node_id).unwrap_or_default();
+        if children.is_empty() {
+            return;
+        }
+        children.sort_by(|a, b| match (&a.started_at, &b.started_at) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        nodes.push(RunChildrenGroup { node_id, children });
+    };
+    for def in &parent_state.node_defs {
+        push_group(Some(def.id.clone()), &mut by_node);
+    }
+    let mut leftover_keys: Vec<Option<String>> = by_node.keys().cloned().collect();
+    leftover_keys.sort();
+    for key in leftover_keys {
+        push_group(key, &mut by_node);
+    }
+
+    Json(RunChildrenResponse { run_id, nodes }).into_response()
+}
+
+/// Derive a Run's USD cost on read via the cost cache — the same fold
+/// `GET /runs/{id}` augments its state with, WITHOUT the LOC walk. `None` ⇒ the
+/// surface renders "—", never `$0` (ADR-0052). Not a wrapper that hides the
+/// injected roots: every input stays an explicit argument at the call edge.
+fn derive_run_cost(
+    state: &AppState,
+    run_state: &event_log::RunState,
+    events: &[event_log::Event],
+) -> Option<event_log::CostStat> {
+    let (home_root, sandbox_root) = sandbox_run::sandbox_home_roots(state).unwrap_or_else(|_| {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let sandbox = home.join(".pdo").join("sandbox");
+        (home, sandbox)
+    });
+    let projects_root = sandbox_run::transcripts_root(
+        !run_state.sandbox.is_off(),
+        &run_state.run_id,
+        &home_root,
+        &sandbox_root,
+    );
+    let prices = price_table::PriceTable::load(&home_root);
+    let stores = sandbox_run::HarnessStores::for_run(
+        !run_state.sandbox.is_off(),
+        &run_state.run_id,
+        &home_root,
+        &sandbox_root,
+    );
+    run_cost::compute_run_cost_breakdown_cached(
+        events,
+        &projects_root,
+        &stores,
+        &effective_repo_root(state, run_state),
+        &run_state.run_id,
+        &prices,
+    )
+    .cost
 }
 
 async fn get_run_events(
