@@ -66,6 +66,8 @@ function settings(): InstanceSettings {
     home: "/home/user",
     autocomplete_turn_end: { effective: false, source: "default", stored: null, env: null, default: false },
     default_auto_name: { effective: true, source: "default", stored: null, env: null, default: true },
+    manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+    manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
     update_check: { effective: true, source: "default", stored: null, env: null, default: true },
     price_table: {
       manual_path: "/home/user/.pdo/prices/models.yaml",

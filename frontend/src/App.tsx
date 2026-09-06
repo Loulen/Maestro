@@ -804,6 +804,8 @@ export default function App() {
                 initialTab={infoPanelInitialTab}
                 scrollToLine={infoPanelScrollToLine}
                 assistantId={assistantId}
+                onRefreshRun={refreshRun}
+                onOpenSettings={() => openSettings({ category: "agents", section: "pipeline-manager" })}
               />
             ) : paneOwner === "editTab" ? (
               <>

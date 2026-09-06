@@ -317,6 +317,22 @@ export interface InstanceSettings {
    */
   update_check: BoolSettingField;
   /**
+   * Manager on demand: does every new Run automatically spawn its Pipeline
+   * Manager session? **Off by default** — a Run starts managerless and the user
+   * starts one from the Manager tab when they want it. Gates ONLY the automatic
+   * spawn: a manual start from the Manager tab is always available. Stored
+   * `0`/`1` discipline like the other plain-bool knobs.
+   */
+  manager_enabled: BoolSettingField;
+  /**
+   * Manager on demand: the agent-profile NAME the manager is pinned to, or
+   * `null` (« Follow the Run » — the manager mirrors the Run's harness · model
+   * · effort). A named profile overrides the Run tier. A stored name whose
+   * profile was later deleted dangles: the Settings surface renders the #432
+   * tombstone, and the spawn falls back to « Follow the Run ».
+   */
+  manager_profile: StringSettingField;
+  /**
    * Which price tiers are in force (#427, ADR-0034) — an observed STATE, not a
    * settings knob, hence no `{effective, source, stored, env, default}` shape.
    *
@@ -475,6 +491,15 @@ export interface UpdateSettingsRequest {
   /** Version check switch (#697). Same plain-bool discipline: `false` persists as a
    *  stored `0` that beats a `PDO_UPDATE_CHECK=1`. */
   update_check?: boolean;
+  /** Manager on demand: auto-spawn the manager with each Run. Same plain-bool
+   *  discipline: `false` persists as a stored `0` that beats a
+   *  `PDO_MANAGER_ENABLED=1`. */
+  manager_enabled?: boolean;
+  /** Manager on demand: the agent-profile NAME the manager is pinned to; `""`
+   *  clears it back to « Follow the Run » (same `""`-sentinel as
+   *  `default_model`). The daemon 400s a name that does not match an existing
+   *  profile. */
+  manager_profile?: string;
 }
 
 /** How the running binary was installed (#697) — what a future Update delegates to. */
@@ -1072,6 +1097,13 @@ export interface RunState {
    * on older payloads.
    */
   sessions_spawned?: number;
+  /**
+   * Manager on demand: whether the Run's Pipeline Manager session exists RIGHT
+   * NOW — an observed fact probed in tmux at fetch time, never a projected one
+   * (a manual stop, the orphan sweep or a daemon restart would desynchronise a
+   * derived flag). Absent on older payloads, read as `false`.
+   */
+  has_manager?: boolean;
   /**
    * Lines changed for the run (`git diff --numstat` of the run branch, `.pdo/`
    * excluded), or null/absent once the branch is gone (archived/cleaned) — the
