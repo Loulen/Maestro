@@ -10,6 +10,23 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.68.0
+
+**Liaison forte orchestrateur ↔ enfants** (#724 ; story #709, spec #719, ADR-0064). Un nœud
+portant le toggle « Orchestrator » (posé par #723, gelé dans le snapshot `node_defs` de
+`RunStarted`) ne peut plus se compléter tant que ses runs enfants (`parent_run_id` +
+`parent_node_id`, ADR-0064) sont non terminaux : `pdo complete` est refusé en 409
+`children_pending` avec compteur (active/failed, exit 3 recoverable tant qu'aucun enfant n'a
+échoué, exit 4 dès qu'un enfant est `failed`). Au refus, un marqueur `NodeAwaitingUser`
+(`reason: children_pending`, idempotent) parque le nœud et arme un watcher détaché qui, dès que
+tous les enfants sont terminaux sans échec, complète le nœud par la voie commune (source
+`children_settled` — livraison, validation, terminal, advance identiques à un `pdo complete`).
+Un enfant `awaiting_user`/`paused` retient aussi le nœud ; l'arbitrage utilisateur (retry,
+`Mark complete`) ou le forçage `mark_node_done` — volontairement non gated — dénouent. Aucune
+propagation de mort vers le bas : la liaison ne fait que lire — stop, archive et forget du
+parent ne touchent pas les enfants, un restart ré-adopte les enfants vivants, et un nœud sans
+toggle n'est jamais retenu.
+
 ## 1.66.0
 
 **`pdo run create <pipeline>` — créer un run enfant depuis une session de nœud** (#721 ; story #709,
