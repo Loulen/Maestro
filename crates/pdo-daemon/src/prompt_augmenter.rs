@@ -855,7 +855,26 @@ pub(crate) fn build_preamble(ctx: &AugmentContext<'_>) -> String {
 
 pub(crate) fn build_full_prompt(ctx: &AugmentContext<'_>, role_prompt: &str) -> String {
     let preamble = build_preamble(ctx);
-    format!("{preamble}---\n\n{role_prompt}")
+    if ctx.node.orchestrator {
+        format!("{preamble}---\n\n{role_prompt}{}", orchestrator_amendment())
+    } else {
+        format!("{preamble}---\n\n{role_prompt}")
+    }
+}
+
+/// The fixed « Orchestration » amendment (#723, ADR-0064) appended AFTER the
+/// role prompt of a node whose `orchestrator` toggle is on. The invocation line
+/// plus the contract block: PDO files it at spawn — rendered to the session,
+/// never editable, never present in the author's prompt textarea — so the
+/// toggle and the text cannot drift. Mirrors the block the UI shows attached
+/// under the prompt textarea (NodeInspector) byte for byte.
+fn orchestrator_amendment() -> String {
+    "\n\n---\n\n/pdo-orchestrate\n\
+     \n\
+     ## Orchestration\n\
+     You may create child runs with `pdo run create`. This node completes\n\
+     only once every child run is terminal; a failed child parks it awaiting you.\n"
+        .to_string()
 }
 
 /// Middle tier of `stored → env → default(true)`; resolved by
@@ -1912,6 +1931,36 @@ mod tests {
         assert!(full.contains("# PDO Runtime Preamble"));
         assert!(full.contains("You are a planner. Plan well."));
         assert!(full.contains("---"));
+    }
+
+    #[test]
+    fn orchestrator_prompt_carries_the_amendment_after_the_role() {
+        // #723 / ADR-0064: the toggle on ⇒ the invocation line + the contract
+        // block are filed AFTER the role prompt, at spawn — never in the
+        // author's textarea. Toggle off ⇒ byte-identical to the pre-#723
+        // prompt.
+        let mut pipeline = sample_pipeline();
+        pipeline.nodes[0].orchestrator = true;
+        let node = &pipeline.nodes[0];
+        let vars = HashMap::new();
+        let ctx = sample_ctx(&pipeline, node, &vars);
+
+        let full = build_full_prompt(&ctx, "You are a planner. Plan well.");
+        let after_role = full
+            .split("You are a planner. Plan well.")
+            .nth(1)
+            .expect("role prompt present");
+        assert!(after_role.contains("/pdo-orchestrate"));
+        assert!(after_role.contains("## Orchestration"));
+        assert!(after_role.contains("pdo run create"));
+        assert!(after_role.contains("a failed child parks it awaiting you"));
+        // The role prompt itself is untouched by the amendment.
+        assert!(!full.starts_with("/pdo-orchestrate"));
+
+        let plain_pipeline = sample_pipeline();
+        let plain = sample_ctx(&plain_pipeline, &plain_pipeline.nodes[0], &vars);
+        let bare = build_full_prompt(&plain, "You are a worker. Work.");
+        assert!(!bare.contains("/pdo-orchestrate"), "a node without the toggle keeps its pre-#723 prompt");
     }
 
     #[test]

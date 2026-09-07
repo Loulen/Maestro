@@ -44,6 +44,10 @@ import { anchorHandleId, anchorsByDropOnBody, chooseAnchorSide, isEmergentInputN
 import { useAgentProfiles } from "../hooks/useAgentProfiles";
 import { useSkillBank } from "../hooks/useSkillBank";
 import { Bookmark, SlidersHorizontal, TriangleAlert } from "lucide-react";
+// #723 — orchestrator pastilles on the run-view node card.
+import { ChildCountPills } from "./OrchestrationTab";
+import { childrenOfNode, countChildren, totalChildren, useRunChildren } from "../lib/orchestration";
+import type { ChildCounts } from "../lib/orchestration";
 
 // The four emergent body anchor handles (#168), each pinned to its side-centre
 // with the matching xyflow `Position` so a bound incoming edge arrives from that
@@ -83,6 +87,10 @@ interface EditNodeData {
   // Absent on non-member nodes and on multi-member regions (boxed instead).
   loopBadge?: { text: string; kind: LoopKind };
   agentMode?: "inherit" | "profile" | "custom" | "broken";
+  /** #723: the node carries the « Orchestrator » toggle (ADR-0064). */
+  orchestrator?: boolean;
+  /** #723: child-run counters of an orchestrator node (run view only). */
+  childCounts?: ChildCounts;
   [key: string]: unknown;
 }
 
@@ -205,6 +213,14 @@ export function EditNode({ data, id, selected }: NodeProps<Node<EditNodeData>>) 
           </span>
         )}
       </div>
+      {/* #723 — orchestrator pastilles: a row under the title (the card grows
+          a line); omitted entirely without children, so a node that never
+          orchestrated stays byte-identical. */}
+      {data.childCounts && totalChildren(data.childCounts) > 0 && (
+        <div className="mt-1.5 flex items-center gap-2 pl-[22px]" data-testid="node-child-pills-row">
+          <ChildCountPills counts={data.childCounts} size="xs" testId="node-child-pills" />
+        </div>
+      )}
       {inputImages.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5" data-testid="start-node-images">
           {inputImages.map((name) => (
@@ -413,9 +429,20 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
   // #669: the bank's ids, for the missing-skill lint above the canvas.
   const { bank: skillBank, loaded: skillBankLoaded } = useSkillBank();
   const skillIds = useMemo(() => new Set(skillBank.skills.map((skill) => skill.id)), [skillBank]);
+  // #723 — children of the run, polled with the view; mapped onto the cards of
+  // nodes whose frozen `orchestrator` toggle is on. Template tabs never poll
+  // (no run state → no children) and stay untouched.
+  const runChildren = useRunChildren(activeRunState?.run_id ?? null, activeRunState != null);
   const derivedNodes = useMemo(() => {
     if (!pipeline) return [];
-    const cards = deriveEditNodes(pipeline, activeRunState, agentProfileIds);
+    const cards = deriveEditNodes(pipeline, activeRunState, agentProfileIds).map((card) => {
+      if (!(card.data as { orchestrator?: boolean }).orchestrator) return card;
+      const runId = activeRunState?.run_id ?? null;
+      if (!runId) return card;
+      const nodeChildren = childrenOfNode(runChildren, runId, card.id);
+      if (nodeChildren.length === 0) return card;
+      return { ...card, data: { ...card.data, childCounts: countChildren(nodeChildren) } };
+    });
     // Bounded loop regions (ADR-0011 / #148) render as translucent boxes BEHIND
     // their member cards. Each multi-member region is backed by a decorative,
     // non-interactive `loopRegion` node so it tracks pan/zoom with the graph;
@@ -429,7 +456,7 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
     // pipeline alone (independent of run state).
     const noteNodes: Node[] = buildNoteNodes(pipeline);
     return [...regionNodes, ...cards, ...noteNodes];
-  }, [pipeline, activeRunState, agentProfileIds]);
+  }, [pipeline, activeRunState, agentProfileIds, runChildren]);
   const derivedEdges = useMemo(
     () => (pipeline ? deriveEditEdges(pipeline) : []),
     [pipeline],

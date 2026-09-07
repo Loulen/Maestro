@@ -54,7 +54,10 @@ export const SEMANTIC_FIELDS: Record<SerializerScope, readonly string[]> = {
   // library star and the pipeline diff must both see it.
   // #669/ADR-0062: `skills` is SEMANTIC — the skills a node carries change what
   // its NodeRun works with, so a selection edit versions the pipeline.
-  node: ["id", "name", "type", "interactive", "agent_choice", "skills", "pin_harness", "harnesses", "provisioning", "max_iter", "isolated_worktree", "inputs", "outputs"] satisfies (keyof NodeDef)[],
+  // #723/ADR-0064: `orchestrator` is SEMANTIC for the same reason the backend's
+  // NodeProjection already says — it changes the node's completion contract,
+  // its prompt at spawn and its skills.
+  node: ["id", "name", "type", "interactive", "agent_choice", "skills", "pin_harness", "harnesses", "provisioning", "max_iter", "isolated_worktree", "orchestrator", "inputs", "outputs"] satisfies (keyof NodeDef)[],
   // `side` is SEMANTIC today (emitted, not stripped) — deliberate, see #355 D5:
   // the node-library star already treats port side as identity, so the pipeline
   // diff must agree or the two stars contradict each other on the same edit.

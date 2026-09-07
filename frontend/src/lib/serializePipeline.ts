@@ -100,6 +100,11 @@ export function pipelineToYamlObject(p: PipelineDef): Record<string, unknown> {
     // emitted for `merge` (isolated by construction) or a structural node.
     const isolation = nodeIsolation(n);
     if (isolation !== null) node.isolated_worktree = isolation;
+    // #723/ADR-0064: the « Orchestrator » toggle. Emitted only when on, like
+    // `interactive` — a node without the toggle serializes byte-identically to
+    // its pre-#723 shape. Must be mirrored in `exportNodeAsYaml` below and
+    // classified in `layoutFields.ts` (SEMANTIC_FIELDS.node).
+    if (n.orchestrator) node.orchestrator = true;
     // #550/ADR-0046: the harness axis replaces flat `model:`/`effort:`. The pin is
     // emitted when set; the flat model/effort view is folded back into the
     // resolved harness's entry in the per-harness `harnesses` map, emitted only
@@ -303,6 +308,9 @@ export function exportNodeAsYaml(node: NodeDef, prompt: string): string {
   // carries its worktree placement, so a re-import does not re-guess it.
   const isolation = nodeIsolation(node);
   if (isolation !== null) obj.isolated_worktree = isolation;
+  // #723/ADR-0064: same conditional emit as `pipelineToYamlObject` — the
+  // « Orchestrator » toggle travels with an exported node.
+  if (node.orchestrator) obj.orchestrator = true;
   if (node.pin_harness) obj.pin_harness = node.pin_harness;
   if (node.agent_choice && node.agent_choice.mode !== "inherit") {
     obj.agent_choice = node.agent_choice;

@@ -113,6 +113,12 @@ export function deriveEditNodes(
         // collection (#151) or `↻ ...` for a single-member bounded loop (#173).
         // Absent on non-member nodes and multi-member regions (boxed instead).
         loopBadge,
+        // #723/ADR-0064: the node's « Orchestrator » toggle. On a live Run the
+        // FROZEN answer (the snapshot's NodeDefInfo) wins, exactly like
+        // `isolated` above; on a template the document says. The canvas pastilles
+        // (EditCanvas) attach the child counters to cards where this is true.
+        orchestrator:
+          runState?.node_defs?.find((d) => d.id === n.id)?.orchestrator ?? n.orchestrator ?? false,
       },
     };
   });

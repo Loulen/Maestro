@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Settings, BarChart3 } from "lucide-react";
+import { ArrowLeft, GitFork, Settings, BarChart3 } from "lucide-react";
 import { useDaemonSocket } from "./hooks/useDaemonSocket";
 import type { ConnectionStatus } from "./hooks/useDaemonSocket";
 import { useResizableLayout } from "./hooks/useResizableLayout";
@@ -493,6 +493,9 @@ export default function App() {
           provisioningRepository={selectedRun.target_repo ?? ""}
           inheritedProvisioning={selectedRun.provisioning_rules}
           provisioningGitRef={`pdo/run-${selectedRun.run_id}`}
+          isOrchestratorNode={selectedRun.node_defs?.find((d) => d.id === selection.id)?.orchestrator ?? false}
+          onOpenChildRun={handleOpenChildRun}
+          initialDetailTab={landOnOrchestration === runNode.node_id ? "orchestration" : "io"}
         />
       );
     }
@@ -588,15 +591,36 @@ export default function App() {
     setSelection({ kind: "node", id: nodeId });
   }, [selectedRun, selection.kind, selection.id, setSelection]);
 
+  // #723 — the way back from a child run opened in an Orchestration tab: parent
+  // run + orchestrator node. Declared before `handleSelectRun`, which clears
+  // both on any navigation — the bar's visibility is derived (child run
+  // selected), so no effect ever needs to reconcile them.
+  const [orchestratorReturn, setOrchestratorReturn] = useState<{
+    parentRunId: string;
+    parentRunName: string;
+    nodeId: string;
+    nodeName: string;
+    childRunId: string;
+  } | null>(null);
+  // One-shot landing: set by the back gesture, consumed by the remount of the
+  // orchestrator's NodeDetailPanel (I/O stays the default everywhere else).
+  const [landOnOrchestration, setLandOnOrchestration] = useState<string | null>(null);
+
   const handleSelectRun = useCallback(
     async (runId: string) => {
+      // #723: any navigation away from the child run ends the back-bar story
+      // and any pending Orchestration-tab landing — both are one gesture old.
+      // (Purely derived visibility does the rest: the bar only ever renders
+      // while the child run is the selected one.)
+      setOrchestratorReturn(null);
+      setLandOnOrchestration(null);
       setSelectedTriggerId(null);
       setSelectedRunId(runId);
       selectRun(runId);
       setSelectedNodeId(null);
       await openRunPipeline(runId);
     },
-    [selectRun, openRunPipeline],
+    [selectRun, openRunPipeline, setOrchestratorReturn, setLandOnOrchestration],
   );
 
   const handleRunCreated = useCallback(
@@ -606,6 +630,35 @@ export default function App() {
     },
     [refreshRuns, handleSelectRun],
   );
+
+  // #723 — opening a child run from the Orchestration tab: record the way back
+  // (parent run + orchestrator node) AFTER the navigation, so the shared
+  // `handleSelectRun`'s clear does not wipe it.
+  const handleOpenChildRun = useCallback(
+    async (childRunId: string) => {
+      if (!selectedRun || selection.kind !== "node" || !selection.id) return;
+      const entry = {
+        parentRunId: selectedRun.run_id,
+        parentRunName: selectedRun.name || selectedRun.pipeline_name,
+        nodeId: selection.id,
+        nodeName:
+          selectedRun.node_defs?.find((d) => d.id === selection.id)?.name ?? selection.id,
+        childRunId,
+      };
+      await handleSelectRun(childRunId);
+      setOrchestratorReturn(entry);
+    },
+    [selectedRun, selection, handleSelectRun, setOrchestratorReturn],
+  );
+  const handleBackToOrchestrator = useCallback(async () => {
+    if (!orchestratorReturn) return;
+    const { parentRunId, nodeId } = orchestratorReturn;
+    await handleSelectRun(parentRunId);
+    // One-shot landing: the panel remounts on this selection and seeds its
+    // detail tab from it — two gestures deep, two gestures back.
+    setLandOnOrchestration(nodeId);
+    setSelection({ kind: "node", id: nodeId });
+  }, [orchestratorReturn, handleSelectRun, setSelection, setLandOnOrchestration]);
 
   useEffect(() => {
     // #315: never fire a save for an archived run — the tab is read-only and a
@@ -761,6 +814,25 @@ export default function App() {
             {hasEditTab ? (
               <div className="flex h-full min-w-0 flex-col">
                 <TabBar />
+                {orchestratorReturn && selectedRun?.run_id === orchestratorReturn.childRunId && (
+                  <button
+                    type="button"
+                    data-testid="orchestrator-back-bar"
+                    onClick={handleBackToOrchestrator}
+                    className="flex shrink-0 cursor-pointer items-center gap-1.5 border-b border-line bg-bg-2 px-3 py-1 text-fg-3 transition-colors hover:text-fg"
+                    style={{ fontSize: "11px" }}
+                    title="Back to the orchestrator node, on its Orchestration tab"
+                  >
+                    <ArrowLeft size={12} />
+                    <span>
+                      Back to <span className="font-medium text-fg-2">{orchestratorReturn.nodeName}</span>
+                      <span className="text-fg-4"> · {orchestratorReturn.parentRunName}</span>
+                    </span>
+                    <span className="ml-auto flex items-center gap-1 text-fg-4" style={{ fontSize: "10px" }}>
+                      <GitFork size={10} /> child run
+                    </span>
+                  </button>
+                )}
                 <EditCanvas
                   libraryEntries={libraryEntries}
                   onLibraryDelete={async (name) => {
@@ -876,6 +948,9 @@ export default function App() {
                     runId={selectedRun.run_id}
                     isArchived={isArchived}
                     nodeName={selectedRun.node_defs?.find((d) => d.id === selectedNodeId)?.name}
+                    isOrchestratorNode={selectedRun.node_defs?.find((d) => d.id === selectedNodeId)?.orchestrator ?? false}
+                    onOpenChildRun={handleOpenChildRun}
+                    initialDetailTab={landOnOrchestration === selectedNode.node_id ? "orchestration" : "io"}
                   />
                 )}
                 {!selectedNode && selectedNodeType !== "start" && isArchived && selectedRun && (

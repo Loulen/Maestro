@@ -228,6 +228,27 @@ describe("serializePipeline round-trip: YAML structural correctness", () => {
     expect(typeIndent).toBe(allowedIndent);
   });
 
+  it("serializes the orchestrator toggle only when on (#723)", () => {
+    const plain: NodeDef = {
+      id: "plain", name: "plain", type: "agent",
+      inputs: [],
+      outputs: [{ name: "out", repeated: false, side: "right" }],
+      interactive: false,
+    };
+    // A node without the toggle serializes byte-identically to its pre-#723
+    // shape — the key is absent, like `interactive`.
+    expect(serializePipeline(makeFullPipeline([plain]))).not.toContain("orchestrator:");
+
+    const orchestrator: NodeDef = {
+      ...plain,
+      id: "orch", name: "orch",
+      orchestrator: true,
+      skills: [{ id: "pdo-orchestrate", name: "pdo-orchestrate" }],
+    };
+    const yaml = serializePipeline(makeFullPipeline([orchestrator]));
+    expect(yaml).toContain("orchestrator: true");
+  });
+
   it("round-trips multiline output instructions and omits blank values", () => {
     const reviewer: NodeDef = {
       id: "reviewer", name: "reviewer", type: "agent",
