@@ -95,13 +95,27 @@ pub(crate) enum ObservedIdentitySource {
     /// The source names the model **per message** (claude's transcript); the
     /// effort is never written by the source, so it stays requested.
     ModelPerMessage,
-    /// The source names both the model and the effort (`pi` per message,
-    /// `copilot` per usage point). **Deferred**: no first-party harness returns
-    /// this yet — they declare `None` explicitly until their ticket (ADR-0051:
-    /// `None` is a declared absence, not a missing dispatch), so both values
-    /// fall back to the requested ones.
-    #[allow(dead_code)] // the variant IS the next harness ticket's dispatch target
+    /// The source names both the model and the effort — `pi` per message plus
+    /// its thinking-level change events, `copilot` at the usage points with the
+    /// reasoning effort then in force (#736). The observed values win over the
+    /// requested ones and say so (`ModelEffortSlice::effort_observed`).
     ModelAndEffort,
+}
+
+impl ObservedIdentitySource {
+    /// How this source reads in the published support table
+    /// ([`crate::harness_support`]). The label lives on the variant so the table
+    /// can never describe a mechanism the code no longer dispatches to.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ObservedIdentitySource::ModelPerMessage => {
+                "observed — the model per message; the effort stays requested"
+            }
+            ObservedIdentitySource::ModelAndEffort => {
+                "observed — the model and the effort, from the source"
+            }
+        }
+    }
 }
 
 impl CostSource {
@@ -709,6 +723,12 @@ impl HarnessProbes for CopilotProbes {
     fn cost_source(&self) -> Option<CostSource> {
         Some(CostSource::ReportedByConstant)
     }
+    /// The journal names the model and the reasoning effort at session opening,
+    /// moves them with the `session.model_change` events, and names the model at
+    /// every usage point (measured 1.0.83, #736) — both values observed.
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        Some(ObservedIdentitySource::ModelAndEffort)
+    }
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         Some(TranscriptResolution::CopilotEventsJsonl)
     }
@@ -797,6 +817,12 @@ impl HarnessProbes for PiProbes {
     /// A **reported** cost (ADR-0052) of constant 1.0: already in dollars.
     fn cost_source(&self) -> Option<CostSource> {
         Some(CostSource::ReportedByConstant)
+    }
+    /// The session names the model and the provider on every message and the
+    /// thinking level on its `thinking_level_change` events (measured 0.85.1,
+    /// #736) — both values observed.
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        Some(ObservedIdentitySource::ModelAndEffort)
     }
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         Some(TranscriptResolution::PiJsonlById)
@@ -1218,8 +1244,16 @@ mod tests {
             observed_identity_source(CLAUDE),
             Some(ObservedIdentitySource::ModelPerMessage)
         );
-        assert_eq!(observed_identity_source(COPILOT), None);
-        assert_eq!(observed_identity_source(PI), None);
+        assert_eq!(
+            observed_identity_source(COPILOT),
+            Some(ObservedIdentitySource::ModelAndEffort),
+            "the journal names the model and the effort (measured 1.0.83, #736)"
+        );
+        assert_eq!(
+            observed_identity_source(PI),
+            Some(ObservedIdentitySource::ModelAndEffort),
+            "the session names the model per message and the thinking level (measured 0.85.1, #736)"
+        );
         assert_eq!(observed_identity_source(OPENCODE), None);
         assert_eq!(observed_identity_source("never-seen"), None);
     }

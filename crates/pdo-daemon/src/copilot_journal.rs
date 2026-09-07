@@ -97,6 +97,127 @@ fn max_total_nano_aiu(journal: &str) -> Option<u64> {
     max
 }
 
+/// One observed model × effort group of a copilot session (#736, ADR-0065 §1):
+/// the model in effect at the session's usage points (its own `totalNanoAiu`
+/// deltas — the harness's reported spend, already converted by the published
+/// constant) with the reasoning effort then in force.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ObservedUsage {
+    pub model: String,
+    pub effort: Option<String>,
+    /// The group's delta of `totalNanoAiu`, converted to USD.
+    pub usd: f64,
+}
+
+/// The single model id a usage event's `modelCacheState` names, if any. Several
+/// distinct ids in one checkpoint (a change in the middle of a billing window)
+/// is an ambiguity the fold refuses to guess out of — `None` sends the delta to
+/// the tracked model instead. `auto` is the picker, not a model id.
+fn single_cache_model(data: Option<&serde_json::Value>) -> Option<String> {
+    let ids: std::collections::BTreeSet<&str> = data?
+        .get("modelCacheState")?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.get("modelId").and_then(|m| m.as_str()))
+        .filter(|m| !m.is_empty() && *m != "auto")
+        .collect();
+    if ids.len() == 1 {
+        ids.into_iter().next().map(String::from)
+    } else {
+        None
+    }
+}
+
+/// The observed model × effort ventilation of one copilot journal (#736): the
+/// spend each usage event adds (the `totalNanoAiu` delta — the field is a
+/// running cumulative total) attributed to the model in effect at that point,
+/// grouped by model × effort in first-appearance order. The model in effect is
+/// the session's opening selection (`session.start`) as moved by the
+/// `session.model_change` events; the usage point's own `modelCacheState` wins
+/// when it names exactly one real model (the resolution of an `auto` picker).
+/// A delta whose model stays unresolvable is not attributed to anything —
+/// nothing is invented. Pure and tolerant, like every reader here.
+pub(crate) fn observed_usage(journal: &str) -> Vec<ObservedUsage> {
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
+    let mut prev_nano: u64 = 0;
+    let mut groups: Vec<ObservedUsage> = Vec::new();
+    let mut index: std::collections::HashMap<(String, Option<String>), usize> =
+        std::collections::HashMap::new();
+    for raw in journal.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let data = v.get("data");
+        let field = |name: &str| {
+            data.and_then(|d| d.get(name))
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        match ty {
+            // The chosen model and reasoning effort at session opening (measured
+            // 1.0.83: both ride `data` when the session is launched with them).
+            "session.start" => {
+                model = field("selectedModel").or(model);
+                effort = field("reasoningEffort").or(effort);
+            }
+            // A model change carries the new id and (when it moves) the effort;
+            // a change without an effort keeps the one in force.
+            "session.model_change" => {
+                if let Some(m) = field("newModel") {
+                    model = Some(m);
+                }
+                if let Some(e) = data
+                    .and_then(|d| d.get("reasoningEffort"))
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    effort = Some(e.to_string());
+                }
+            }
+            "session.usage_checkpoint" | "session.shutdown" => {
+                let Some(nano) = data
+                    .and_then(|d| d.get("totalNanoAiu"))
+                    .and_then(|n| n.as_u64())
+                else {
+                    continue;
+                };
+                let delta = nano.saturating_sub(prev_nano);
+                if nano > prev_nano {
+                    prev_nano = nano;
+                }
+                if delta == 0 {
+                    continue;
+                }
+                let Some(attributed) =
+                    single_cache_model(data).or_else(|| model.clone().filter(|m| m != "auto"))
+                else {
+                    continue;
+                };
+                let key = (attributed.clone(), effort.clone());
+                let entry = match index.get(&key) {
+                    Some(&i) => &mut groups[i],
+                    None => {
+                        groups.push(ObservedUsage {
+                            model: attributed,
+                            effort: effort.clone(),
+                            usd: 0.0,
+                        });
+                        let i = groups.len() - 1;
+                        index.insert(key, i);
+                        &mut groups[i]
+                    }
+                };
+                entry.usd += nano_aiu_to_usd(delta);
+            }
+            _ => {}
+        }
+    }
+    groups
+}
+
 /// The event types that mark the shape of a turn, in the order they decide a
 /// tail's verdict. Only these three are consulted; usage/shutdown/info events that
 /// trail a turn do not change whether the turn *ended*.
@@ -220,6 +341,56 @@ mod tests {
         assert!(
             (reported_cost_usd(&journal).unwrap() - nano_aiu_to_usd(5_000_000_000)).abs() < 1e-12
         );
+    }
+
+    /// One more test case (#736): the observed model × effort ventilation, cut
+    /// from a measured 1.0.83 journal — the opening names model + effort, a
+    /// model_change moves the effort, the usage point confirms the model.
+    #[test]
+    fn observed_usage_names_the_model_and_effort_at_the_usage_points() {
+        let start = r#"{"type":"session.start","data":{"selectedModel":"gpt-5.6-sol","reasoningEffort":"medium"}}"#;
+        let change = r#"{"type":"session.model_change","data":{"newModel":"gpt-5.6-sol","previousReasoningEffort":"low","reasoningEffort":"high"}}"#;
+        let cp1 = r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":10000000000,"modelCacheState":[{"modelId":"gpt-5.6-sol"}]}}"#;
+        let cp2 = r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":30000000000,"modelCacheState":[{"modelId":"gpt-5.6-sol"}]}}"#;
+        let usage = observed_usage(&format!(
+            "{start}\n{TURN_START}\n{TURN_END}\n{cp1}\n{change}\n{TURN_START}\n{TURN_END}\n{cp2}\n{SHUTDOWN}\n"
+        ));
+        assert_eq!(usage.len(), 2, "one group per effort in force");
+        assert_eq!(usage[0].model, "gpt-5.6-sol");
+        assert_eq!(usage[0].effort.as_deref(), Some("medium"));
+        assert!((usage[0].usd - nano_aiu_to_usd(10_000_000_000)).abs() < 1e-12);
+        assert_eq!(usage[1].effort.as_deref(), Some("high"));
+        // The shutdown event re-reports the same cumulative total: zero delta.
+        assert!((usage[1].usd - nano_aiu_to_usd(20_000_000_000)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn observed_usage_resolves_an_auto_picker_at_the_usage_point() {
+        // The measured hazard: the session opens on `auto` (the picker, not a
+        // model); the usage point's modelCacheState names the real model.
+        let start = r#"{"type":"session.start","data":{}}"#;
+        let initial = r#"{"type":"session.model_change","data":{"cause":"initial_resolution","newModel":"auto","reasoningEffort":null}}"#;
+        let cp = r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":5000000000,"modelCacheState":[{"modelId":"gpt-5.6-sol"}]}}"#;
+        let usage = observed_usage(&format!("{start}\n{initial}\n{cp}\n"));
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].model, "gpt-5.6-sol");
+        assert_eq!(usage[0].effort, None);
+    }
+
+    #[test]
+    fn observed_usage_is_empty_without_a_usage_reading_or_a_resolvable_model() {
+        // No checkpoints: nothing cost anything, nothing is attributed.
+        let start = r#"{"type":"session.start","data":{"selectedModel":"gpt-5.6-sol","reasoningEffort":"low"}}"#;
+        assert!(observed_usage(start).is_empty());
+        assert!(observed_usage("").is_empty());
+        // A checkpoint with an unresolvable model (pure `auto`, no cache state)
+        // is not attributed to anything — nothing is invented.
+        let auto = r#"{"type":"session.model_change","data":{"newModel":"auto"}}"#;
+        let bare = r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":5000000000}}"#;
+        assert!(observed_usage(&format!("{auto}\n{bare}\n")).is_empty());
+        // Torn lines are skipped, never propagated.
+        let cp = r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":1000000000}}"#;
+        assert!(observed_usage(&format!("{auto}\n{{not json\n{cp}\n")).is_empty());
     }
 
     #[test]

@@ -26,16 +26,17 @@ use crate::harness_registry::{embedded_floor, validated_version};
 pub const BEGIN_MARKER: &str = "<!-- support-table:begin -->";
 pub const END_MARKER: &str = "<!-- support-table:end -->";
 
-/// One of the six capabilities the support table publishes, in publication order.
+/// One of the seven capabilities the support table publishes, in publication order.
 ///
-/// A closed enum is right *here* (unlike the harness axis, ADR-0045): the six are
-/// the trait's six methods, so a seventh capability is a code change in
+/// A closed enum is right *here* (unlike the harness axis, ADR-0045): the seven are
+/// the trait's methods, so an eighth capability is a code change in
 /// [`crate::harness_probes`] anyway — and this `match` is then the compiler's
 /// reminder to publish it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capability {
     Cost,
     Transcript,
+    ObservedIdentity,
     TurnEnd,
     UsageLimit,
     Staging,
@@ -43,10 +44,11 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
-    /// The six, in the order the table lists them.
-    pub(crate) const ALL: [Capability; 6] = [
+    /// The seven, in the order the table lists them.
+    pub(crate) const ALL: [Capability; 7] = [
         Capability::Cost,
         Capability::Transcript,
+        Capability::ObservedIdentity,
         Capability::TurnEnd,
         Capability::UsageLimit,
         Capability::Staging,
@@ -58,6 +60,7 @@ impl Capability {
         match self {
             Capability::Cost => "Cost",
             Capability::Transcript => "Transcript",
+            Capability::ObservedIdentity => "Observed model & effort",
             Capability::TurnEnd => "End of turn",
             Capability::UsageLimit => "Usage-limit menu",
             Capability::Staging => "Sandbox staging set",
@@ -71,6 +74,9 @@ impl Capability {
         match self {
             Capability::Cost => "Show the Run cost",
             Capability::Transcript => "Find the session transcript",
+            Capability::ObservedIdentity => {
+                "Show the model and effort the execution actually ran on (Stats › Cost › By model)"
+            }
             Capability::TurnEnd => "Complete a node when its turn ends",
             Capability::UsageLimit => "Detect the harness usage-limit menu",
             Capability::Staging => {
@@ -88,6 +94,9 @@ impl Capability {
         match self {
             Capability::Cost => p.cost_source().map(|c| c.label()),
             Capability::Transcript => p.transcript_resolution().map(|t| t.label()),
+            Capability::ObservedIdentity => p
+                .observed_identity_source()
+                .map(crate::harness_probes::ObservedIdentitySource::label),
             Capability::TurnEnd => p.turn_end_substrate().map(|t| t.label()),
             Capability::UsageLimit => p.usage_limit_anchor().map(|u| u.label()),
             Capability::Staging => p.staging_set().map(|s| s.label()),
@@ -258,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn render_names_every_harness_its_version_and_the_six_capabilities() {
+    fn render_names_every_harness_its_version_and_the_seven_capabilities() {
         let block = render();
         for d in embedded_floor() {
             assert!(

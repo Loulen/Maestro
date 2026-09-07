@@ -108,6 +108,10 @@ pub(crate) struct ModelEffortSlice {
     /// `Some(false)` = requested, `Some(true)` = observed, `None` when `effort`
     /// is `None` (not set has no provenance to show).
     pub effort_observed: Option<bool>,
+    /// The provider the source named for this model (`pi` via openrouter), the
+    /// tooltip's « via … » — never part of the identity (ADR-0065 §2). `None`
+    /// for a source that does not name one (`claude`, `copilot`).
+    pub provider: Option<String>,
     pub usd: Option<f64>,
     /// Derived (transcript × price table) — the wire's `~` flag. A reported
     /// slice (`copilot`, `pi`) and an unreadable one are not estimates of this
@@ -350,39 +354,61 @@ fn collect_executions(
 }
 
 /// A **reported** cost for one execution (ADR-0052 §2), read from the store its
-/// harness's probes resolve: `(usd, unavailable_reason, reported_in_usd)`.
+/// harness's probes resolve, together with the observed model × effort slices
+/// the same source names (#736, ADR-0065 §1): `(usd, unavailable_reason,
+/// reported_in_usd, slices)`.
 ///
 /// - `copilot`: the journal's cumulative `totalNanoAiu` × the published constant
-///   ([`crate::copilot_journal`]); converted, so not `reported_in_usd`.
+///   ([`crate::copilot_journal`]); converted, so not `reported_in_usd`. The
+///   slices come from the same journal — the model in effect at the usage
+///   points, with the reasoning effort then in force.
 /// - `pi`: the sum of `usage.cost.total` over the session's assistant messages,
 ///   **already in dollars** (constant 1.0, [`crate::pi_session`]) — `reported_in_usd`.
 ///   A message with tokens but no cost makes the figure **unavailable** with its
-///   reason ("catalogue absent"), never `$0`.
+///   reason ("catalogue absent"), never `$0`. The slices come from the same
+///   session — the per-message model and provider, the thinking level in effect.
 ///
 /// Attribution is by the imposed session identity (both harnesses); `pi` also needs
 /// the working directory, whose folder its file lives in. A reading exists
 /// mid-session for both, so a live node has a cost rather than a "—" until its reap.
-fn reported_execution_cost(
+fn reported_execution(
     execution: &Execution,
     stores: &HarnessStores,
-) -> (Option<f64>, Option<String>, bool) {
+) -> (Option<f64>, Option<String>, bool, Vec<ModelEffortSlice>) {
     let Some(session_id) = execution.session_id.as_deref() else {
-        return (None, Some("missing session identity".to_string()), false);
+        return (
+            None,
+            Some("missing session identity".to_string()),
+            false,
+            Vec::new(),
+        );
     };
     if execution.harness == crate::harness_registry::COPILOT {
-        let usd = std::fs::read_to_string(stores.copilot.join(session_id).join("events.jsonl"))
-            .ok()
-            .and_then(|journal| crate::copilot_journal::reported_cost_usd(&journal));
+        let text =
+            std::fs::read_to_string(stores.copilot.join(session_id).join("events.jsonl")).ok();
+        let usd = text
+            .as_deref()
+            .and_then(crate::copilot_journal::reported_cost_usd);
+        let slices = text
+            .as_deref()
+            .map(observed_slices_from_copilot)
+            .unwrap_or_default();
         return (
             usd,
             usd.is_none()
                 .then(|| "no reported cost reading".to_string()),
             false,
+            slices,
         );
     }
     if execution.harness == crate::harness_registry::PI {
         let Some(working_dir) = execution.working_dir.as_deref() else {
-            return (None, Some("missing node identity".to_string()), true);
+            return (
+                None,
+                Some("missing node identity".to_string()),
+                true,
+                Vec::new(),
+            );
         };
         let text = crate::harness_probes::resolve_transcript(
             &execution.harness,
@@ -391,45 +417,122 @@ fn reported_execution_cost(
             Some(session_id),
         )
         .and_then(|path| std::fs::read_to_string(path).ok());
+        let slices = text.as_deref().map(observed_slices_from_pi);
         return match text.as_deref().map(crate::pi_session::reported_cost) {
-            Some(crate::pi_session::ReportedCost::Usd(usd)) => (Some(usd), None, true),
+            Some(crate::pi_session::ReportedCost::Usd(usd)) => {
+                (Some(usd), None, true, slices.unwrap_or_default())
+            }
             Some(crate::pi_session::ReportedCost::Unavailable { reason }) => {
-                (None, Some(reason), true)
+                // The models are still observed even though the cost is not:
+                // the slices keep their identity and say why the dollars are "—".
+                let slices = slices
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mut slice| {
+                        slice.usd = None;
+                        slice.missing_reasons = vec![reason.clone()];
+                        slice
+                    })
+                    .collect();
+                (None, Some(reason), true, slices)
             }
-            Some(crate::pi_session::ReportedCost::NoReading) | None => {
-                (None, Some("no reported cost reading".to_string()), true)
-            }
+            Some(crate::pi_session::ReportedCost::NoReading) | None => (
+                None,
+                Some("no reported cost reading".to_string()),
+                true,
+                Vec::new(),
+            ),
         };
     }
     (
         None,
         Some("harness has no reported cost".to_string()),
         false,
+        Vec::new(),
     )
 }
 
-/// The **model × effort slices** of one execution (ADR-0065): the observed
-/// per-message models when the source named any, else the requested id in
-/// fallback — with the execution's own availability carried along. A harness
-/// with no cost source gets NO slices (absent from « By model », never a
-/// "default of X" bucket), and so does a mute source with no requested model:
-/// nothing is invented.
-fn execution_model_slices(
-    execution: &Execution,
-    observed_models: Option<BTreeMap<String, ModelUsage>>,
+/// The observed [`ModelEffortSlice`]s of one `pi` session (#736): one per
+/// model × thinking level the source names, cost reported (already dollars —
+/// never an estimate of this fold, hence `estimated: false`).
+fn observed_slices_from_pi(text: &str) -> Vec<ModelEffortSlice> {
+    crate::pi_session::observed_usage(text)
+        .into_iter()
+        .map(|usage| ModelEffortSlice {
+            model: usage.model,
+            model_observed: true,
+            effort: usage.effort.clone(),
+            effort_observed: usage.effort.as_ref().map(|_| true),
+            usd: Some(usage.usd),
+            estimated: false,
+            partial: false,
+            executions: 1,
+            unpriced_models: Vec::new(),
+            missing_reasons: Vec::new(),
+            provider: usage.provider,
+        })
+        .collect()
+}
+
+/// The observed [`ModelEffortSlice`]s of one `copilot` journal (#736): one per
+/// model × reasoning effort the usage points name, cost reported by the
+/// published constant (never an estimate, hence `estimated: false`).
+fn observed_slices_from_copilot(text: &str) -> Vec<ModelEffortSlice> {
+    crate::copilot_journal::observed_usage(text)
+        .into_iter()
+        .map(|usage| ModelEffortSlice {
+            model: usage.model,
+            model_observed: true,
+            effort: usage.effort.clone(),
+            effort_observed: usage.effort.as_ref().map(|_| true),
+            usd: Some(usage.usd),
+            estimated: false,
+            partial: false,
+            executions: 1,
+            unpriced_models: Vec::new(),
+            missing_reasons: Vec::new(),
+            provider: None,
+        })
+        .collect()
+}
+
+/// The claude transcript fold's per-model output plus the execution's own
+/// availability — what a derived (token × price table) fold can hand the slice
+/// builder, bundled so the builder's signature stays readable.
+struct DerivedFold {
+    models: Option<BTreeMap<String, ModelUsage>>,
     usd: Option<f64>,
     form: Option<CostForm>,
     partial: bool,
     unpriced_models: Vec<String>,
     missing_reasons: Vec<String>,
+}
+
+/// The **model × effort slices** of one execution (ADR-0065): the observed
+/// slices the source reported when it named any, else the claude fold's
+/// per-message models, else the requested id in fallback — with the
+/// execution's own availability carried along. A harness with no cost source
+/// gets NO slices (absent from « By model », never a "default of X" bucket),
+/// and so does a mute source with no requested model: nothing is invented.
+fn execution_model_slices(
+    execution: &Execution,
+    observed: Vec<ModelEffortSlice>,
+    derived: DerivedFold,
 ) -> Vec<ModelEffortSlice> {
-    if !crate::harness_probes::can_cost(&execution.harness)
-        || crate::harness_probes::observed_identity_source(&execution.harness).is_none()
-            && execution.requested_model.is_none()
+    if !crate::harness_probes::can_cost(&execution.harness) {
+        return Vec::new();
+    }
+    // The source spoke (#736): `pi`'s per-message model/provider/effort,
+    // `copilot`'s usage-point model/effort — the observed values win verbatim.
+    if !observed.is_empty() {
+        return observed;
+    }
+    if crate::harness_probes::observed_identity_source(&execution.harness).is_none()
+        && execution.requested_model.is_none()
     {
         return Vec::new();
     }
-    if let Some(models) = observed_models {
+    if let Some(models) = derived.models {
         if !models.is_empty() {
             // Observed: one slice per verbatim id the source named, the effort
             // requested (`claude`'s source never writes it — ADR-0065 §1).
@@ -440,6 +543,7 @@ fn execution_model_slices(
                     model_observed: true,
                     effort: execution.requested_effort.clone(),
                     effort_observed: execution.requested_effort.as_ref().map(|_| false),
+                    provider: None,
                     usd: Some(usage.usd),
                     estimated: true,
                     partial: !usage.unpriced.is_empty(),
@@ -461,12 +565,13 @@ fn execution_model_slices(
                 model_observed: false,
                 effort: execution.requested_effort.clone(),
                 effort_observed: execution.requested_effort.as_ref().map(|_| false),
-                usd,
-                estimated: form == Some(CostForm::Derived) && usd.is_some(),
-                partial,
+                provider: None,
+                usd: derived.usd,
+                estimated: derived.form == Some(CostForm::Derived) && derived.usd.is_some(),
+                partial: derived.partial,
                 executions: 1,
-                unpriced_models,
-                missing_reasons,
+                unpriced_models: derived.unpriced_models,
+                missing_reasons: derived.missing_reasons,
             }]
         })
         .unwrap_or_default()
@@ -486,6 +591,7 @@ fn leftover_model_slices(
             model_observed: true,
             effort: None,
             effort_observed: None,
+            provider: None,
             usd: Some(usage.usd),
             estimated: true,
             partial: !usage.unpriced.is_empty(),
@@ -561,6 +667,7 @@ pub(crate) fn compute_run_cost_breakdown(
     for (index, execution) in executions.iter().enumerate() {
         let mut reported_in_usd = false;
         let mut observed_models: Option<BTreeMap<String, ModelUsage>> = None;
+        let mut observed_slices: Vec<ModelEffortSlice> = Vec::new();
         let (cost, form, reason) = if !crate::harness_probes::can_cost(&execution.harness) {
             (None, None, Some("harness has no cost source".to_string()))
         } else if crate::harness_probes::probes_for(&execution.harness)
@@ -568,9 +675,11 @@ pub(crate) fn compute_run_cost_breakdown(
             == Some(crate::harness_probes::CostSource::ReportedByConstant)
         {
             // #615/#707, ADR-0052: a reported cost — `copilot`'s journal, `pi`'s
-            // session — read by identity, never through the price table.
-            let (usd, unavailable, in_usd) = reported_execution_cost(execution, stores);
+            // session — read by identity, never through the price table. The
+            // same read yields the observed model × effort slices (#736).
+            let (usd, unavailable, in_usd, slices) = reported_execution(execution, stores);
             reported_in_usd = in_usd;
+            observed_slices = slices;
             (
                 usd.map(|usd| CostStat {
                     usd,
@@ -609,14 +718,18 @@ pub(crate) fn compute_run_cost_breakdown(
             .collect();
         let model_slices = execution_model_slices(
             execution,
-            observed_models,
-            usd,
-            form,
-            cost.as_ref().map(|cost| cost.partial).unwrap_or(false),
-            cost.as_ref()
-                .map(|cost| cost.unpriced_models.clone())
-                .unwrap_or_default(),
-            unavailable_reasons.clone(),
+            observed_slices,
+            DerivedFold {
+                models: observed_models,
+                usd,
+                form,
+                partial: cost.as_ref().map(|cost| cost.partial).unwrap_or(false),
+                unpriced_models: cost
+                    .as_ref()
+                    .map(|cost| cost.unpriced_models.clone())
+                    .unwrap_or_default(),
+                missing_reasons: unavailable_reasons.clone(),
+            },
         );
         contributions.push(CostContribution {
             harness: execution.harness.clone(),
@@ -2855,9 +2968,190 @@ mod tests {
         assert_eq!(node.model_slices.len(), 1);
         let slice = &node.model_slices[0];
         assert_eq!(slice.model, "gpt-5");
-        assert!(!slice.model_observed, "pi/copilot defer the capability");
+        assert!(
+            !slice.model_observed,
+            "the journal named no model: requested"
+        );
         assert!((slice.usd.unwrap() - 1.0).abs() < 1e-9);
         assert!(!slice.estimated, "a reported cost is never a ~estimate");
+    }
+
+    /// Write a `pi` session file for `session_id` under `pi_root`, in the folder
+    /// named after the Run's shared worktree — the resolution
+    /// [`crate::pi_session::resolve_by_id`] globs.
+    fn seed_pi_session(pi_root: &Path, repo: &Path, run_id: &str, session_id: &str, body: &str) {
+        let working_dir = repo.join(".pdo").join("runs").join(run_id).join("worktree");
+        let dir = pi_root.join(crate::pi_session::session_dir_name(&working_dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("2026-09-07T10-00-00-000Z_{session_id}.jsonl")),
+            body,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_pi_session_ventilates_its_reported_cost_by_observed_model_provider_and_effort() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude").join("projects");
+        let stores = crate::sandbox_run::HarnessStores::from_home(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let run_id = "pi-observed";
+        // Two priced messages on the same model/level, then a level change and a
+        // third message: two observed slices, both carrying the provider.
+        let message = |id: &str, cost: f64| {
+            format!(
+                r#"{{"type":"message","id":"{id}","message":{{"role":"assistant","model":"~anthropic/claude-haiku-latest","provider":"openrouter","usage":{{"input":100,"output":10,"totalTokens":110,"cost":{{"total":{cost}}}}},"stopReason":"stop"}}}}"#
+            )
+        };
+        seed_pi_session(
+            &stores.pi,
+            repo.path(),
+            run_id,
+            "sid-pi",
+            &format!(
+                "{}\n{}\n{}\n{}\n{}\n",
+                r#"{"type":"model_change","provider":"openrouter","modelId":"~anthropic/claude-haiku-latest"}"#,
+                r#"{"type":"thinking_level_change","thinkingLevel":"low"}"#,
+                message("m1", 0.10),
+                r#"{"type":"thinking_level_change","thinkingLevel":"high"}"#,
+                message("m2", 0.20),
+            ),
+        );
+        let events = vec![Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: crate::event_log::now_iso(),
+            kind: EventKind::NodeStarted,
+            node_id: Some("worker".into()),
+            iter: Some(1),
+            payload: Some(serde_json::json!({
+                "node_type": "agent", "isolated_worktree": false,
+                "harness": "pi", "session_id": "sid-pi",
+                "model": "sonnet", "effort": "medium"
+            })),
+        }];
+        let breakdown =
+            compute_run_cost_breakdown(&events, &claude, &stores, repo.path(), run_id, &builtin());
+        let node = breakdown
+            .contributions
+            .iter()
+            .find(|contribution| contribution.scope == CostScope::Node)
+            .unwrap();
+        assert_eq!(node.usd, Some(0.30000000000000004), "the reported total");
+        assert_eq!(node.model_slices.len(), 2, "one slice per observed effort");
+        assert_eq!(node.model_slices[0].model, "~anthropic/claude-haiku-latest");
+        assert!(node.model_slices[0].model_observed);
+        assert_eq!(node.model_slices[0].effort.as_deref(), Some("low"));
+        assert_eq!(node.model_slices[0].effort_observed, Some(true));
+        assert_eq!(node.model_slices[0].provider.as_deref(), Some("openrouter"));
+        assert_eq!(node.model_slices[0].usd, Some(0.10));
+        assert!(!node.model_slices[0].estimated, "reported, not derived");
+        assert_eq!(node.model_slices[1].effort.as_deref(), Some("high"));
+        assert_eq!(node.model_slices[1].usd, Some(0.20));
+        // The requested values are NOT used: the source spoke for both halves.
+    }
+
+    #[test]
+    fn a_pi_session_without_a_readable_cost_keeps_its_observed_models_at_dash() {
+        // The #707 hazard, now on the axis: tokens without a cost make the
+        // dollars unavailable, but the models are still observed (#736).
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude").join("projects");
+        let stores = crate::sandbox_run::HarnessStores::from_home(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let run_id = "pi-unpriced";
+        seed_pi_session(
+            &stores.pi,
+            repo.path(),
+            run_id,
+            "sid-pi",
+            &format!(
+                "{}\n{}\n",
+                r#"{"type":"thinking_level_change","thinkingLevel":"low"}"#,
+                r#"{"type":"message","id":"m1","message":{"role":"assistant","model":"~zhipu/glm-4.7-flash","provider":"zhipu","usage":{"input":100,"output":10,"totalTokens":110,"cost":{"total":0}}},"stopReason":"stop"}"#
+            ),
+        );
+        let events = vec![node_started_sid("worker", "pi", "sid-pi")];
+        let breakdown =
+            compute_run_cost_breakdown(&events, &claude, &stores, repo.path(), run_id, &builtin());
+        let node = breakdown
+            .contributions
+            .iter()
+            .find(|contribution| contribution.scope == CostScope::Node)
+            .unwrap();
+        assert_eq!(node.usd, None);
+        assert_eq!(node.model_slices.len(), 1);
+        let slice = &node.model_slices[0];
+        assert_eq!(slice.model, "~zhipu/glm-4.7-flash");
+        assert!(slice.model_observed);
+        assert_eq!(slice.usd, None, "unavailable, never $0");
+        assert!(slice.missing_reasons[0].contains("catalogue absent"));
+        assert_eq!(slice.provider.as_deref(), Some("zhipu"));
+    }
+
+    #[test]
+    fn a_copilot_journal_ventilates_its_reported_cost_by_observed_model_and_effort() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude").join("projects");
+        let copilot = home.path().join(".copilot").join("session-state");
+        let stores = crate::sandbox_run::HarnessStores::from_home(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let dir = copilot.join("s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("events.jsonl"),
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n",
+                r#"{"type":"session.start","data":{"selectedModel":"gpt-5.6-sol","reasoningEffort":"medium"}}"#,
+                r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":10000000000,"modelCacheState":[{"modelId":"gpt-5.6-sol"}]}}"#,
+                r#"{"type":"session.model_change","data":{"newModel":"claude-sonnet-4-5","reasoningEffort":"high"}}"#,
+                r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":25000000000,"modelCacheState":[{"modelId":"claude-sonnet-4-5"}]}}"#,
+                r#"{"type":"session.shutdown","data":{"totalNanoAiu":25000000000}}"#,
+            ),
+        )
+        .unwrap();
+        let events = vec![Event {
+            id: None,
+            run_id: "copilot-observed".into(),
+            ts: crate::event_log::now_iso(),
+            kind: EventKind::NodeStarted,
+            node_id: Some("worker".into()),
+            iter: Some(1),
+            payload: Some(serde_json::json!({
+                "node_type": "agent", "isolated_worktree": false,
+                "harness": "copilot", "session_id": "s1",
+                "model": "gpt-5", "effort": "low"
+            })),
+        }];
+        let breakdown = compute_run_cost_breakdown(
+            &events,
+            &claude,
+            &stores,
+            repo.path(),
+            "copilot-observed",
+            &builtin(),
+        );
+        let node = breakdown
+            .contributions
+            .iter()
+            .find(|contribution| contribution.scope == CostScope::Node)
+            .unwrap();
+        assert!(
+            (node.usd.unwrap() - 0.25).abs() < 1e-9,
+            "the reported total"
+        );
+        assert_eq!(node.model_slices.len(), 2, "one slice per observed model");
+        assert_eq!(node.model_slices[0].model, "gpt-5.6-sol");
+        assert!(node.model_slices[0].model_observed);
+        assert_eq!(node.model_slices[0].effort.as_deref(), Some("medium"));
+        assert_eq!(node.model_slices[0].effort_observed, Some(true));
+        assert_eq!(node.model_slices[0].provider, None);
+        assert!((node.model_slices[0].usd.unwrap() - 0.10).abs() < 1e-12);
+        assert!(!node.model_slices[0].estimated, "reported, not derived");
+        assert_eq!(node.model_slices[1].model, "claude-sonnet-4-5");
+        assert_eq!(node.model_slices[1].effort.as_deref(), Some("high"));
+        assert!((node.model_slices[1].usd.unwrap() - 0.15).abs() < 1e-12);
     }
 
     #[test]
