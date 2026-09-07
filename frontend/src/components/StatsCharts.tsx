@@ -904,10 +904,14 @@ function CostTab({
     detailRows = selected.nodes;
   }
 
-  // PROTOTYPE #736: a harness without a cost source (opencode) has no model row,
+  // #736: a harness without a cost source (opencode) has no model row,
   // so the model axis drops its column; the other axes keep it and show « — ».
+  // The daemon's reason string is "harness has no cost source" — match on the
+  // stable substring, not the full wire value.
   const noCostSource = cost.harnesses.filter((h) =>
-    cost.total.harnesses.find((m) => m.harness === h)?.missing_reasons.includes("no cost source"),
+    cost.total.harnesses
+      .find((m) => m.harness === h)
+      ?.missing_reasons.some((r) => r.includes("no cost source")),
   );
   const tableHarnesses =
     axis === "model" ? cost.harnesses.filter((h) => !noCostSource.includes(h)) : cost.harnesses;

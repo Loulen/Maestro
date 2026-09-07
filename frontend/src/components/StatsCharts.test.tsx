@@ -70,7 +70,7 @@ const COST_HARNESSES: StatsHarnessCost[] = [
     unknown: 1,
     average_usd: null,
     unpriced_models: [],
-    missing_reasons: ["no cost source"],
+    missing_reasons: ["harness has no cost source"],
   },
 ];
 
@@ -122,7 +122,7 @@ const COST: StatsCost = {
         unknown: 1,
         average_usd: null,
         unpriced_models: [],
-        missing_reasons: ["no cost source"],
+        missing_reasons: ["harness has no cost source"],
       },
     ],
   },
