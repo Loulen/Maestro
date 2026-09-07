@@ -920,6 +920,9 @@ export interface NodeDefInfo {
   node_type: NodeType;
   /** #653: where the node works, as the Run's pipeline snapshot froze it. */
   isolated_worktree?: boolean | null;
+  /** #723/ADR-0064: the « Orchestrator » toggle, frozen at run start — drives
+   *  the Orchestration tab, the pastilles and the binding in the run view. */
+  orchestrator?: boolean;
   view_x: number | null;
   view_y: number | null;
   inputs: PortBrief[];
@@ -1294,6 +1297,12 @@ export interface NodeDef {
    *  document never leaves the reader to guess. Absent on `merge` (isolated by
    *  construction) and on structural nodes. */
   isolated_worktree?: boolean | null;
+  /** #723/ADR-0064: the « Orchestrator » toggle. `true` ⇒ the node's NodeRun is
+   *  held by the strong orchestrator↔children binding while its child runs are
+   *  non-terminal, gets the `/pdo-orchestrate` prompt amendment at spawn and
+   *  carries the seeded `pdo-orchestrate` skill reference. NOT a node type.
+   *  Semantic — in the diff and the library content hash. Agent nodes only. */
+  orchestrator?: boolean;
 }
 
 export interface AgentCombination {

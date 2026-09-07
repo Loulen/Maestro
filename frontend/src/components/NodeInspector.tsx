@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
-import { Star } from "lucide-react";
+import { GitFork, Lock, Star, TriangleAlert } from "lucide-react";
 import { useEditStore } from "../stores/editStore";
-import type { NodeDef, NodeState, NodeType, PortDef } from "../types";
+import type { NodeDef, NodeState, NodeType, PortDef, SkillRef } from "../types";
 import { SectionHead, Field } from "./InspectorPrimitives";
 import OutputPortCard from "./OutputPortCard";
 import { NodeTypeIcon } from "./NodeTypeIcon";
@@ -145,6 +145,30 @@ export default function NodeInspector({
   const frozenIsolation = runNode?.isolated_worktree;
   const isolation = frozenIsolation ?? nodeIsolation(node);
   const isolationFrozen = frozenIsolation != null;
+
+  // #723/ADR-0064 — the « Orchestrator » toggle's state and freeze. In run mode
+  // the toggle follows the same ADR-0007 discipline as the Workspace choice:
+  // once the NodeRun spawned, its frozen copy applies, so the switch reads off
+  // and only says so — an edit applies to the next NodeRun.
+  const ORCHESTRATE_SKILL_REF: SkillRef = { id: "pdo-orchestrate", name: "pdo-orchestrate" };
+  const isOrchestrator = node.orchestrator ?? false;
+  const orchestratorFrozen = runNode != null && runNode.status !== "pending";
+  const hasOrchestrateSkill = (node.skills ?? []).some((s) => s.id === ORCHESTRATE_SKILL_REF.id);
+  // Toggle ON ⇒ seed the skill reference (unless it is already there). The
+  // seeded skill is visible — and removable — in the Skills selector below;
+  // the toggle stays the single source of intent (amber warning + re-add).
+  function setOrchestrator(next: boolean) {
+    const own = node!.skills ?? [];
+    const skills = next
+      ? (own.some((s) => s.id === ORCHESTRATE_SKILL_REF.id) ? own : [...own, ORCHESTRATE_SKILL_REF])
+      : own.filter((s) => s.id !== ORCHESTRATE_SKILL_REF.id);
+    handleField("skills", skills.length > 0 ? skills : undefined);
+    handleField("orchestrator", next);
+  }
+  function seedOrchestrateSkill() {
+    if (hasOrchestrateSkill) return;
+    handleField("skills", [...(node!.skills ?? []), ORCHESTRATE_SKILL_REF]);
+  }
 
   // #339: delete one contributing edge of a pooled input — the canonical
   // "delete an input" since inputs are emergent (#149/ADR-0011). Last-cycle
@@ -358,6 +382,73 @@ export default function NodeInspector({
           </div>
         </Tooltip>
 
+        {/* #723/ADR-0064: the « Orchestrator » toggle — a behavior of the node,
+            like Interactive, one row under it. Agent nodes only (a script runs
+            no agent, so a child-run contract there would silently do nothing).
+            Turning it on also seeds the `pdo-orchestrate` skill reference and
+            PDO files the fixed /pdo-orchestrate amendment into the prompt at
+            spawn (rendered below the textarea; never editable there). The
+            toggle is the single source of intent: removing the skill by hand
+            keeps the toggle on and warns, with a one-click re-add. */}
+        {!isScript && (
+          <Tooltip
+            content="Lets this node create child runs (pdo run create). Adds the pdo-orchestrate skill to the node and a fixed /pdo-orchestrate line to the prompt PDO files at spawn. Frozen once the NodeRun spawns."
+            side="left"
+          >
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-fg-3">
+                  <GitFork size={11} className="text-fg-4" />
+                  Orchestrator
+                  {orchestratorFrozen && <Lock size={9} className="text-fg-4" />}
+                </span>
+                <button
+                  data-testid="node-orchestrator-toggle"
+                  aria-pressed={isOrchestrator}
+                  disabled={orchestratorFrozen || readOnly}
+                  onClick={() => setOrchestrator(!isOrchestrator)}
+                  className={`relative h-5 w-9 rounded-full transition-colors ${
+                    orchestratorFrozen || readOnly ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                  } ${isOrchestrator ? "bg-acc" : "bg-bg-5"}`}
+                >
+                  <span
+                    className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-fg transition-transform ${
+                      isOrchestrator ? "translate-x-[16px]" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+              {orchestratorFrozen && (
+                <span className="text-fg-4" style={{ fontSize: "9.5px" }}>
+                  Frozen at spawn — an edit applies to the next NodeRun.
+                </span>
+              )}
+              {isOrchestrator && !hasOrchestrateSkill && (
+                <span
+                  data-testid="node-orchestrator-skill-missing"
+                  className="flex items-start gap-1 rounded border border-st-blocked/40 bg-st-blocked/10 px-2 py-1 text-st-blocked"
+                  style={{ fontSize: "9.5px", lineHeight: 1.4 }}
+                >
+                  <TriangleAlert size={10} className="mt-[1px] shrink-0" />
+                  <span>
+                    The pdo-orchestrate skill was removed: the agent will get the /pdo-orchestrate line but no
+                    instructions.{" "}
+                    {!orchestratorFrozen && !readOnly && (
+                      <button
+                        type="button"
+                        className="cursor-pointer underline"
+                        onClick={seedOrchestrateSkill}
+                      >
+                        Re-add it
+                      </button>
+                    )}
+                  </span>
+                </span>
+              )}
+            </div>
+          </Tooltip>
+        )}
+
         {!isScript && (
           <>
             <AgentControl
@@ -456,10 +547,34 @@ export default function NodeInspector({
           data-testid={isScript ? "script-body" : undefined}
           value={promptContent}
           onChange={(e) => updatePrompt(node.id, e.target.value)}
-          className="min-h-[120px] w-full resize-y rounded border border-line-strong bg-bg-3 px-2 py-1.5 font-mono text-fg outline-none focus:border-acc"
+          className={`min-h-[120px] w-full resize-y rounded border border-line-strong bg-bg-3 px-2 py-1.5 font-mono text-fg outline-none focus:border-acc ${
+            !isScript && isOrchestrator ? "rounded-b-none border-b-0 border-dashed" : ""
+          }`}
           style={{ fontSize: "11px", lineHeight: "1.5" }}
           placeholder={isScript ? "#!/usr/bin/env bash\n# e.g. curl -X POST \"$DISCORD_WEBHOOK\" ..." : "Enter the node's role prompt..."}
         />
+
+        {/* #723 — the amendment PDO files at spawn when Orchestrator is on.
+            Rendered, never editable, never in the textarea: toggle and text
+            cannot drift. Dashed block visually attached under the textarea. */}
+        {!isScript && isOrchestrator && (
+          <div
+            data-testid="node-orchestrator-prompt-amendment"
+            className="rounded-b border border-t-0 border-dashed border-line-strong bg-bg-2 px-2 py-1.5"
+          >
+            <div className="mb-1 flex items-center gap-1 text-fg-4" style={{ fontSize: "9.5px" }}>
+              <Lock size={9} />
+              Added by PDO at spawn (Orchestrator)
+            </div>
+            <pre className="whitespace-pre-wrap font-mono text-fg-3" style={{ fontSize: "10.5px", lineHeight: 1.5 }}>
+{`/pdo-orchestrate
+
+## Orchestration
+You may create child runs with \`pdo run create\`. This node completes
+only once every child run is terminal; a failed child parks it awaiting you.`}
+            </pre>
+          </div>
+        )}
 
         {/* Inputs — emergent (#149): derived from incoming edges, read-only.
             Same-named edges pool into one logical list input that spells out

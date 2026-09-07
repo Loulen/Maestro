@@ -41,6 +41,13 @@ import {
   EMPTY_PROVISIONING_RULES,
   hasProvisioningRules,
 } from "../lib/provisioning";
+// #723 — Orchestration tab + pastilles.
+import { ChildCountPills, OrchestrationTab } from "./OrchestrationTab";
+import {
+  childrenOfNode,
+  countChildren,
+  useRunChildren,
+} from "../lib/orchestration";
 
 const STATUS_LABELS: Record<NodeStatus, string> = {
   pending: "Pending",
@@ -63,6 +70,14 @@ interface Props {
   provisioningRepository?: string;
   inheritedProvisioning?: ScopedProvisioningRules[];
   provisioningGitRef?: string;
+  /** #723: the node's frozen « Orchestrator » toggle (ADR-0064) — mounts the
+   *  I/O | Orchestration tab pair and the pastilles. Absent ⇒ plain I/O pane,
+   *  byte-identical to the pre-#723 panel. */
+  isOrchestratorNode?: boolean;
+  /** #723: open a child run listed in the Orchestration tab (App records the way back). */
+  onOpenChildRun?: (childRunId: string) => void;
+  /** #723: land on the Orchestration tab (the back arrow from a child run). */
+  initialDetailTab?: "io" | "orchestration";
 }
 
 // The terminal inset has three mutually exclusive display modes (#346):
@@ -231,8 +246,19 @@ export default function NodeDetailPanel({
   provisioningRepository = "",
   inheritedProvisioning,
   provisioningGitRef = "HEAD",
+  isOrchestratorNode = false,
+  onOpenChildRun,
+  initialDetailTab = "io",
 }: Props) {
   const [modal, setModal] = useState<ModalState | null>(null);
+  // #723 — an orchestrator NodeRun splits its lower pane into I/O | Orchestration.
+  // I/O stays the default; the choice is per mounted node (remount = back to I/O).
+  const [detailTab, setDetailTab] = useState<"io" | "orchestration">(initialDetailTab);
+  // The children read polls with the run view cadence (never pushed), whether or
+  // not the tab is open — the tab-header pastilles count from the same read.
+  const childrenData = useRunChildren(runId, isOrchestratorNode);
+  const nodeChildren = childrenOfNode(childrenData, runId, node.node_id);
+  const childCounts = countChildren(nodeChildren);
   // Seed at mount only (no reactive effect on status): the issue trigger is
   // "clicking the node" (= selection / mount), not a live transition. A node
   // is `key`-ed by node_id at both mount sites, so selecting another terminated
@@ -762,6 +788,42 @@ export default function NodeDetailPanel({
               )}
             </div>
 
+            {/* #723 — I/O | Orchestration tabs, only for an orchestrator node.
+                Below « Mark complete » (the escape hatch stays reachable from
+                both tabs), above the I/O content. */}
+            {isOrchestratorNode && (
+              <div className="flex shrink-0 border-b border-line" data-testid="detail-tabs">
+                {(["io", "orchestration"] as const).map((tab) => {
+                  const active = detailTab === tab;
+                  return (
+                    <button
+                      key={tab}
+                      type="button"
+                      data-testid={`detail-tab-${tab}`}
+                      data-active={active}
+                      onClick={() => setDetailTab(tab)}
+                      className={`flex flex-1 cursor-pointer items-center justify-center gap-1.5 py-1.5 transition-colors ${
+                        active ? "border-b-2 border-acc font-medium text-fg" : "text-fg-3 hover:text-fg-2"
+                      }`}
+                      style={{ fontSize: "11px" }}
+                    >
+                      {tab === "io" ? "I/O" : "Orchestration"}
+                      {tab === "orchestration" && <ChildCountPills counts={childCounts} size="xs" testId="tab-child-pills" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {isOrchestratorNode && detailTab === "orchestration" ? (
+              <OrchestrationTab
+                childRuns={nodeChildren}
+                counts={childCounts}
+                nodeLive={node.status === "running" || node.status === "awaiting_user"}
+                nodeAwaiting={node.status === "awaiting_user"}
+                onOpenChild={(id) => onOpenChildRun?.(id)}
+              />
+            ) : (
+              <>
             {/* Inputs section */}
             {inputs.length > 0 && (
               <IOSection
@@ -793,6 +855,8 @@ export default function NodeDetailPanel({
               status={node.status}
               isArchived={isArchived}
             />
+              </>
+            )}
           </div>
         );
 

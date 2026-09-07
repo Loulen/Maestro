@@ -80,6 +80,10 @@ const NODE: Complete<NodeDef> = {
   // #653/ADR-0060: same caveat again — the emission proof is in
   // `serializePipeline.test.ts` ("an agent always writes its isolation line").
   isolated_worktree: false,
+  // #723/ADR-0064: same caveat once more — `Complete<NodeDef>` forces the
+  // field; the emission proof lives in `serializePipeline.test.ts` ("the
+  // orchestrator toggle lands in the YAML object").
+  orchestrator: true,
 };
 const EDGE: Complete<EdgeDef> = {
   source: { node: "n1", port: "out" },
