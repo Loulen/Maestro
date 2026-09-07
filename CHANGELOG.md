@@ -10,6 +10,25 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.70.0
+
+**Toggle « Orchestrator » + onglet Orchestration + pastilles** (#723 ; story #709, spec #719,
+ADR-0064). Un nœud agent gagne un toggle « Orchestrator » dans son détail d'édition (sous
+« Interactive », gelé au spawn, immuable pendant le run — ADR-0007) qui fait quatre choses : il
+pose la référence du skill `pdo-orchestrate` sur le nœud (visible dans le sélecteur, comptée dans
+le diff sémantique, retirable avec l'avertissement « skill absent » existant) ; il fait
+amender le prompt du NodeRun au spawn d'une ligne d'invocation `/pdo-orchestrate` et du bloc
+de contrat Orchestration — rendus après le prompt de rôle, jamais dans la textarea (toggle et
+texte ne peuvent pas diverger), toggle off étant byte-identique au pré-#723 ; le préambule
+runtime documente `pdo run create` au titre des capacités CLI (universel, pré-#723). En run, le
+panneau de détail du nœud orchestrator se coupe en deux onglets « I/O » (défaut, contenu
+inchangé) et « Orchestration » : la liste des enfants du nœud via `GET /runs/{id}/children`
+(statut, démarré, durée qui tique, coût), un clic sur le titre ouvrant le run enfant avec barre
+« ← Back to Orchestrator » qui revient au parent sur l'onglet Orchestration, et des pastilles
+vert/rouge/bleu avec compteurs (finis/échoués/en cours — un enfant `awaiting_user` compte en
+bleu) en en-tête d'onglet et sur la carte dans le canvas, masquées tant qu'il n'y a aucun enfant.
+Les nœuds sans toggle restent strictement identiques.
+
 ## 1.69.0
 
 **Le Pipeline Manager devient opt-in** — plus de session `pdo-mgr-*` systématique : un run naît
