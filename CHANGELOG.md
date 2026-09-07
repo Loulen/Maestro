@@ -10,6 +10,14 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.73.1
+
+**Stats › Cost — le headline d'un pipeline n'agrège plus le coût Infrastructure/Unassigned** (#742).
+Seules les contributions `Node` alimentent le headline pipeline/projet et le niveau pipeline de
+l'axe modèle ; les lignes Infrastructure/Unassigned restent listées et drillables, et le total
+d'instance continue de compter chaque contribution (ADR-0058 inchangé) — la somme des lignes peut
+désormais dépasser le headline, c'est voulu.
+
 ## 1.73.0
 
 **Stats › Performance « By model » — pic de contexte et durée par modèle** (#737 ; story #733, spec
