@@ -21993,6 +21993,382 @@ mod tests {
         );
     }
 
+    /// `GET /stats/performance` (#737, ADR-0065) — the « By model » axis: the
+    /// peak of each session file is attributed to the model of THAT file (a
+    /// subagent has its own bucket), a mute source falls back to the requested
+    /// model × effort (marked `requested`), a harness with an observed source
+    /// (`copilot`) buckets its journal's model + effort, and the `by_pipeline`
+    /// Node leaf carries its model × effort couples — the drill "Node → modèle
+    /// × effort". The existing memo fingerprints cover the axis: a subagent
+    /// file's rewrite forces a recompute, an unchanged state is a memo hit.
+    #[tokio::test]
+    async fn stats_performance_by_model_ventilates_each_session_file_to_its_own_model() {
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let mut state = test_state().await;
+        let home = state
+            .repo_root
+            .join(".pdo")
+            .join("test-stats-performance-by-model")
+            .join(uuid::Uuid::new_v4().to_string());
+        let _cleanup = Cleanup(home.clone());
+        std::fs::create_dir_all(&home).unwrap();
+        Arc::get_mut(&mut state).unwrap().sandbox_home_override = Some(home.clone());
+        let repo = state.repo_root.to_string_lossy().into_owned();
+
+        async fn insert_event(
+            db: &sqlx::SqlitePool,
+            run: &str,
+            ts: &str,
+            kind: &str,
+            node: Option<&str>,
+            iter: Option<i64>,
+            payload: serde_json::Value,
+        ) {
+            sqlx::query(
+                "INSERT INTO events (run_id, ts, kind, node_id, iter, payload) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(run)
+            .bind(ts)
+            .bind(kind)
+            .bind(node)
+            .bind(iter)
+            .bind(payload.to_string())
+            .execute(db)
+            .await
+            .unwrap();
+        }
+
+        // perf-m1: a claude Node run twice — iter 1 whose session file names
+        // its model (opus) and whose subagent runs on another one (sonnet);
+        // iter 2 whose file names no model at all (mute source), falling back
+        // to the requested model × effort.
+        insert_event(
+            &state.db,
+            "perf-m1",
+            "2026-08-01T09:00:00Z",
+            "run_started",
+            None,
+            None,
+            serde_json::json!({
+                "pipeline_id":"mp1","pipeline_name":"Model loop","target_repo":repo,"harness":"claude",
+                "node_defs":[{"id":"worker","name":"Worker","node_type":"agent", "isolated_worktree":true}]
+            }),
+        )
+        .await;
+        insert_event(
+            &state.db, "perf-m1", "2026-08-01T09:10:00Z", "node_started",
+            Some("worker"), Some(1),
+            serde_json::json!({"node_type":"agent", "isolated_worktree":true,"harness":"claude","session_id":"m1-iter1"}),
+        ).await;
+        insert_event(
+            &state.db,
+            "perf-m1",
+            "2026-08-01T09:20:00Z",
+            "node_completed",
+            Some("worker"),
+            Some(1),
+            serde_json::json!({}),
+        )
+        .await;
+        insert_event(
+            &state.db, "perf-m1", "2026-08-01T09:30:00Z", "node_started",
+            Some("worker"), Some(2),
+            serde_json::json!({"node_type":"agent", "isolated_worktree":true,"harness":"claude","session_id":"m1-iter2","model":"sonnet","effort":"high"}),
+        ).await;
+        insert_event(
+            &state.db,
+            "perf-m1",
+            "2026-08-01T09:35:00Z",
+            "node_completed",
+            Some("worker"),
+            Some(2),
+            serde_json::json!({}),
+        )
+        .await;
+        // perf-m2: one copilot execution — its journal names the model AND the
+        // effort at the usage points, so both are observed.
+        insert_event(
+            &state.db,
+            "perf-m2",
+            "2026-08-02T09:00:00Z",
+            "run_started",
+            None,
+            None,
+            serde_json::json!({
+                "pipeline_id":"mp2","pipeline_name":"Other pipeline","target_repo":repo,"harness":"copilot",
+                "node_defs":[{"id":"solo","name":"Solo","node_type":"agent", "isolated_worktree":true}]
+            }),
+        )
+        .await;
+        insert_event(
+            &state.db, "perf-m2", "2026-08-02T09:10:00Z", "node_started",
+            Some("solo"), Some(1),
+            serde_json::json!({"node_type":"agent", "isolated_worktree":true,"harness":"copilot","session_id":"m-copilot-1"}),
+        ).await;
+        insert_event(
+            &state.db,
+            "perf-m2",
+            "2026-08-02T09:20:00Z",
+            "node_completed",
+            Some("solo"),
+            Some(1),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // --- claude transcripts: iter 1's main file (opus) + subagent file
+        // (sonnet — its own bucket), iter 2's mute file (no model line).
+        let claude_root = home.join(".claude").join("projects");
+        let dir1 = claude_root.join(stale_detector::encode_working_dir(
+            &worktree_ops::sub_worktree_path(&state.repo_root, "perf-m1", "worker", 1),
+        ));
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::write(
+            dir1.join("m1-iter1.jsonl"),
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":20000,"output_tokens":0}}}"#,
+        )
+        .unwrap();
+        let subagents_dir = dir1.join("m1-iter1").join("subagents");
+        std::fs::create_dir_all(&subagents_dir).unwrap();
+        std::fs::write(
+            subagents_dir.join("explore.jsonl"),
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-08-01T09:10:00Z\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":55000,\"output_tokens\":0}}}\n\
+             {\"type\":\"user\",\"timestamp\":\"2026-08-01T09:15:00Z\"}\n",
+        )
+        .unwrap();
+        let dir2 = claude_root.join(stale_detector::encode_working_dir(
+            &worktree_ops::sub_worktree_path(&state.repo_root, "perf-m1", "worker", 2),
+        ));
+        std::fs::create_dir_all(&dir2).unwrap();
+        // A file that reads but says nothing: no model line, no readable peak.
+        std::fs::write(dir2.join("m1-iter2.jsonl"), "{not json\n").unwrap();
+
+        // --- copilot journal: the model and effort at the usage point, plus
+        // the peak reading the shutdown carries.
+        let copilot_dir = home
+            .join(".copilot")
+            .join("session-state")
+            .join("m-copilot-1");
+        std::fs::create_dir_all(&copilot_dir).unwrap();
+        std::fs::write(
+            copilot_dir.join("events.jsonl"),
+            r#"{"type":"session.start","data":{"selectedModel":"gpt-5","reasoningEffort":"medium"}}
+{"type":"session.usage_checkpoint","data":{"totalNanoAiu":5000000000,"modelCacheState":[{"modelId":"gpt-5"}]}}
+{"type":"session.shutdown","data":{"usage":{"inputTokens":40000,"outputTokens":0}}}"#,
+        )
+        .unwrap();
+
+        let from = "2026-08-01T00:00:00Z";
+        let to = "2026-08-03T00:00:00Z";
+        let uri = format!("/stats/performance?from={from}&to={to}");
+        async fn call(state: &Arc<AppState>, uri: &str) -> serde_json::Value {
+            let response = build_router(state.clone())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+
+        let body = call(&state, &uri).await;
+        let by_model = body["by_model"].as_array().unwrap();
+        let ids: Vec<&str> = by_model
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["claude-opus-4-8", "claude-sonnet-4-5", "gpt-5", "sonnet"],
+            "one verbatim row per model id, harness-agnostic: {by_model:#?}"
+        );
+
+        let find_model = |body: &serde_json::Value, id: &str| {
+            body["by_model"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let node_of =
+            |model: &serde_json::Value| model["efforts"][0]["pipelines"][0]["nodes"][0].clone();
+
+        // Observed main-session model: the Node's peak + the execution's
+        // wall-clock, effort « not set » (no effort in the startup event).
+        let opus = find_model(&body, "claude-opus-4-8");
+        assert_eq!(opus["provenance"], "observed");
+        assert_eq!(opus["efforts"][0]["effort"], serde_json::Value::Null);
+        assert_eq!(opus["efforts"][0]["name"], "not set");
+        assert_eq!(opus["efforts"][0]["pipelines"][0]["id"], "mp1");
+        let opus_node = node_of(&opus);
+        assert_eq!(opus_node["id"], "worker");
+        assert_eq!(opus_node["harnesses"][0]["harness"], "claude");
+        assert_eq!(opus_node["harnesses"][0]["context"]["measured"], 1);
+        assert_eq!(
+            opus_node["harnesses"][0]["context"]["stats"]["max"],
+            20000.0
+        );
+        assert_eq!(
+            opus_node["harnesses"][0]["duration"]["stats"]["max"],
+            600000.0
+        );
+        // The by_model Node row carries no couples — the path IS the drill, so
+        // the empty field is omitted on the wire (never an empty array).
+        assert!(opus_node.get("models").is_none());
+
+        // The subagent file's own model: its own bucket, its own peak and its
+        // own transcript time span as duration.
+        let sonnet_observed = find_model(&body, "claude-sonnet-4-5");
+        assert_eq!(sonnet_observed["provenance"], "observed");
+        let sonnet_node = node_of(&sonnet_observed);
+        assert_eq!(sonnet_node["id"], "worker");
+        assert_eq!(
+            sonnet_node["harnesses"][0]["context"]["stats"]["max"],
+            55000.0
+        );
+        assert_eq!(
+            sonnet_node["harnesses"][0]["duration"]["stats"]["max"],
+            300000.0
+        );
+
+        // A mute source falls back to the requested model × effort, marked.
+        let sonnet_requested = find_model(&body, "sonnet");
+        assert_eq!(sonnet_requested["provenance"], "requested");
+        assert_eq!(sonnet_requested["efforts"][0]["effort"], "high");
+        assert_eq!(sonnet_requested["efforts"][0]["provenance"], "requested");
+        let requested_node = node_of(&sonnet_requested);
+        assert_eq!(requested_node["id"], "worker");
+        assert_eq!(requested_node["harnesses"][0]["context"]["measured"], 0);
+        assert_eq!(
+            requested_node["harnesses"][0]["context"]["missing_reasons"],
+            serde_json::json!(["no readable context usage in transcript"])
+        );
+        assert_eq!(
+            requested_node["harnesses"][0]["duration"]["stats"]["max"],
+            300000.0
+        );
+
+        // copilot: model AND effort observed from the journal; the context peak
+        // rides the same journal.
+        let gpt5 = find_model(&body, "gpt-5");
+        assert_eq!(gpt5["provenance"], "observed");
+        assert_eq!(gpt5["efforts"][0]["effort"], "medium");
+        assert_eq!(gpt5["efforts"][0]["provenance"], "observed");
+        let gpt5_node = node_of(&gpt5);
+        assert_eq!(gpt5_node["id"], "solo");
+        assert_eq!(
+            gpt5_node["harnesses"][0]["context"]["stats"]["max"],
+            40000.0
+        );
+        assert_eq!(
+            gpt5_node["harnesses"][0]["duration"]["stats"]["max"],
+            600000.0
+        );
+
+        // --- by_pipeline is untouched at the top, but its Node leaf now ends
+        // with the model × effort couples.
+        let worker = body["by_pipeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "mp1")
+            .unwrap()["nodes"]
+            .as_array()
+            .unwrap()[0]
+            .clone();
+        assert_eq!(worker["harnesses"][0]["context"]["measured"], 1);
+        assert_eq!(
+            worker["harnesses"][0]["context"]["missing_reasons"],
+            serde_json::json!(["no readable context usage in transcript"])
+        );
+        let couples = worker["models"].as_array().unwrap();
+        assert_eq!(couples.len(), 3, "got: {couples:#?}");
+        let couple_keys: Vec<String> = couples
+            .iter()
+            .map(|pair| {
+                format!(
+                    "{}·{}",
+                    pair["model"].as_str().unwrap(),
+                    pair["effort"].as_str().unwrap_or("not set")
+                )
+            })
+            .collect();
+        assert_eq!(
+            couple_keys,
+            vec![
+                "claude-opus-4-8·not set",
+                "claude-sonnet-4-5·not set",
+                "sonnet·high"
+            ]
+        );
+        let opus_couple = &couples[0];
+        assert_eq!(opus_couple["model_provenance"], "observed");
+        assert_eq!(opus_couple["effort_provenance"], serde_json::Value::Null);
+        assert_eq!(
+            opus_couple["harnesses"][0]["context"]["stats"]["max"],
+            20000.0
+        );
+        let sonnet_high_couple = &couples[2];
+        assert_eq!(sonnet_high_couple["model_provenance"], "requested");
+        assert_eq!(sonnet_high_couple["effort_provenance"], "requested");
+        let sonnet_sub_couple = &couples[1];
+        assert_eq!(sonnet_sub_couple["model_provenance"], "observed");
+        assert_eq!(
+            sonnet_sub_couple["harnesses"][0]["context"]["stats"]["max"],
+            55000.0
+        );
+
+        // The whole-cohort total pools the main-session observations only —
+        // never a subagent, never Infrastructure. Untouched by the axis.
+        let total_claude = body["total"]["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["harness"] == "claude")
+            .unwrap();
+        assert_eq!(total_claude["context"]["measured"], 1);
+
+        // --- the memo key covers the axis: unchanged state is a hit, a
+        // subagent file's rewrite (no event at all) forces a recompute that
+        // moves ITS model's bucket.
+        let _ = call(&state, &uri).await;
+        assert_eq!(
+            stats_performance::recompute_count_for_test(from, to),
+            1,
+            "an unchanged state must be a memo hit"
+        );
+        std::fs::write(
+            subagents_dir.join("explore.jsonl"),
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-08-01T09:10:00Z\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":66000,\"output_tokens\":0}}}\n\
+             {\"type\":\"user\",\"timestamp\":\"2026-08-01T09:15:00Z\"}\n",
+        )
+        .unwrap();
+        let after_rewrite = call(&state, &uri).await;
+        assert_eq!(
+            stats_performance::recompute_count_for_test(from, to),
+            2,
+            "rewriting a subagent file, with no new event, must force a recompute"
+        );
+        let rewritten = find_model(&after_rewrite, "claude-sonnet-4-5");
+        assert_eq!(
+            node_of(&rewritten)["harnesses"][0]["context"]["stats"]["max"],
+            66000.0
+        );
+    }
+
     /// An empty cohort (no Runs in the window) is not an error — an empty
     /// Performance payload, distinct from the source-wide-unreadable case below.
     #[tokio::test]

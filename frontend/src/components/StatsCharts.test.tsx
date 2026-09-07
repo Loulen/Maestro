@@ -4,6 +4,7 @@ import { describe, it, expect } from "vitest";
 
 import StatsCharts from "./StatsCharts";
 import type {
+  PerformanceModelEffortPair,
   StatsCost,
   StatsHarnessCost,
   StatsModelEffortPair,
@@ -409,6 +410,27 @@ const distribution = (mean: number, measured = 2, expected = 2) => ({
   missing_reasons: measured === expected ? [] : ["no reliable bounds"],
 });
 
+const DESIGN_MODELS: PerformanceModelEffortPair[] = [
+  {
+    model: "claude-opus-4-8",
+    model_provenance: "observed",
+    effort: null,
+    effort_provenance: null,
+    harnesses: [
+      { harness: "claude", context: distribution(150_000, 1, 1), duration: distribution(360_000, 1, 1) },
+    ],
+  },
+  {
+    model: "sonnet",
+    model_provenance: "requested",
+    effort: "high",
+    effort_provenance: "requested",
+    harnesses: [
+      { harness: "claude", context: distribution(95_000, 1, 1), duration: distribution(340_000, 1, 1) },
+    ],
+  },
+];
+
 const PERFORMANCE: StatsPerformance = {
   harnesses: ["claude", "copilot"],
   total: {
@@ -439,6 +461,7 @@ const PERFORMANCE: StatsPerformance = {
             { harness: "copilot", context: distribution(84_000), duration: distribution(420_000, 1, 2) },
           ],
           nodes: [],
+          models: DESIGN_MODELS,
           subagents: [
             {
               id: "explore",
@@ -475,6 +498,7 @@ const PERFORMANCE: StatsPerformance = {
       subagents: [],
     },
   ],
+  by_model: [],
 };
 
 describe("StatsCharts — harness drill-down (#638)", () => {
@@ -818,5 +842,329 @@ describe("StatsCharts — Performance (#585)", () => {
       />,
     );
     expect(screen.getByText("Claude journal could not be read")).toBeInTheDocument();
+  });
+});
+
+describe("StatsCharts — Performance « By model » (#737, ADR-0065)", () => {
+  /** A « By model » payload with one two-model Node: the main sessions ran on
+   *  `claude-opus-4-8`, one subagent file on `sonnet` (its own bucket), one
+   *  execution's source was mute and fell back to the requested model. */
+  const BY_MODEL: StatsPerformance = {
+    harnesses: ["claude", "copilot"],
+    total: {
+      harnesses: [
+        { harness: "claude", context: distribution(96_000), duration: distribution(410_000) },
+      ],
+    },
+    infrastructure_total: { harnesses: [] },
+    by_pipeline: [],
+    infrastructure: [],
+    by_model: [
+      {
+        id: "claude-opus-4-8",
+        name: "claude-opus-4-8",
+        provenance: "observed",
+        harnesses: [
+          { harness: "claude", context: distribution(140_000), duration: distribution(350_000) },
+        ],
+        nodes: [],
+        subagents: [],
+        efforts: [
+          {
+            id: "high",
+            name: "high",
+            effort: "high",
+            provenance: "observed",
+            harnesses: [
+              { harness: "claude", context: distribution(140_000), duration: distribution(350_000) },
+            ],
+            nodes: [],
+            subagents: [],
+            pipelines: [
+              {
+                id: "pipeline-id",
+                name: "Implement loop",
+                harnesses: [
+                  { harness: "claude", context: distribution(140_000), duration: distribution(350_000) },
+                ],
+                nodes: [
+                  {
+                    id: "design-id",
+                    name: "Design",
+                    harnesses: [
+                      { harness: "claude", context: distribution(140_000), duration: distribution(350_000) },
+                    ],
+                    nodes: [],
+                    subagents: [],
+                  },
+                ],
+                subagents: [],
+              },
+            ],
+          },
+          {
+            id: "",
+            name: "not set",
+            effort: null,
+            provenance: null,
+            harnesses: [
+              { harness: "claude", context: distribution(55_000), duration: distribution(90_000) },
+            ],
+            nodes: [],
+            subagents: [],
+            pipelines: [],
+          },
+        ],
+      },
+      {
+        id: "sonnet",
+        name: "sonnet",
+        provenance: "mixed",
+        harnesses: [
+          { harness: "claude", context: distribution(95_000), duration: distribution(340_000) },
+        ],
+        nodes: [],
+        subagents: [],
+        efforts: [
+          {
+            id: "",
+            name: "not set",
+            effort: null,
+            provenance: null,
+            harnesses: [
+              { harness: "claude", context: distribution(95_000), duration: distribution(340_000) },
+            ],
+            nodes: [],
+            subagents: [],
+            pipelines: [],
+          },
+        ],
+      },
+    ],
+  };
+
+  function renderModel(performance: StatsPerformance = BY_MODEL) {
+    return render(
+      <StatsCharts
+        tab="performance"
+        overview={null}
+        cost={null}
+        costError={null}
+        performance={performance}
+        performanceError={null}
+      />,
+    );
+  }
+
+  it("offers two independent selects: the grouping never moves the sort", async () => {
+    const user = userEvent.setup();
+    renderModel();
+
+    const grouping = screen.getByRole("combobox", { name: "Performance grouping" });
+    expect(
+      within(grouping).getAllByRole("option").map((option) => option.textContent),
+    ).toEqual(["By pipeline", "By model"]);
+    expect(screen.getByText("Ranked by context")).toBeInTheDocument();
+
+    // The sort stays put across a grouping switch — and the reverse.
+    await user.selectOptions(grouping, "model");
+    expect(screen.getByText("Ranked by context")).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance sort" }), "duration");
+    expect(screen.getByText("Ranked by duration")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Performance grouping" })).toHaveValue("model");
+
+    // A selection made on another axis does not survive the switch.
+    await user.click(screen.getByRole("option", { name: /claude-opus-4-8/ }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "pipeline");
+    // « By pipeline » keeps its one-line header; back on « By model » the
+    // breadcrumb is back at Total.
+    expect(screen.queryByTestId("stats-performance-breadcrumb")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+    expect(screen.getByTestId("stats-performance-breadcrumb")).toHaveTextContent(/^Total$/);
+  });
+
+  it("drills model → effort → pipeline → node and pops back through the crumbs", async () => {
+    const user = userEvent.setup();
+    renderModel();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+
+    const rows = screen.getAllByTestId("stats-detail-row");
+    expect(rows[0]).toHaveTextContent("claude-opus-4-8");
+    expect(within(rows[0]).getByTestId("stats-model-name")).toHaveTextContent("claude-opus-4-8");
+    // Observed is the norm: no « ? » mark on the model row…
+    expect(within(rows[0]).queryAllByTestId("stats-provenance-model")).toHaveLength(0);
+    // …while the requested one carries it.
+    expect(within(rows[1]).getAllByTestId("stats-provenance-model")).toHaveLength(1);
+
+    await user.click(screen.getByRole("option", { name: /claude-opus-4-8/ }));
+    expect(screen.getByTestId("stats-performance-breadcrumb")).toHaveTextContent(
+      "Total / claude-opus-4-8",
+    );
+    expect(screen.getByText("not set")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open high" }));
+    expect(screen.getByTestId("stats-performance-breadcrumb")).toHaveTextContent(
+      "Total / claude-opus-4-8 / high",
+    );
+    await user.click(screen.getByRole("button", { name: "Open Implement loop" }));
+    expect(screen.getByTestId("stats-performance-breadcrumb")).toHaveTextContent(
+      "Total / claude-opus-4-8 / high / Implement loop",
+    );
+    expect(screen.getAllByTestId("stats-detail-row")[0]).toHaveTextContent("Design");
+    // Node leaves are the floor: no couple chevron on the model axis.
+    expect(screen.queryByTestId("stats-node-toggle")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to high" }));
+    expect(screen.getByTestId("stats-performance-breadcrumb")).toHaveTextContent(
+      "Total / claude-opus-4-8 / high",
+    );
+    await user.click(screen.getByRole("button", { name: "Back to Total" }));
+    expect(screen.getByTestId("stats-performance-breadcrumb")).toHaveTextContent(/^Total$/);
+  });
+
+  it("marks provenance on hover like Cost, and keeps the not-set effort its own bucket", async () => {
+    const user = userEvent.setup();
+    renderModel();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+
+    await user.click(screen.getByRole("option", { name: /claude-opus-4-8/ }));
+    const notSet = screen.getAllByTestId("stats-detail-row")[1];
+    expect(notSet).toHaveTextContent("not set");
+    await user.hover(within(notSet).getByText("not set"));
+    expect(await screen.findByTestId("tooltip-content")).toHaveTextContent(
+      "no effort requested at node startup nor observed in transcripts",
+    );
+
+    // The requested model says so on hover, in the shared vocabulary (the
+    // tooltip renders its copy twice — visible + a11y — so substring match).
+    await user.click(screen.getByRole("button", { name: "Back to Total" }));
+    const sonnetRow = screen.getAllByTestId("stats-detail-row")[1];
+    const name = within(sonnetRow).getByTestId("stats-model-name");
+    await user.hover(name);
+    expect(await screen.findByTestId("tooltip-content")).toHaveTextContent(
+      "partly requested at node startup, not observed in every transcript",
+    );
+  });
+
+  it("expands a Node into its model × effort couples on By pipeline, not on By model", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <StatsCharts
+        tab="performance"
+        overview={null}
+        cost={null}
+        costError={null}
+        performance={PERFORMANCE}
+        performanceError={null}
+      />,
+    );
+
+    await user.click(screen.getByRole("option", { name: /Implement loop/ }));
+    const design = screen
+      .getAllByTestId("stats-detail-row")
+      .find((row) => row.textContent?.includes("Design"))!;
+    expect(within(design).getByTestId("stats-node-toggle")).toBeInTheDocument();
+
+    await user.click(within(design).getByTestId("stats-node-toggle"));
+    const coupleRows = screen.getAllByTestId("stats-performance-model-effort-row");
+    expect(coupleRows).toHaveLength(2);
+    // Distinct peaks and durations side by side, per harness dot included.
+    expect(coupleRows[0]).toHaveTextContent(/claude-opus-4-8\s*·\s*not set/);
+    expect(within(coupleRows[0]).getAllByTestId("performance-context-boxplot")).toHaveLength(1);
+    // The requested couple's model carries the « ? » mark; the effort too.
+    expect(coupleRows[1]).toHaveTextContent(/sonnet.*·.*high/);
+    // The requested couple carries the model and effort marks.
+    expect(within(coupleRows[1]).getAllByTestId("stats-provenance-effort")).toHaveLength(1);
+    expect(within(coupleRows[1]).getAllByTestId("stats-provenance-model")).toHaveLength(1);
+
+    // Under By model the path IS the drill: no chevrons anywhere.
+    unmount();
+    render(
+      <StatsCharts
+        tab="performance"
+        overview={null}
+        cost={null}
+        costError={null}
+        performance={{ ...PERFORMANCE, by_model: BY_MODEL.by_model }}
+        performanceError={null}
+      />,
+    );
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+    await user.click(screen.getByRole("option", { name: /claude-opus-4-8/ }));
+    await user.click(screen.getByRole("button", { name: "Open high" }));
+    await user.click(screen.getByRole("button", { name: "Open Implement loop" }));
+    expect(screen.queryByTestId("stats-node-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("stats-performance-model-effort-row")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Infrastructure row on By pipeline and out of By model", async () => {
+    const user = userEvent.setup();
+    render(
+      <StatsCharts
+        tab="performance"
+        overview={null}
+        cost={null}
+        costError={null}
+        performance={PERFORMANCE}
+        performanceError={null}
+      />,
+    );
+
+    expect(screen.getByRole("option", { name: /Infrastructure/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: /Infrastructure/ }));
+    expect(screen.getByText("Pipeline Manager")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+    expect(screen.queryByRole("option", { name: /Infrastructure/ })).not.toBeInTheDocument();
+  });
+
+  it("renders the model axis with the shared headline, cards and empty states", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderModel();
+
+    const headline = screen.getByTestId("stats-performance-headline");
+    expect(headline).toHaveTextContent("median peak context");
+    expect(headline).toHaveTextContent("median duration");
+    unmount();
+
+    // An empty by_model beside a non-empty by_pipeline is an empty axis, not
+    // an empty tab.
+    render(
+      <StatsCharts
+        tab="performance"
+        overview={null}
+        cost={null}
+        costError={null}
+        performance={{ ...PERFORMANCE, by_model: [] }}
+        performanceError={null}
+      />,
+    );
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+    expect(screen.getByText("No model observed in this period.")).toBeInTheDocument();
+  });
+
+  it("keeps the « ? » mark out of the drill button — no nested interactive (FP finding)", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderModel();
+
+    // On the By-model root the requested model's « ? » mark sits INSIDE the
+    // row's « Open … » button: the mark must be a plain span, not a second
+    // button (interactive-inside-interactive is invalid DOM).
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+    const open = screen.getByRole("button", { name: "Open sonnet" });
+    expect(within(open).getAllByTestId("stats-provenance-model")).toHaveLength(1);
+    expect(open.querySelectorAll("button")).toHaveLength(0);
+    expect(within(open).getByTestId("stats-provenance-model").getAttribute("aria-label")).toMatch(
+      /requested at node startup/,
+    );
+    unmount();
+
+    // The Cost axis's « By model » root had the same nesting — fixed at the
+    // source, in the mark itself.
+    render(<StatsCharts tab="cost" overview={null} cost={COST} costError={null} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Cost grouping" }), "model");
+    const costOpen = screen.getByRole("button", { name: "Open sonnet" });
+    expect(within(costOpen).getAllByTestId("stats-provenance-model")).toHaveLength(1);
+    expect(costOpen.querySelectorAll("button")).toHaveLength(0);
   });
 });

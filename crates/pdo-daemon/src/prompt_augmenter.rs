@@ -1960,7 +1960,10 @@ mod tests {
         let plain_pipeline = sample_pipeline();
         let plain = sample_ctx(&plain_pipeline, &plain_pipeline.nodes[0], &vars);
         let bare = build_full_prompt(&plain, "You are a worker. Work.");
-        assert!(!bare.contains("/pdo-orchestrate"), "a node without the toggle keeps its pre-#723 prompt");
+        assert!(
+            !bare.contains("/pdo-orchestrate"),
+            "a node without the toggle keeps its pre-#723 prompt"
+        );
     }
 
     #[test]
