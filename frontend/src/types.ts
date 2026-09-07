@@ -1559,6 +1559,38 @@ export interface StatsCostEntity extends StatsCostAggregate {
   name: string;
   by_period: StatsCostPeriod[];
   nodes: StatsCostEntity[];
+  /** The Node's cost split into model × effort pairs (ADR-0065) — Node leaves
+   *  only; the server omits it (never sends an empty array) on other levels. */
+  models?: StatsModelEffortPair[];
+}
+
+/** Where a model/effort value was read from (ADR-0065 §1): the harness's source
+ *  (observed — the norm, never marked) or the node startup event (requested —
+ *  marked « ? »), or both across the bucket's executions (mixed). */
+export type StatsProvenance = "observed" | "requested" | "mixed";
+
+/** One model × effort pair of a Node leaf (ADR-0065). `effort = null` is the
+ *  "not set" bucket — never merged with a real effort. */
+export interface StatsModelEffortPair extends StatsCostAggregate {
+  model: string;
+  model_provenance: StatsProvenance;
+  effort: string | null;
+  effort_provenance: StatsProvenance | null;
+}
+
+/** One effort level under a model in the « By model » tree: `id` is the effort
+ *  string ("" for not set), `name` the effort or "not set". */
+export interface StatsEffortCostEntity extends StatsCostEntity {
+  effort: string | null;
+  provenance: StatsProvenance | null;
+  pipelines: StatsCostEntity[];
+}
+
+/** One model (verbatim id) of the « By model » axis: Model → Effort → Pipeline
+ *  → Node. */
+export interface StatsModelCostEntity extends StatsCostEntity {
+  provenance: StatsProvenance;
+  efforts: StatsEffortCostEntity[];
 }
 
 export interface StatsProjectCostEntity extends StatsCostEntity {
@@ -1584,6 +1616,9 @@ export interface StatsCost {
   by_period: StatsCostPeriod[];
   by_pipeline: StatsCostEntity[];
   by_project: StatsProjectCostEntity[];
+  /** The « By model » axis (ADR-0065): models ranked by cost, each with its
+   *  effort → pipeline → node tree. */
+  by_model: StatsModelCostEntity[];
   /** The resolved price table, one row per family in alphabetical order (#528).
    *  Window-independent — a property of the price table, not the fold. Refreshed
    *  by the "Sync costs" refetch on the Cost tab. */

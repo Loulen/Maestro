@@ -295,6 +295,7 @@ vi.mock("./api", () => {
         total: emptyAggregate,
         by_period: [],
         by_pipeline: [],
+        by_model: [],
         by_project: [],
         resolved: [],
       }),
@@ -303,6 +304,7 @@ vi.mock("./api", () => {
         total: { harnesses: [] },
         infrastructure_total: { harnesses: [] },
         by_pipeline: [],
+        by_model: [],
         infrastructure: [],
       }),
       syncCostPrices: vi.fn().mockResolvedValue({
