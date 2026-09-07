@@ -1204,34 +1204,48 @@ fn fold_harness_cost(runs: &[CostRunRow], resolved: Vec<ResolvedPriceRow>) -> St
             .or_default()
             .add_run(&run.contributions);
 
+        // A pipeline's headline is its nodes' work (ADR-0029 as amended by
+        // #742): the Infrastructure bucket — the run's own manager and
+        // merge-resolver sessions, plus attributable leftover transcripts —
+        // and the Unassigned orphans stay visible as node rows below the
+        // headline, but they are orchestration overhead, not pipeline work.
+        // The instance totals above keep every contribution (ADR-0058: a
+        // run's total is the sum of what it actually spent).
+        let node_contributions: Vec<crate::run_cost::CostContribution> = run
+            .contributions
+            .iter()
+            .filter(|c| c.scope == crate::run_cost::CostScope::Node)
+            .cloned()
+            .collect();
+
         let pipeline = pipelines.entry(run.pipeline_id.clone()).or_default();
         pipeline.name = run.pipeline_name.clone();
-        pipeline.aggregate.add_run(&run.contributions);
+        pipeline.aggregate.add_run(&node_contributions);
         pipeline
             .periods
             .entry(run.bucket.clone())
             .or_default()
-            .add_run(&run.contributions);
+            .add_run(&node_contributions);
 
         let project = projects.entry(run.project_id.clone()).or_default();
         project.name = run.project_name.clone();
-        project.aggregate.add_run(&run.contributions);
+        project.aggregate.add_run(&node_contributions);
         project
             .periods
             .entry(run.bucket.clone())
             .or_default()
-            .add_run(&run.contributions);
+            .add_run(&node_contributions);
         let project_pipeline = project
             .pipelines
             .entry(run.pipeline_id.clone())
             .or_default();
         project_pipeline.name = run.pipeline_name.clone();
-        project_pipeline.aggregate.add_run(&run.contributions);
+        project_pipeline.aggregate.add_run(&node_contributions);
         project_pipeline
             .periods
             .entry(run.bucket.clone())
             .or_default()
-            .add_run(&run.contributions);
+            .add_run(&node_contributions);
 
         for contribution in &run.contributions {
             if contribution.executions > 0 {
@@ -1323,18 +1337,25 @@ fn fold_harness_cost(runs: &[CostRunRow], resolved: Vec<ResolvedPriceRow>) -> St
                     None => {}
                 }
 
+                // Same rule as the pipeline headline above: only node work
+                // sums into a pipeline on the « By model » axis. The slices
+                // still land in the model/effort aggregates and in the node
+                // leaves below (infrastructure sessions do burn model tokens
+                // — they are just not pipeline work).
                 let axis_pipeline = effort.pipelines.entry(run.pipeline_id.clone()).or_default();
                 axis_pipeline.entity.name = run.pipeline_name.clone();
-                axis_pipeline
-                    .entity
-                    .aggregate
-                    .add_slice(&contribution.harness, slice);
-                axis_pipeline
-                    .entity
-                    .periods
-                    .entry(run.bucket.clone())
-                    .or_default()
-                    .add_slice(&contribution.harness, slice);
+                if contribution.scope == crate::run_cost::CostScope::Node {
+                    axis_pipeline
+                        .entity
+                        .aggregate
+                        .add_slice(&contribution.harness, slice);
+                    axis_pipeline
+                        .entity
+                        .periods
+                        .entry(run.bucket.clone())
+                        .or_default()
+                        .add_slice(&contribution.harness, slice);
+                }
 
                 let axis_node = axis_pipeline.nodes.entry(id.clone()).or_default();
                 axis_node.name = name.clone();
@@ -2318,6 +2339,85 @@ mod tests {
                 .usd,
             Some(5.0)
         );
+    }
+
+    #[test]
+    fn pipeline_headline_excludes_infrastructure_and_unassigned_cost() {
+        // #742: a pipeline's headline is its nodes' work. The Infrastructure
+        // bucket (manager + merge-resolver sessions) and the Unassigned
+        // orphans stay visible as node rows under the pipeline, but they no
+        // longer sum into its aggregate, its periods, the project levels or
+        // the « By model » axis pipeline. The instance total keeps every
+        // contribution (ADR-0058: a run's total is what it actually spent).
+        let node = claude_node_contribution(
+            "n",
+            Some(5.0),
+            vec![model_slice("claude-opus-4-8", true, Some("high"), Some(5.0))],
+        );
+        let infra = crate::run_cost::CostContribution {
+            harness: "claude".to_string(),
+            scope: crate::run_cost::CostScope::Infrastructure,
+            node_id: None,
+            executions: 1,
+            readable_executions: 1,
+            usd: Some(2.0),
+            form: Some(crate::event_log::CostForm::Derived),
+            reported_in_usd: false,
+            partial: false,
+            unpriced_models: Vec::new(),
+            unavailable_reasons: Vec::new(),
+            model_slices: vec![model_slice("claude-opus-4-8", true, Some("high"), Some(2.0))],
+        };
+        let unassigned = crate::run_cost::CostContribution {
+            usd: Some(1.0),
+            readable_executions: 1,
+            form: Some(crate::event_log::CostForm::Derived),
+            scope: crate::run_cost::CostScope::Unassigned,
+            model_slices: Vec::new(),
+            ..node.clone()
+        };
+        let run = node_run_row("2026-09-01", "n", "Worker", vec![node, infra, unassigned]);
+
+        let stats = fold_harness_cost(&[run], Vec::new());
+        assert_eq!(stats.total.usd, Some(8.0), "the run total is unchanged");
+
+        let pipeline = &stats.by_pipeline[0];
+        assert_eq!(pipeline.id, "p");
+        assert_eq!(pipeline.aggregate.usd, Some(5.0), "headline = node work");
+        assert_eq!(pipeline.by_period[0].aggregate.usd, Some(5.0));
+        let rows: Vec<(&str, Option<f64>)> = pipeline
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.aggregate.usd))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("n", Some(5.0)), ("p:infrastructure", Some(2.0)), ("p:unassigned", Some(1.0))],
+            "infrastructure/unassigned stay visible as node rows"
+        );
+
+        let project = &stats.by_project[0];
+        assert_eq!(project.entity.aggregate.usd, Some(5.0));
+        assert_eq!(project.pipelines[0].aggregate.usd, Some(5.0));
+
+        // The « By model » axis: the model level keeps every contribution
+        // (infrastructure sessions burn model tokens), the pipeline level
+        // under an effort does not.
+        let opus = &stats.by_model[0];
+        assert_eq!(opus.entity.aggregate.usd, Some(7.0));
+        let high = &opus.efforts[0];
+        assert_eq!(high.entity.id, "high");
+        let axis_pipeline = &high.pipelines[0];
+        assert_eq!(axis_pipeline.id, "p");
+        assert_eq!(
+            axis_pipeline.aggregate.usd,
+            Some(5.0),
+            "model-axis pipeline = node work too"
+        );
+        assert!(axis_pipeline
+            .nodes
+            .iter()
+            .any(|n| n.id == "p:infrastructure" && n.aggregate.usd == Some(2.0)));
     }
 
     #[test]
