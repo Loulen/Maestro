@@ -543,6 +543,19 @@ pub(crate) struct StatsHarnessCost {
     pub average_usd: Option<f64>,
     pub unpriced_models: Vec<String>,
     pub missing_reasons: Vec<String>,
+    /// Where THIS harness's model value in the row was read from (ADR-0065 §1)
+    /// — only meaningful on the « By model » rows and the Node leaves' pairs
+    /// (#736: the tooltip says, harness by harness, where the value came from);
+    /// omitted on the rows that carry no slices (totals, other axes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<StatsProvenance>,
+    /// Same, for the effort half of the row; absent on model-only rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_provenance: Option<StatsProvenance>,
+    /// The provider the harness's source named for this model (`pi` via
+    /// openrouter) — tooltip only, never part of the identity (ADR-0065 §2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -574,6 +587,67 @@ pub(crate) struct StatsCostEntity {
     pub aggregate: StatsCostAggregate,
     pub by_period: Vec<StatsCostPeriod>,
     pub nodes: Vec<StatsCostEntity>,
+    /// The Node's cost split into model × effort pairs (ADR-0065) — Node leaves
+    /// only, so the drill-down ends there; omitted (never an empty array) on the
+    /// other levels.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<StatsModelEffortPair>,
+}
+
+/// Where a model/effort value was read from (ADR-0065 §1): the harness's source
+/// (observed — the norm, never marked) or the startup event (requested — marked
+/// « ? »), or both across the bucket's executions (mixed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StatsProvenance {
+    Observed,
+    Requested,
+    Mixed,
+}
+
+/// Observed and requested counts decide the label; both present in one bucket is
+/// the honest « mixed ». Shared with the Performance « By model » axis (#737).
+pub(crate) fn provenance(observed: i64, requested: i64) -> StatsProvenance {
+    match (observed > 0, requested > 0) {
+        (true, false) => StatsProvenance::Observed,
+        (false, true) => StatsProvenance::Requested,
+        (_, _) => StatsProvenance::Mixed,
+    }
+}
+
+/// One model × effort pair of a Node leaf (ADR-0065): the same aggregate shape
+/// as any cost row, plus the pair identity and where each half was read from.
+/// `effort = None` is the "not set" bucket — never merged with a real effort.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct StatsModelEffortPair {
+    #[serde(flatten)]
+    pub aggregate: StatsCostAggregate,
+    pub model: String,
+    pub model_provenance: StatsProvenance,
+    pub effort: Option<String>,
+    pub effort_provenance: Option<StatsProvenance>,
+}
+
+/// One effort level under a model, in the « By model » tree: the entity's `id`
+/// is the effort string ("" for not set) and its `name` the effort or
+/// "not set".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct StatsEffortCostEntity {
+    #[serde(flatten)]
+    pub entity: StatsCostEntity,
+    pub effort: Option<String>,
+    pub provenance: Option<StatsProvenance>,
+    pub pipelines: Vec<StatsCostEntity>,
+}
+
+/// One model (verbatim id) of the « By model » axis, with its effort tree:
+/// Model → Effort → Pipeline → Node.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct StatsModelCostEntity {
+    #[serde(flatten)]
+    pub entity: StatsCostEntity,
+    pub provenance: StatsProvenance,
+    pub efforts: Vec<StatsEffortCostEntity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -590,6 +664,7 @@ pub(crate) struct StatsCost {
     pub by_period: Vec<StatsCostPeriod>,
     pub by_pipeline: Vec<StatsCostEntity>,
     pub by_project: Vec<StatsProjectCostEntity>,
+    pub by_model: Vec<StatsModelCostEntity>,
     pub resolved: Vec<ResolvedPriceRow>,
 }
 
@@ -686,14 +761,87 @@ impl CostMetricAcc {
             average_usd: (self.readable > 0).then_some(self.readable_usd / self.readable as f64),
             unpriced_models: self.unpriced_models.iter().cloned().collect(),
             missing_reasons: self.missing_reasons.iter().cloned().collect(),
+            provenance: None,
+            effort_provenance: None,
+            provider: None,
         }
+    }
+
+    /// The same lower-bound bookkeeping, for one model × effort slice (ADR-0065).
+    /// An execution counts — and costs — in every bucket it provably ran on, so a
+    /// bucket's executions may sum to more than the execution count of its
+    /// parent aggregate; that double count is the design, not a leak.
+    fn add_slice(&mut self, slice: &crate::run_cost::ModelEffortSlice) {
+        self.executions += slice.executions;
+        let readable = i64::from(slice.usd.is_some()) * slice.executions;
+        self.readable += readable;
+        self.unknown += slice.executions - readable;
+        if let Some(usd) = slice.usd {
+            self.usd += usd;
+            self.has_usd = true;
+            self.readable_usd += usd;
+        }
+        self.estimated |= slice.estimated;
+        self.partial |= slice.partial;
+        self.unpriced_models
+            .extend(slice.unpriced_models.iter().cloned());
+        self.missing_reasons
+            .extend(slice.missing_reasons.iter().cloned());
     }
 }
 
 #[derive(Debug, Clone, Default)]
 struct CostAggregateAcc {
     total: CostMetricAcc,
-    harnesses: BTreeMap<String, CostMetricAcc>,
+    harnesses: BTreeMap<String, HarnessMetricAcc>,
+}
+
+/// One harness's slice of a row: its dollars plus the provenance counters and
+/// providers the wire's harness entry carries on the « By model » rows and the
+/// Node pairs (#736). Everything is read off the slices — the run-level adds
+/// (`add_run` / `add_contribution`) touch only the metric, so rows without
+/// slices wire no provenance at all.
+#[derive(Debug, Clone, Default)]
+struct HarnessMetricAcc {
+    metric: CostMetricAcc,
+    model_observed: i64,
+    model_requested: i64,
+    effort_observed: i64,
+    effort_requested: i64,
+    providers: BTreeSet<String>,
+}
+
+impl HarnessMetricAcc {
+    fn add_slice(&mut self, slice: &crate::run_cost::ModelEffortSlice) {
+        self.metric.add_slice(slice);
+        if slice.model_observed {
+            self.model_observed += 1;
+        } else {
+            self.model_requested += 1;
+        }
+        match slice.effort_observed {
+            Some(true) => self.effort_observed += 1,
+            Some(false) => self.effort_requested += 1,
+            None => {}
+        }
+        if let Some(provider) = &slice.provider {
+            self.providers.insert(provider.clone());
+        }
+    }
+
+    fn wire(self, harness: String) -> StatsHarnessCost {
+        let mut wired = self.metric.wire_harness(harness);
+        if self.model_observed + self.model_requested > 0 {
+            wired.provenance = Some(provenance(self.model_observed, self.model_requested));
+        }
+        if self.effort_observed + self.effort_requested > 0 {
+            wired.effort_provenance = Some(provenance(self.effort_observed, self.effort_requested));
+        }
+        if !self.providers.is_empty() {
+            wired.provider = Some(self.providers.into_iter().collect::<Vec<_>>().join(", "));
+        }
+        wired
+    }
 }
 
 impl CostAggregateAcc {
@@ -714,6 +862,7 @@ impl CostAggregateAcc {
             self.harnesses
                 .entry(harness)
                 .or_default()
+                .metric
                 .add_run(&matching);
         }
     }
@@ -723,7 +872,16 @@ impl CostAggregateAcc {
         self.harnesses
             .entry(contribution.harness.clone())
             .or_default()
+            .metric
             .add_contribution(contribution);
+    }
+
+    fn add_slice(&mut self, harness: &str, slice: &crate::run_cost::ModelEffortSlice) {
+        self.total.add_slice(slice);
+        self.harnesses
+            .entry(harness.to_string())
+            .or_default()
+            .add_slice(slice);
     }
 
     fn wire(&self) -> StatsCostAggregate {
@@ -731,7 +889,7 @@ impl CostAggregateAcc {
         aggregate.harnesses = self
             .harnesses
             .iter()
-            .map(|(harness, metric)| metric.wire_harness(harness.clone()))
+            .map(|(harness, metric)| metric.clone().wire(harness.clone()))
             .collect();
         aggregate
     }
@@ -743,6 +901,201 @@ struct CostEntityAcc {
     aggregate: CostAggregateAcc,
     periods: BTreeMap<String, CostAggregateAcc>,
     nodes: BTreeMap<String, CostEntityAcc>,
+    /// The Node leaf's model × effort pairs (ADR-0065) — only node-level accs
+    /// ever receive slices, so pipeline-level wiring emits an empty vec.
+    pairs: BTreeMap<(String, Option<String>), ModelPairAcc>,
+}
+
+/// One model × effort bucket, accumulated over the executions that landed in
+/// it. The observed/requested counters decide the wire's provenance, including
+/// the « mixed » case (some executions read from the source, some fell back to
+/// the startup event).
+#[derive(Debug, Clone, Default)]
+struct ModelPairAcc {
+    metric: CostMetricAcc,
+    harnesses: BTreeMap<String, HarnessMetricAcc>,
+    model_observed: i64,
+    model_requested: i64,
+    effort_observed: i64,
+    effort_requested: i64,
+}
+
+impl ModelPairAcc {
+    fn add_slice(&mut self, harness: &str, slice: &crate::run_cost::ModelEffortSlice) {
+        self.metric.add_slice(slice);
+        self.harnesses
+            .entry(harness.to_string())
+            .or_default()
+            .add_slice(slice);
+        if slice.model_observed {
+            self.model_observed += 1;
+        } else {
+            self.model_requested += 1;
+        }
+        match slice.effort_observed {
+            Some(true) => self.effort_observed += 1,
+            Some(false) => self.effort_requested += 1,
+            None => {}
+        }
+    }
+
+    fn wire(self, model: String, effort: Option<String>) -> StatsModelEffortPair {
+        let mut aggregate = self.metric.wire();
+        aggregate.harnesses = self
+            .harnesses
+            .into_iter()
+            .map(|(harness, acc)| acc.wire(harness))
+            .collect();
+        StatsModelEffortPair {
+            aggregate,
+            model_provenance: provenance(self.model_observed, self.model_requested),
+            effort_provenance: effort
+                .as_ref()
+                .map(|_| provenance(self.effort_observed, self.effort_requested)),
+            model,
+            effort,
+        }
+    }
+}
+
+/// Sort key shared by every cost row: dollars first (a missing reading last),
+/// then id — the same order the pipeline/node levels already use.
+fn cost_then_id(
+    a_usd: Option<f64>,
+    a_id: &str,
+    b_usd: Option<f64>,
+    b_id: &str,
+) -> std::cmp::Ordering {
+    b_usd
+        .unwrap_or(-1.0)
+        .partial_cmp(&a_usd.unwrap_or(-1.0))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a_id.cmp(b_id))
+}
+
+fn wire_pairs(
+    pairs: BTreeMap<(String, Option<String>), ModelPairAcc>,
+) -> Vec<StatsModelEffortPair> {
+    let mut rows: Vec<StatsModelEffortPair> = pairs
+        .into_iter()
+        .map(|((model, effort), acc)| acc.wire(model, effort))
+        .collect();
+    rows.sort_by(|a, b| {
+        cost_then_id(a.aggregate.usd, &a.model, b.aggregate.usd, &b.model)
+            .then_with(|| a.effort.cmp(&b.effort))
+    });
+    rows
+}
+
+/// One pipeline level of the « By model » tree. `entity.nodes` stays empty —
+/// the node level rides beside it so `wire_cost_entity` can't recurse into it.
+#[derive(Debug, Clone, Default)]
+struct ModelAxisPipelineAcc {
+    entity: CostEntityAcc,
+    nodes: BTreeMap<String, CostEntityAcc>,
+}
+
+/// One effort level under a model. `effort: None` is the "not set" bucket.
+#[derive(Debug, Clone, Default)]
+struct ModelEffortAcc {
+    aggregate: CostAggregateAcc,
+    periods: BTreeMap<String, CostAggregateAcc>,
+    pipelines: BTreeMap<String, ModelAxisPipelineAcc>,
+    model_observed: i64,
+    model_requested: i64,
+    effort_observed: i64,
+    effort_requested: i64,
+}
+
+/// One model (verbatim id) of the « By model » axis.
+#[derive(Debug, Clone, Default)]
+struct ModelAcc {
+    aggregate: CostAggregateAcc,
+    periods: BTreeMap<String, CostAggregateAcc>,
+    efforts: BTreeMap<Option<String>, ModelEffortAcc>,
+    model_observed: i64,
+    model_requested: i64,
+}
+
+/// Wire the whole « By model » tree: Model → Effort → Pipeline → Node, ranked by
+/// cost at every level. Every level carries `by_period` so the harness-stacked
+/// bars follow the drill.
+fn wire_by_model(models: BTreeMap<String, ModelAcc>) -> Vec<StatsModelCostEntity> {
+    let mut rows: Vec<StatsModelCostEntity> = models
+        .into_iter()
+        .map(|(model, acc)| {
+            let mut efforts: Vec<StatsEffortCostEntity> = acc
+                .efforts
+                .into_iter()
+                .map(|(effort, effort_acc)| {
+                    let mut pipelines: Vec<StatsCostEntity> = effort_acc
+                        .pipelines
+                        .into_iter()
+                        .map(|(id, pipeline_acc)| {
+                            let mut entity = wire_cost_entity(id, pipeline_acc.entity);
+                            let mut nodes: Vec<StatsCostEntity> = pipeline_acc
+                                .nodes
+                                .into_iter()
+                                .map(|(id, node)| wire_cost_entity(id, node))
+                                .collect();
+                            nodes.sort_by(|a, b| {
+                                cost_then_id(a.aggregate.usd, &a.id, b.aggregate.usd, &b.id)
+                            });
+                            entity.nodes = nodes;
+                            entity
+                        })
+                        .collect();
+                    pipelines.sort_by(|a, b| {
+                        cost_then_id(a.aggregate.usd, &a.id, b.aggregate.usd, &b.id)
+                    });
+                    StatsEffortCostEntity {
+                        entity: StatsCostEntity {
+                            id: effort.clone().unwrap_or_default(),
+                            name: effort.clone().unwrap_or_else(|| "not set".to_string()),
+                            aggregate: effort_acc.aggregate.wire(),
+                            by_period: wire_periods(effort_acc.periods),
+                            nodes: Vec::new(),
+                            models: Vec::new(),
+                        },
+                        provenance: effort.as_ref().map(|_| {
+                            provenance(effort_acc.effort_observed, effort_acc.effort_requested)
+                        }),
+                        effort,
+                        pipelines,
+                    }
+                })
+                .collect();
+            efforts.sort_by(|a, b| {
+                cost_then_id(
+                    a.entity.aggregate.usd,
+                    &a.entity.id,
+                    b.entity.aggregate.usd,
+                    &b.entity.id,
+                )
+            });
+            StatsModelCostEntity {
+                entity: StatsCostEntity {
+                    id: model.clone(),
+                    name: model,
+                    aggregate: acc.aggregate.wire(),
+                    by_period: wire_periods(acc.periods),
+                    nodes: Vec::new(),
+                    models: Vec::new(),
+                },
+                provenance: provenance(acc.model_observed, acc.model_requested),
+                efforts,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        cost_then_id(
+            a.entity.aggregate.usd,
+            &a.entity.id,
+            b.entity.aggregate.usd,
+            &b.entity.id,
+        )
+    });
+    rows
 }
 
 #[derive(Debug, Clone, Default)]
@@ -783,6 +1136,7 @@ fn wire_cost_entity(id: String, entity: CostEntityAcc) -> StatsCostEntity {
         aggregate: entity.aggregate.wire(),
         by_period: wire_periods(entity.periods),
         nodes,
+        models: wire_pairs(entity.pairs),
     }
 }
 
@@ -840,6 +1194,7 @@ fn fold_harness_cost(runs: &[CostRunRow], resolved: Vec<ResolvedPriceRow>) -> St
     let mut periods = BTreeMap::<String, CostAggregateAcc>::new();
     let mut pipelines = BTreeMap::<String, CostEntityAcc>::new();
     let mut projects = BTreeMap::<String, CostProjectAcc>::new();
+    let mut models_axis = BTreeMap::<String, ModelAcc>::new();
     let mut active_harnesses = BTreeSet::new();
 
     for run in runs {
@@ -912,14 +1267,84 @@ fn fold_harness_cost(runs: &[CostRunRow], resolved: Vec<ResolvedPriceRow>) -> St
                 .or_default()
                 .add_contribution(contribution);
 
-            let project_node = project_pipeline.nodes.entry(id).or_default();
-            project_node.name = name;
+            let project_node = project_pipeline.nodes.entry(id.clone()).or_default();
+            project_node.name = name.clone();
             project_node.aggregate.add_contribution(contribution);
             project_node
                 .periods
                 .entry(run.bucket.clone())
                 .or_default()
                 .add_contribution(contribution);
+
+            // ADR-0065: the Node leaf's model × effort pairs, plus the whole
+            // « By model » tree — one pass over the same slices, the same node
+            // identity as the axes above. Slices land in every level of both
+            // hierarchies so headline, cards and period bars all re-scope.
+            for slice in &contribution.model_slices {
+                let pair_key = (slice.model.clone(), slice.effort.clone());
+                node.pairs
+                    .entry(pair_key.clone())
+                    .or_default()
+                    .add_slice(&contribution.harness, slice);
+                project_node
+                    .pairs
+                    .entry(pair_key)
+                    .or_default()
+                    .add_slice(&contribution.harness, slice);
+
+                let model = models_axis.entry(slice.model.clone()).or_default();
+                model.aggregate.add_slice(&contribution.harness, slice);
+                model
+                    .periods
+                    .entry(run.bucket.clone())
+                    .or_default()
+                    .add_slice(&contribution.harness, slice);
+                if slice.model_observed {
+                    model.model_observed += 1;
+                } else {
+                    model.model_requested += 1;
+                }
+
+                let effort = model.efforts.entry(slice.effort.clone()).or_default();
+                effort.aggregate.add_slice(&contribution.harness, slice);
+                effort
+                    .periods
+                    .entry(run.bucket.clone())
+                    .or_default()
+                    .add_slice(&contribution.harness, slice);
+                if slice.model_observed {
+                    effort.model_observed += 1;
+                } else {
+                    effort.model_requested += 1;
+                }
+                match slice.effort_observed {
+                    Some(true) => effort.effort_observed += 1,
+                    Some(false) => effort.effort_requested += 1,
+                    None => {}
+                }
+
+                let axis_pipeline = effort.pipelines.entry(run.pipeline_id.clone()).or_default();
+                axis_pipeline.entity.name = run.pipeline_name.clone();
+                axis_pipeline
+                    .entity
+                    .aggregate
+                    .add_slice(&contribution.harness, slice);
+                axis_pipeline
+                    .entity
+                    .periods
+                    .entry(run.bucket.clone())
+                    .or_default()
+                    .add_slice(&contribution.harness, slice);
+
+                let axis_node = axis_pipeline.nodes.entry(id.clone()).or_default();
+                axis_node.name = name.clone();
+                axis_node.aggregate.add_slice(&contribution.harness, slice);
+                axis_node
+                    .periods
+                    .entry(run.bucket.clone())
+                    .or_default()
+                    .add_slice(&contribution.harness, slice);
+            }
         }
     }
 
@@ -959,6 +1384,7 @@ fn fold_harness_cost(runs: &[CostRunRow], resolved: Vec<ResolvedPriceRow>) -> St
                     aggregate: project.aggregate.wire(),
                     by_period: wire_periods(project.periods),
                     nodes: Vec::new(),
+                    models: Vec::new(),
                 },
                 pipelines,
             }
@@ -980,6 +1406,7 @@ fn fold_harness_cost(runs: &[CostRunRow], resolved: Vec<ResolvedPriceRow>) -> St
         by_period: wire_periods(periods),
         by_pipeline,
         by_project,
+        by_model: wire_by_model(models_axis),
         resolved,
     }
 }
@@ -1461,6 +1888,7 @@ mod tests {
                     partial: true,
                     unpriced_models: vec!["claude-fable-5".to_string()],
                     unavailable_reasons: Vec::new(),
+                    model_slices: Vec::new(),
                 },
                 crate::run_cost::CostContribution {
                     harness: "future".to_string(),
@@ -1474,6 +1902,7 @@ mod tests {
                     partial: false,
                     unpriced_models: Vec::new(),
                     unavailable_reasons: vec!["harness has no cost source".to_string()],
+                    model_slices: Vec::new(),
                 },
             ],
         };
@@ -1519,6 +1948,376 @@ mod tests {
         let ov = compute_overview(&db, "%Y-%m-%d", FROM, TO).await.unwrap();
         assert_eq!(ov.runs.len(), 1);
         assert_eq!(ov.runs[0].count, 1);
+    }
+
+    // --- « By model » axis (ADR-0065, #735) ---
+
+    fn model_slice(
+        model: &str,
+        observed: bool,
+        effort: Option<&str>,
+        usd: Option<f64>,
+    ) -> crate::run_cost::ModelEffortSlice {
+        crate::run_cost::ModelEffortSlice {
+            model: model.to_string(),
+            model_observed: observed,
+            effort: effort.map(String::from),
+            effort_observed: effort.map(|_| false),
+            provider: None,
+            usd,
+            estimated: usd.is_some(),
+            partial: false,
+            executions: 1,
+            unpriced_models: Vec::new(),
+            missing_reasons: usd
+                .is_none()
+                .then(|| "no attributable Claude transcript".to_string())
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn node_run_row(
+        bucket: &str,
+        node_id: &str,
+        node_name: &str,
+        contributions: Vec<crate::run_cost::CostContribution>,
+    ) -> CostRunRow {
+        CostRunRow {
+            bucket: bucket.to_string(),
+            pipeline_id: "p".to_string(),
+            pipeline_name: "Impl".to_string(),
+            project_id: "/repo".to_string(),
+            project_name: "repo".to_string(),
+            node_names: BTreeMap::from([(node_id.to_string(), node_name.to_string())]),
+            contributions,
+        }
+    }
+
+    fn claude_node_contribution(
+        node_id: &str,
+        usd: Option<f64>,
+        slices: Vec<crate::run_cost::ModelEffortSlice>,
+    ) -> crate::run_cost::CostContribution {
+        crate::run_cost::CostContribution {
+            harness: "claude".to_string(),
+            scope: crate::run_cost::CostScope::Node,
+            node_id: Some(node_id.to_string()),
+            executions: 1,
+            readable_executions: i64::from(usd.is_some()),
+            usd,
+            form: usd.map(|_| crate::event_log::CostForm::Derived),
+            reported_in_usd: false,
+            partial: false,
+            unpriced_models: Vec::new(),
+            unavailable_reasons: usd
+                .is_none()
+                .then(|| "no attributable Claude transcript".to_string())
+                .into_iter()
+                .collect(),
+            model_slices: slices,
+        }
+    }
+
+    #[test]
+    fn by_model_tree_ventilates_models_efforts_pipelines_nodes_and_names_provenance() {
+        // Run A: one execution, two observed models (opus@high, sonnet@medium).
+        let run_a = node_run_row(
+            "2026-09-01",
+            "n",
+            "Worker",
+            vec![claude_node_contribution(
+                "n",
+                Some(8.0),
+                vec![
+                    model_slice("claude-opus-4-8", true, Some("high"), Some(5.0)),
+                    model_slice("claude-sonnet-5", true, Some("medium"), Some(3.0)),
+                ],
+            )],
+        );
+        // Run B: a mute-source execution falling back to the requested sonnet@high.
+        let run_b = node_run_row(
+            "2026-09-02",
+            "n2",
+            "Other",
+            vec![claude_node_contribution(
+                "n2",
+                None,
+                vec![model_slice("claude-sonnet-5", false, Some("high"), None)],
+            )],
+        );
+
+        let stats = fold_harness_cost(&[run_a, run_b], Vec::new());
+        let models = &stats.by_model;
+        assert_eq!(
+            models
+                .iter()
+                .map(|m| m.entity.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-opus-4-8", "claude-sonnet-5"],
+            "ranked by cost, ids verbatim"
+        );
+
+        let opus = &models[0];
+        assert_eq!(opus.provenance, StatsProvenance::Observed);
+        assert_eq!(opus.entity.aggregate.usd, Some(5.0));
+        assert_eq!(opus.entity.aggregate.executions, 1);
+
+        let sonnet = &models[1];
+        assert_eq!(
+            sonnet.provenance,
+            StatsProvenance::Mixed,
+            "one execution observed it, one fell back to the requested id"
+        );
+        assert_eq!(sonnet.entity.aggregate.usd, Some(3.0));
+        assert_eq!(
+            sonnet.entity.aggregate.executions, 2,
+            "one execution per bucket"
+        );
+        let effort_names: Vec<&str> = sonnet
+            .efforts
+            .iter()
+            .map(|e| e.entity.name.as_str())
+            .collect();
+        assert_eq!(effort_names, vec!["medium", "high"], "ranked by cost");
+        let medium = &sonnet.efforts[0];
+        assert_eq!(medium.entity.id, "medium");
+        assert_eq!(medium.effort.as_deref(), Some("medium"));
+        assert_eq!(medium.provenance, Some(StatsProvenance::Requested));
+        let pipeline = &medium.pipelines[0];
+        assert_eq!(pipeline.id, "p");
+        assert_eq!(pipeline.nodes.len(), 1);
+        assert_eq!(pipeline.nodes[0].name, "Worker");
+        let high = &sonnet.efforts[1];
+        assert_eq!(high.entity.aggregate.usd, None);
+        assert_eq!(high.entity.aggregate.unknown, 1);
+        assert_eq!(
+            high.entity.aggregate.missing_reasons,
+            vec!["no attributable Claude transcript"]
+        );
+        assert!(high.pipelines[0]
+            .nodes
+            .iter()
+            .any(|node| node.name == "Other"));
+
+        // The by_pipeline leaves carry the pairs; the by_model leaves do not.
+        let pipeline_row = stats.by_pipeline.iter().find(|row| row.id == "p").unwrap();
+        let worker = pipeline_row
+            .nodes
+            .iter()
+            .find(|node| node.id == "n")
+            .unwrap();
+        assert_eq!(worker.models.len(), 2);
+        let pair = &worker.models[0];
+        assert_eq!(pair.model, "claude-opus-4-8");
+        assert_eq!(pair.model_provenance, StatsProvenance::Observed);
+        assert_eq!(pair.effort.as_deref(), Some("high"));
+        assert_eq!(pair.effort_provenance, Some(StatsProvenance::Requested));
+        assert_eq!(pair.aggregate.usd, Some(5.0));
+        assert_eq!(pair.aggregate.harnesses[0].harness, "claude");
+        let other = pipeline_row
+            .nodes
+            .iter()
+            .find(|node| node.id == "n2")
+            .unwrap();
+        assert_eq!(other.models.len(), 1);
+        assert_eq!(other.models[0].model_provenance, StatsProvenance::Requested);
+    }
+
+    #[test]
+    fn by_model_merges_one_id_across_harnesses_and_says_where_each_half_was_read() {
+        // The same id via `claude` (observed per message, effort requested) and
+        // via `pi` (observed per message, effort observed from the thinking
+        // level, provider openrouter) is ONE row with TWO harness columns
+        // (#736, ADR-0065 §2); the totals add up (ADR-0052).
+        let mut claude = claude_node_contribution(
+            "n",
+            Some(3.0),
+            vec![model_slice(
+                "claude-sonnet-5",
+                true,
+                Some("high"),
+                Some(3.0),
+            )],
+        );
+        claude.harness = "claude".to_string();
+        let mut pi_slice = model_slice("claude-sonnet-5", true, Some("low"), Some(0.5));
+        pi_slice.effort_observed = Some(true);
+        pi_slice.estimated = false;
+        pi_slice.provider = Some("openrouter".to_string());
+        let pi = crate::run_cost::CostContribution {
+            harness: "pi".to_string(),
+            ..claude.clone()
+        };
+        let pi = crate::run_cost::CostContribution {
+            model_slices: vec![pi_slice],
+            ..pi
+        };
+        let stats = fold_harness_cost(
+            &[node_run_row("2026-09-01", "n", "Worker", vec![claude, pi])],
+            Vec::new(),
+        );
+
+        assert_eq!(stats.by_model.len(), 1, "one id, one row across harnesses");
+        let row = &stats.by_model[0];
+        assert_eq!(row.entity.id, "claude-sonnet-5");
+        assert_eq!(row.entity.aggregate.usd, Some(3.5), "the totals add up");
+        assert_eq!(row.entity.aggregate.executions, 2);
+        let harnesses = &row.entity.aggregate.harnesses;
+        assert_eq!(
+            harnesses
+                .iter()
+                .map(|h| h.harness.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "pi"]
+        );
+        let claude_entry = &harnesses[0];
+        assert_eq!(claude_entry.usd, Some(3.0));
+        assert_eq!(claude_entry.provenance, Some(StatsProvenance::Observed));
+        assert_eq!(
+            claude_entry.effort_provenance,
+            Some(StatsProvenance::Requested),
+            "claude's source never writes the effort"
+        );
+        assert_eq!(claude_entry.provider, None);
+        let pi_entry = &harnesses[1];
+        assert_eq!(pi_entry.usd, Some(0.5));
+        assert_eq!(pi_entry.provenance, Some(StatsProvenance::Observed));
+        assert_eq!(
+            pi_entry.effort_provenance,
+            Some(StatsProvenance::Observed),
+            "the thinking level is observed"
+        );
+        assert_eq!(
+            pi_entry.provider.as_deref(),
+            Some("openrouter"),
+            "the provider rides the harness entry, tooltip only"
+        );
+        assert!(!pi_entry.estimated, "a reported slice is not an estimate");
+
+        // Two efforts under the one model row: low (observed) and high
+        // (requested), each carrying its per-harness provenance.
+        let efforts: Vec<&str> = row.efforts.iter().map(|e| e.entity.id.as_str()).collect();
+        assert_eq!(efforts, vec!["high", "low"], "ranked by cost");
+        let low = &row.efforts[1];
+        assert_eq!(low.provenance, Some(StatsProvenance::Observed));
+        assert_eq!(
+            low.entity
+                .aggregate
+                .harnesses
+                .iter()
+                .find(|h| h.harness == "pi")
+                .unwrap()
+                .effort_provenance,
+            Some(StatsProvenance::Observed)
+        );
+    }
+
+    #[test]
+    fn by_model_keeps_not_set_effort_distinct_and_puts_a_dollar_value_on_it() {
+        // Infrastructure (leftover) sessions carry observed models but no effort.
+        let infra = crate::run_cost::CostContribution {
+            harness: "claude".to_string(),
+            scope: crate::run_cost::CostScope::Infrastructure,
+            node_id: None,
+            executions: 1,
+            readable_executions: 1,
+            usd: Some(2.0),
+            form: Some(crate::event_log::CostForm::Derived),
+            reported_in_usd: false,
+            partial: false,
+            unpriced_models: Vec::new(),
+            unavailable_reasons: Vec::new(),
+            model_slices: vec![model_slice("claude-opus-4-8", true, None, Some(2.0))],
+        };
+        let run = node_run_row("2026-09-01", "n", "Worker", vec![infra]);
+
+        let stats = fold_harness_cost(&[run], Vec::new());
+        let opus = stats
+            .by_model
+            .iter()
+            .find(|m| m.entity.id == "claude-opus-4-8")
+            .unwrap();
+        assert_eq!(opus.efforts.len(), 1);
+        let not_set = &opus.efforts[0];
+        assert_eq!(not_set.entity.id, "", "not set is the empty effort id");
+        assert_eq!(not_set.entity.name, "not set");
+        assert_eq!(not_set.effort, None);
+        assert_eq!(
+            not_set.provenance, None,
+            "not set has no provenance to show"
+        );
+        assert_eq!(not_set.entity.aggregate.usd, Some(2.0));
+        assert_eq!(not_set.pipelines[0].nodes[0].name, "Infrastructure");
+    }
+
+    #[test]
+    fn by_model_never_counts_a_harness_without_cost_source() {
+        let run = node_run_row(
+            "2026-09-01",
+            "n",
+            "Worker",
+            vec![crate::run_cost::CostContribution {
+                harness: "opencode".to_string(),
+                scope: crate::run_cost::CostScope::Node,
+                node_id: Some("n".to_string()),
+                executions: 1,
+                readable_executions: 0,
+                usd: None,
+                form: None,
+                reported_in_usd: false,
+                partial: false,
+                unpriced_models: Vec::new(),
+                unavailable_reasons: vec!["harness has no cost source".to_string()],
+                model_slices: Vec::new(),
+            }],
+        );
+        let stats = fold_harness_cost(&[run], Vec::new());
+        assert!(
+            stats.by_model.is_empty(),
+            "a harness without a cost source is absent, never a \"default of X\" bucket"
+        );
+        // The existing axes keep saying the absence.
+        assert_eq!(stats.total.unknown, 1);
+        assert_eq!(
+            stats.total.missing_reasons,
+            vec!["harness has no cost source"]
+        );
+    }
+
+    #[test]
+    fn by_model_periods_follow_the_drill_for_the_harness_bars() {
+        let run = node_run_row(
+            "2026-09-01",
+            "n",
+            "Worker",
+            vec![claude_node_contribution(
+                "n",
+                Some(5.0),
+                vec![model_slice(
+                    "claude-opus-4-8",
+                    true,
+                    Some("high"),
+                    Some(5.0),
+                )],
+            )],
+        );
+        let stats = fold_harness_cost(&[run], Vec::new());
+        let opus = &stats.by_model[0];
+        assert_eq!(opus.entity.by_period.len(), 1);
+        assert_eq!(opus.entity.by_period[0].bucket, "2026-09-01");
+        assert_eq!(opus.entity.by_period[0].aggregate.usd, Some(5.0));
+        assert_eq!(opus.efforts[0].entity.by_period[0].aggregate.usd, Some(5.0));
+        assert_eq!(
+            opus.efforts[0].pipelines[0].by_period[0].aggregate.usd,
+            Some(5.0)
+        );
+        assert_eq!(
+            opus.efforts[0].pipelines[0].nodes[0].by_period[0]
+                .aggregate
+                .usd,
+            Some(5.0)
+        );
     }
 
     #[test]

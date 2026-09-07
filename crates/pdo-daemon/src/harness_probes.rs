@@ -86,6 +86,51 @@ pub(crate) enum CostSource {
     ReportedByConstant,
 }
 
+/// The **observed execution identity** capability (ADR-0065): what of the
+/// model × effort pair a harness's **source** reports for a running execution.
+/// The startup event is never this — it is the *requested* fallback, and Stats
+/// always says which of the two it read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedIdentitySource {
+    /// The source names the model **per message** (claude's transcript); the
+    /// effort is never written by the source, so it stays requested.
+    ModelPerMessage,
+    /// The source names both the model and the effort — `pi` per message plus
+    /// its thinking-level change events, `copilot` at the usage points with the
+    /// reasoning effort then in force (#736). The observed values win over the
+    /// requested ones and say so (`ModelEffortSlice::effort_observed`).
+    ModelAndEffort,
+}
+
+/// One observed model × effort identity a harness's source reports **in one
+/// session file's text** (ADR-0065 §1): the verbatim model id, the effort the
+/// source named with it, and the provider (tooltip only, never part of the
+/// identity — ADR-0065 §2). The raw material of the Performance « By model »
+/// axis, where the context peak follows the session **file**, so the identity
+/// is read per file, not per execution (#737).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ObservedIdentity {
+    pub model: String,
+    pub effort: Option<String>,
+    pub provider: Option<String>,
+}
+
+impl ObservedIdentitySource {
+    /// How this source reads in the published support table
+    /// ([`crate::harness_support`]). The label lives on the variant so the table
+    /// can never describe a mechanism the code no longer dispatches to.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ObservedIdentitySource::ModelPerMessage => {
+                "observed — the model per message; the effort stays requested"
+            }
+            ObservedIdentitySource::ModelAndEffort => {
+                "observed — the model and the effort, from the source"
+            }
+        }
+    }
+}
+
 impl CostSource {
     /// How this source reads in the published support table
     /// ([`crate::harness_support`]). The label lives on the variant so the table
@@ -423,6 +468,12 @@ pub(crate) trait HarnessProbes: Sync {
     fn cost_source(&self) -> Option<CostSource> {
         None
     }
+    /// What of the model × effort pair the harness's source reports, or `None`
+    /// (both values fall back to the requested ones — declared absence,
+    /// ADR-0065 §1).
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        None
+    }
     /// How PDO finds this harness's transcript, or `None`.
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         None
@@ -545,6 +596,18 @@ pub(crate) trait HarnessProbes: Sync {
     ) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    /// The model × effort identities this harness's source reports **in one
+    /// session file's text** (ADR-0065 §1), in first-appearance order — one
+    /// entry per model the source names, a subagent file carrying its own (#737:
+    /// the context peak follows the file, so the identity is read per file).
+    /// The default is an **empty `Vec`**, not a `match harness { .. }`: a harness
+    /// whose source is mute (or unknown) answers "nothing observed" from the
+    /// dispatch itself, and the caller falls back to the requested identity
+    /// (or invents nothing when there is none — ADR-0065 §1).
+    fn observed_identities(&self, _text: &str) -> Vec<ObservedIdentity> {
+        Vec::new()
+    }
 }
 
 /// The `claude` capabilities — all five, exactly as they are today. This slice is
@@ -555,6 +618,12 @@ struct ClaudeProbes;
 impl HarnessProbes for ClaudeProbes {
     fn cost_source(&self) -> Option<CostSource> {
         Some(CostSource::DerivedFromTranscript)
+    }
+    /// The transcript names the model per assistant message — the observed
+    /// model ADR-0065 reads first. The effort is never written by the source,
+    /// so it stays requested (measured 2026-09-07, #733).
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        Some(ObservedIdentitySource::ModelPerMessage)
     }
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         Some(TranscriptResolution::ClaudeJsonl)
@@ -621,6 +690,46 @@ impl HarnessProbes for ClaudeProbes {
         collect_jsonl_stems(&dir, &mut out);
         out
     }
+
+    /// The verbatim `message.model` ids the transcript's own assistant messages
+    /// carry (same tolerance as the cost fold's line parser: API-error and
+    /// `<synthetic>` lines are not model readings). The effort is never written
+    /// by this source — it stays requested (ADR-0065 §1).
+    fn observed_identities(&self, text: &str) -> Vec<ObservedIdentity> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for raw in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+                continue;
+            };
+            if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                continue;
+            }
+            if value
+                .get("isApiErrorMessage")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                continue;
+            }
+            let Some(model) = value
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty() && *m != "<synthetic>")
+            else {
+                continue;
+            };
+            if seen.insert(model.to_string()) {
+                out.push(ObservedIdentity {
+                    model: model.to_string(),
+                    effort: None,
+                    provider: None,
+                });
+            }
+        }
+        out
+    }
 }
 
 /// Recurse `dir`, pairing every `*.jsonl` file's stem with its text — the raw
@@ -679,6 +788,12 @@ impl HarnessProbes for CopilotProbes {
     fn cost_source(&self) -> Option<CostSource> {
         Some(CostSource::ReportedByConstant)
     }
+    /// The journal names the model and the reasoning effort at session opening,
+    /// moves them with the `session.model_change` events, and names the model at
+    /// every usage point (measured 1.0.83, #736) — both values observed.
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        Some(ObservedIdentitySource::ModelAndEffort)
+    }
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         Some(TranscriptResolution::CopilotEventsJsonl)
     }
@@ -717,6 +832,19 @@ impl HarnessProbes for CopilotProbes {
 
     fn context_peak(&self, text: &str) -> Option<u64> {
         crate::context_peak::copilot_session_peak(text)
+    }
+
+    /// The model in effect at the journal's usage points, with the reasoning
+    /// effort then in force (#736) — the observed identity of one journal (#737).
+    fn observed_identities(&self, text: &str) -> Vec<ObservedIdentity> {
+        crate::copilot_journal::observed_usage(text)
+            .into_iter()
+            .map(|usage| ObservedIdentity {
+                model: usage.model,
+                effort: usage.effort,
+                provider: None,
+            })
+            .collect()
     }
 
     /// `copilot` exits 0 on a hard model failure (ADR-0052), so its exit is not a
@@ -767,6 +895,12 @@ impl HarnessProbes for PiProbes {
     /// A **reported** cost (ADR-0052) of constant 1.0: already in dollars.
     fn cost_source(&self) -> Option<CostSource> {
         Some(CostSource::ReportedByConstant)
+    }
+    /// The session names the model and the provider on every message and the
+    /// thinking level on its `thinking_level_change` events (measured 0.85.1,
+    /// #736) — both values observed.
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        Some(ObservedIdentitySource::ModelAndEffort)
     }
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         Some(TranscriptResolution::PiJsonlById)
@@ -821,6 +955,20 @@ impl HarnessProbes for PiProbes {
     fn classify_hard_error(&self, tail: &str) -> Option<String> {
         crate::pi_session::hard_error(tail)
     }
+
+    /// The per-message model (and provider) plus the thinking level in force,
+    /// grouped by model × effort (#736) — the observed identity of one session
+    /// (#737).
+    fn observed_identities(&self, text: &str) -> Vec<ObservedIdentity> {
+        crate::pi_session::observed_usage(text)
+            .into_iter()
+            .map(|usage| ObservedIdentity {
+                model: usage.model,
+                effort: usage.effort,
+                provider: usage.provider,
+            })
+            .collect()
+    }
 }
 
 /// The single `pi` instance handed out by [`probes_for`]. Zero-sized.
@@ -868,6 +1016,16 @@ pub(crate) fn resolve_transcript(
 /// no [`HarnessProbes::context_usage_source`] answers `None`.
 pub(crate) fn context_peak(harness: &str, text: &str) -> Option<u64> {
     resolved(harness).context_peak(text)
+}
+
+/// The observed model × effort identities one session file's `text` reports,
+/// dispatched to the harness's own reader (ADR-0065 §1, #737) — `claude`'s
+/// per-message ids, `pi`'s per-message model + thinking level, `copilot`'s
+/// usage-point model + effort. A harness with no
+/// [`HarnessProbes::observed_identity_source`] answers an empty `Vec`: the
+/// caller falls back to the requested identity, or invents nothing.
+pub(crate) fn observed_identities(harness: &str, text: &str) -> Vec<ObservedIdentity> {
+    resolved(harness).observed_identities(text)
 }
 
 /// `harness`'s subagent transcripts for one main session, dispatched to its
@@ -1074,6 +1232,14 @@ pub(crate) fn capabilities(harness: &str) -> Capabilities {
     }
 }
 
+/// The observed-execution-identity capability of `harness` (ADR-0065), or `None`
+/// when the source is mute — the fold then falls back to the requested model and
+/// effort and marks them `requested`. `pi`/`copilot` declare `None` explicitly
+/// until their ticket, even though their sources could answer.
+pub(crate) fn observed_identity_source(harness: &str) -> Option<ObservedIdentitySource> {
+    probes_for(harness).and_then(|probes| probes.observed_identity_source())
+}
+
 /// Whether PDO can derive a Run's cost for `harness`: it needs both a cost source
 /// and a way to find the transcript that source reads. A data-declared harness has
 /// neither, so its Run's cost is "—" with a reason rather than a silent `$0`.
@@ -1168,6 +1334,94 @@ mod tests {
             }
         );
         assert!(can_cost(CLAUDE));
+    }
+
+    #[test]
+    fn only_claude_declares_the_observed_identity_capability() {
+        // ADR-0065: the observed model/effort is a capability, read source-first.
+        // `claude` implements it here (model per message); `pi` and `copilot`
+        // return `None` EXPLICITLY until their ticket — a declared absence, not a
+        // missing dispatch (ADR-0051) — so both fall back to the requested values.
+        assert_eq!(
+            observed_identity_source(CLAUDE),
+            Some(ObservedIdentitySource::ModelPerMessage)
+        );
+        assert_eq!(
+            observed_identity_source(COPILOT),
+            Some(ObservedIdentitySource::ModelAndEffort),
+            "the journal names the model and the effort (measured 1.0.83, #736)"
+        );
+        assert_eq!(
+            observed_identity_source(PI),
+            Some(ObservedIdentitySource::ModelAndEffort),
+            "the session names the model per message and the thinking level (measured 0.85.1, #736)"
+        );
+        assert_eq!(observed_identity_source(OPENCODE), None);
+        assert_eq!(observed_identity_source("never-seen"), None);
+    }
+
+    /// #737: the per-file reader behind the Performance « By model » axis —
+    /// each harness answers from its own source, a mute one answers empty.
+    #[test]
+    fn observed_identities_read_each_harnesss_own_source_per_file() {
+        // claude: the verbatim ids of the transcript's own assistant messages,
+        // in first-appearance order; API-error and synthetic lines are not
+        // readings; the effort is never written by this source.
+        let claude_text = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"claude-opus-4-8"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":10}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":10}}}"#,
+            "\n",
+            "{not json\n",
+        );
+        assert_eq!(
+            observed_identities(CLAUDE, claude_text),
+            vec![
+                ObservedIdentity {
+                    model: "claude-opus-4-8".into(),
+                    effort: None,
+                    provider: None,
+                },
+                ObservedIdentity {
+                    model: "claude-sonnet-4-5".into(),
+                    effort: None,
+                    provider: None,
+                },
+            ]
+        );
+        assert!(observed_identities(CLAUDE, "{not json\n").is_empty());
+
+        // pi: the session names the model, the provider and the thinking level
+        // per message (#736's own reader).
+        let turn = "\
+{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"provider\":\"openrouter\",\"usage\":{\"totalTokens\":10,\"cost\":{\"total\":0.01}}}}\n";
+        let pi = observed_identities(PI, turn);
+        assert_eq!(pi.len(), 1);
+        assert_eq!(pi[0].model, "claude-opus-4-8");
+        assert_eq!(pi[0].provider.as_deref(), Some("openrouter"));
+
+        // copilot: the model in effect at the usage points with the effort in
+        // force (#736's own reader).
+        let journal = concat!(
+            r#"{"type":"session.start","data":{"selectedModel":"gpt-5","reasoningEffort":"medium"}}"#,
+            "\n",
+            r#"{"type":"session.usage_checkpoint","data":{"totalNanoAiu":5000000000,"modelCacheState":[{"modelId":"gpt-5"}]}}"#,
+        );
+        let copilot = observed_identities(COPILOT, journal);
+        assert_eq!(copilot.len(), 1);
+        assert_eq!(copilot[0].model, "gpt-5");
+        assert_eq!(copilot[0].effort.as_deref(), Some("medium"));
+
+        // A data-declared harness answers empty from the dispatch itself —
+        // never `claude`'s parser.
+        assert!(observed_identities(OPENCODE, claude_text).is_empty());
+        assert!(observed_identities("never-seen", claude_text).is_empty());
     }
 
     #[test]
@@ -1388,16 +1642,14 @@ mod tests {
 
     #[test]
     fn copilot_turn_end_dispatches_to_its_journal_parser_not_claudes() {
-        let copilot_tail =
-            "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"assistant.turn_end\",\"data\":{}}\n";
+        let copilot_tail = "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"assistant.turn_end\",\"data\":{}}\n";
         assert!(turn_ended(COPILOT, copilot_tail));
         assert!(
             !turn_ended(CLAUDE, copilot_tail),
             "not claude's JSONL shape"
         );
         // A trailing hard error is not a finished turn (harness exits 0 on it).
-        let errored =
-            "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"session.error\",\"data\":{\"message\":\"boom\"}}\n";
+        let errored = "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"session.error\",\"data\":{\"message\":\"boom\"}}\n";
         assert!(!turn_ended(COPILOT, errored));
     }
 

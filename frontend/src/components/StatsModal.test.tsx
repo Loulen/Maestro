@@ -56,6 +56,7 @@ const COST: StatsCost = {
   },
   by_period: [],
   by_pipeline: [],
+  by_model: [],
   by_project: [],
   resolved: [],
 };
@@ -92,6 +93,7 @@ beforeEach(() => {
     total: { harnesses: [] },
     infrastructure_total: { harnesses: [] },
     by_pipeline: [],
+    by_model: [],
     infrastructure: [],
   });
   syncCostPricesMock.mockReset().mockResolvedValue(report());

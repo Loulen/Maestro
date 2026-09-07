@@ -38,6 +38,7 @@ const COST: StatsCost = {
   },
   by_period: [],
   by_pipeline: [],
+  by_model: [],
   by_project: [],
   resolved: [],
 };
@@ -46,6 +47,7 @@ const PERFORMANCE = {
   total: { harnesses: [] },
   infrastructure_total: { harnesses: [] },
   by_pipeline: [],
+  by_model: [],
   infrastructure: [],
 };
 

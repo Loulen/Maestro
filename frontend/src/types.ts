@@ -1534,6 +1534,14 @@ export interface StatsHarnessCost {
   average_usd: number | null;
   unpriced_models: string[];
   missing_reasons: string[];
+  /** Where THIS harness's model value in the row was read from (ADR-0065 §1) —
+   *  « By model » rows and Node pairs only (#736); absent elsewhere. */
+  provenance?: StatsProvenance;
+  /** Same, for the effort half of the row; absent on model-only rows. */
+  effort_provenance?: StatsProvenance;
+  /** The provider the source named for this model (pi via openrouter) —
+   *  tooltip only, never part of the identity (ADR-0065 §2). */
+  provider?: string | null;
 }
 
 /** Cost shared by Total, periods, Projects, Pipelines and Nodes. */
@@ -1559,6 +1567,38 @@ export interface StatsCostEntity extends StatsCostAggregate {
   name: string;
   by_period: StatsCostPeriod[];
   nodes: StatsCostEntity[];
+  /** The Node's cost split into model × effort pairs (ADR-0065) — Node leaves
+   *  only; the server omits it (never sends an empty array) on other levels. */
+  models?: StatsModelEffortPair[];
+}
+
+/** Where a model/effort value was read from (ADR-0065 §1): the harness's source
+ *  (observed — the norm, never marked) or the node startup event (requested —
+ *  marked « ? »), or both across the bucket's executions (mixed). */
+export type StatsProvenance = "observed" | "requested" | "mixed";
+
+/** One model × effort pair of a Node leaf (ADR-0065). `effort = null` is the
+ *  "not set" bucket — never merged with a real effort. */
+export interface StatsModelEffortPair extends StatsCostAggregate {
+  model: string;
+  model_provenance: StatsProvenance;
+  effort: string | null;
+  effort_provenance: StatsProvenance | null;
+}
+
+/** One effort level under a model in the « By model » tree: `id` is the effort
+ *  string ("" for not set), `name` the effort or "not set". */
+export interface StatsEffortCostEntity extends StatsCostEntity {
+  effort: string | null;
+  provenance: StatsProvenance | null;
+  pipelines: StatsCostEntity[];
+}
+
+/** One model (verbatim id) of the « By model » axis: Model → Effort → Pipeline
+ *  → Node. */
+export interface StatsModelCostEntity extends StatsCostEntity {
+  provenance: StatsProvenance;
+  efforts: StatsEffortCostEntity[];
 }
 
 export interface StatsProjectCostEntity extends StatsCostEntity {
@@ -1584,6 +1624,9 @@ export interface StatsCost {
   by_period: StatsCostPeriod[];
   by_pipeline: StatsCostEntity[];
   by_project: StatsProjectCostEntity[];
+  /** The « By model » axis (ADR-0065): models ranked by cost, each with its
+   *  effort → pipeline → node tree. */
+  by_model: StatsModelCostEntity[];
   /** The resolved price table, one row per family in alphabetical order (#528).
    *  Window-independent — a property of the price table, not the fold. Refreshed
    *  by the "Sync costs" refetch on the Cost tab. */
@@ -1620,6 +1663,39 @@ export interface StatsPerformanceEntity extends StatsPerformanceAggregate {
   name: string;
   nodes: StatsPerformanceEntity[];
   subagents: StatsPerformanceEntity[];
+  /** The Node's observations split into model × effort couples (ADR-0065) —
+   *  Node leaves only, in « By pipeline »; the server omits it (never sends an
+   *  empty array) on other levels, and the « By model » path is already the
+   *  drill (#737). */
+  models?: PerformanceModelEffortPair[];
+}
+
+/** One model × effort couple of a Performance Node leaf (ADR-0065): the same
+ *  aggregate shape plus the pair identity and where each half was read from.
+ *  `effort = null` is the "not set" bucket — never merged with a real effort.
+ *  The peak of each session file is attributed to the model of that file, a
+ *  subagent having its own (#737). */
+export interface PerformanceModelEffortPair extends StatsPerformanceAggregate {
+  model: string;
+  model_provenance: StatsProvenance;
+  effort: string | null;
+  effort_provenance: StatsProvenance | null;
+}
+
+/** One effort level under a model in Performance « By model »: `id` is the
+ *  effort string ("" for not set) and `name` the effort or "not set". */
+export interface PerformanceEffortEntity extends StatsPerformanceEntity {
+  effort: string | null;
+  provenance?: StatsProvenance | null;
+  pipelines: StatsPerformanceEntity[];
+}
+
+/** One model (verbatim id) of Performance « By model », with its effort tree:
+ *  Model → Effort → Pipeline → Node (#737). The same id run through two
+ *  harnesses is one row, the harness staying a column. */
+export interface StatsModelPerformanceEntity extends StatsPerformanceEntity {
+  provenance: StatsProvenance;
+  efforts: PerformanceEffortEntity[];
 }
 
 /** Derived `GET /stats/performance` payload. */
@@ -1629,6 +1705,9 @@ export interface StatsPerformance {
   infrastructure_total: StatsPerformanceAggregate;
   by_pipeline: StatsPerformanceEntity[];
   infrastructure: StatsPerformanceEntity[];
+  /** The « By model » axis (ADR-0065): the same observations bucketed by the
+   *  model of the session file each came from (#737). */
+  by_model: StatsModelPerformanceEntity[];
 }
 
 // ---------------------------------------------------------------------------

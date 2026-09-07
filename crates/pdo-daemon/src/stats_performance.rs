@@ -17,6 +17,30 @@
 //! principale"). Duration is in **milliseconds** (matching the frontend's
 //! `value / 1_000`); Context is a raw peak token count.
 //!
+//! ### The « By model » axis (#737, ADR-0065)
+//!
+//! `by_model` is a second, additive tree over the SAME observations — Modèle →
+//! effort → Pipeline → Node — where a session **file**'s peak (and its
+//! duration) is attributed to the model of **that file**, a subagent having
+//! its own (ADR-0065 §3, "le pic de contexte suit le fichier de session"). The
+//! identity is read source-first (ADR-0065 §1): `claude`'s per-message ids,
+//! `pi`'s per-message model + thinking level, `copilot`'s usage-point model +
+//! effort; a mute source falls back to the startup event's requested model +
+//! effort, marked `requested`; a mute source with **no** requested model (and
+//! a subagent file — which has no startup event at all) invents nothing and
+//! lands in no bucket. A file naming several models counts in **each** bucket
+//! (the same "une exécution compte dans chaque bucket où elle a coûté" rule as
+//! Cost, one bucket per model here). Node leaves of `by_pipeline` carry their
+//! `models` couples — the drill "Node → modèle × effort" — with the same
+//! distributions, so the two groupings never disagree about a bucket. Every
+//! level pools **raw observations** (never a mean of means) and says its
+//! provenance (`observed` / `requested` / `mixed`). Infrastructure roles stay
+//! out of the axis: their sessions are residual-by-exclusion, carry no model
+//! identity of their own, and the axis compares **Node** executions — the
+//! by_pipeline tree keeps them, as today. Duration buckets follow the same
+//! per-file attribution: a main session contributes its execution's
+//! wall-clock, a subagent file its own transcript time span.
+//!
 //! ## What counts as an observation
 //!
 //! Only a **successful** attempt is an observation, mirroring the issue's
@@ -156,6 +180,49 @@ pub(crate) struct PerformanceEntity {
     pub harnesses: Vec<StatsHarnessPerformance>,
     pub nodes: Vec<PerformanceEntity>,
     pub subagents: Vec<PerformanceEntity>,
+    /// The Node's observations split into model × effort couples (ADR-0065) —
+    /// Node leaves only, so the drill-down ends there; omitted (never an empty
+    /// array) on the other levels, and on the `by_model` Node rows (the path is
+    /// already the drill).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<PerformanceModelEffortPair>,
+}
+
+/// One model × effort couple of a Node leaf (ADR-0065): the performance
+/// analogue of `stats::StatsModelEffortPair` — the same aggregate shape plus
+/// the pair identity and where each half was read from. `effort = None` is the
+/// "not set" bucket — never merged with a real effort.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct PerformanceModelEffortPair {
+    #[serde(flatten)]
+    pub aggregate: PerformanceAggregate,
+    pub model: String,
+    pub model_provenance: crate::stats::StatsProvenance,
+    pub effort: Option<String>,
+    pub effort_provenance: Option<crate::stats::StatsProvenance>,
+}
+
+/// One effort level under a model, in the Performance « By model » tree: the
+/// entity's `id` is the effort string ("" for not set) and its `name` the
+/// effort or "not set".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct PerformanceEffortEntity {
+    #[serde(flatten)]
+    pub entity: PerformanceEntity,
+    pub effort: Option<String>,
+    pub provenance: Option<crate::stats::StatsProvenance>,
+    pub pipelines: Vec<PerformanceEntity>,
+}
+
+/// One model (verbatim id) of the Performance « By model » axis, with its
+/// effort tree: Model → Effort → Pipeline → Node. Both harnesses run on the
+/// same id are one row, the harness staying a column (ADR-0065 §2).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct StatsModelPerformanceEntity {
+    #[serde(flatten)]
+    pub entity: PerformanceEntity,
+    pub provenance: crate::stats::StatsProvenance,
+    pub efforts: Vec<PerformanceEffortEntity>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -175,6 +242,12 @@ pub(crate) struct StatsPerformance {
     /// never has to fabricate one by averaging averages. Never pools a role's
     /// `subagents` (same rule as [`Self::total`]).
     pub infrastructure_total: PerformanceAggregate,
+    /// The « By model » axis (ADR-0065): the SAME successful main-session Node
+    /// observations as `total`, bucketed by the model of the session **file**
+    /// each observation came from (a subagent file keeps its own bucket). Node
+    /// executions only — Infrastructure roles carry no model identity and stay
+    /// on `by_pipeline` (module doc, « The « By model » axis »).
+    pub by_model: Vec<StatsModelPerformanceEntity>,
 }
 
 /// Why the whole request failed, distinct from a per-observation absence
@@ -235,6 +308,15 @@ impl MetricAcc {
         }
     }
 
+    /// Pool another accumulator's RAW observations into this one — never a mean
+    /// of means (the whole module pools at the raw level).
+    fn fold(&mut self, other: &MetricAcc) {
+        self.values.extend_from_slice(&other.values);
+        self.expected += other.expected;
+        self.absence_reasons
+            .extend(other.absence_reasons.iter().cloned());
+    }
+
     fn finish(self) -> StatsDistribution {
         StatsDistribution {
             stats: r7_distribution(&self.values),
@@ -275,6 +357,10 @@ struct NodeAcc {
     name: String,
     by_harness: BTreeMap<String, HarnessAcc>,
     subagents: BTreeMap<String, SubagentAcc>,
+    /// The Node's model × effort couples (ADR-0065): the same observations as
+    /// `by_harness`, bucketed by the model of the session **file** each came
+    /// from — the drill "Node → modèle × effort" of `by_pipeline` (#737).
+    pairs: BTreeMap<ModelEffortKey, ModelPairAcc>,
 }
 
 fn finish_subagents(subagents: BTreeMap<String, SubagentAcc>) -> Vec<PerformanceEntity> {
@@ -286,6 +372,7 @@ fn finish_subagents(subagents: BTreeMap<String, SubagentAcc>) -> Vec<Performance
             harnesses: finish_by_harness(acc.by_harness),
             nodes: Vec::new(),
             subagents: Vec::new(),
+            models: Vec::new(),
         })
         .collect()
 }
@@ -297,6 +384,7 @@ fn finish_node(id: String, acc: NodeAcc) -> PerformanceEntity {
         harnesses: finish_by_harness(acc.by_harness),
         nodes: Vec::new(),
         subagents: finish_subagents(acc.subagents),
+        models: wire_model_pairs(acc.pairs),
     }
 }
 
@@ -309,6 +397,9 @@ fn finish_infra_role(id: &str, name: &str, acc: NodeAcc) -> PerformanceEntity {
         harnesses: finish_by_harness(acc.by_harness),
         nodes: Vec::new(),
         subagents: finish_subagents(acc.subagents),
+        // Infrastructure carries no model identity (module doc): an empty
+        // `models` is omitted on the wire, never an empty array.
+        models: Vec::new(),
     }
 }
 
@@ -330,7 +421,264 @@ fn finish_pipeline(id: String, acc: PipelineAcc) -> PerformanceEntity {
             .map(|(id, node)| finish_node(id, node))
             .collect(),
         subagents: Vec::new(),
+        models: Vec::new(),
     }
+}
+
+// --- « By model » axis (#737, ADR-0065) ---------------------------------------
+
+/// A model × effort bucket key: the **verbatim** model id (ADR-0065 §2, no
+/// normalisation, no alias table) and the effort it ran with — `None` is the
+/// "not set" bucket, never merged with a real effort.
+type ModelEffortKey = (String, Option<String>);
+
+/// The model × effort a session file's observation is attributed to
+/// (ADR-0065 §1): observed from the harness's source when it speaks, else the
+/// startup event's requested identity. Provenance is decided per observation —
+/// a bucket whose observations mix both says « mixed ».
+struct ModelIdentity {
+    model: String,
+    effort: Option<String>,
+    model_observed: bool,
+    effort_observed: Option<bool>,
+}
+
+/// One model × effort bucket, accumulated over the session-file observations
+/// that landed in it. The observed/requested counters decide the wire's
+/// provenance, including the « mixed » case.
+#[derive(Debug, Default)]
+struct ModelPairAcc {
+    by_harness: BTreeMap<String, HarnessAcc>,
+    model_observed: i64,
+    model_requested: i64,
+    effort_observed: i64,
+    effort_requested: i64,
+}
+
+impl ModelPairAcc {
+    /// Observe one session file's context peak + duration into this bucket.
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &mut self,
+        harness: &str,
+        context: (Option<f64>, Option<&'static str>),
+        duration: (Option<f64>, Option<&'static str>),
+        identity: &ModelIdentity,
+    ) {
+        let acc = self.by_harness.entry(harness.to_string()).or_default();
+        acc.context.observe(context.0, context.1);
+        acc.duration.observe(duration.0, duration.1);
+        if identity.model_observed {
+            self.model_observed += 1;
+        } else {
+            self.model_requested += 1;
+        }
+        match identity.effort_observed {
+            Some(true) => self.effort_observed += 1,
+            Some(false) => self.effort_requested += 1,
+            None => {}
+        }
+    }
+}
+
+/// One (pipeline, Node) slot of the by_model tree: the Node's rows under the
+/// model buckets it provably ran on.
+#[derive(Debug, Default)]
+struct ModelAxisNodeAcc {
+    name: String,
+    pairs: BTreeMap<ModelEffortKey, ModelPairAcc>,
+}
+
+/// One pipeline level of the by_model tree.
+#[derive(Debug, Default)]
+struct ModelAxisPipelineAcc {
+    name: String,
+    pairs: BTreeMap<ModelEffortKey, ModelPairAcc>,
+    nodes: BTreeMap<String, ModelAxisNodeAcc>,
+}
+
+/// One effort level under a model. `effort: None` is the "not set" bucket.
+#[derive(Debug, Default)]
+struct ModelAxisEffortAcc {
+    pairs: BTreeMap<ModelEffortKey, ModelPairAcc>,
+    pipelines: BTreeMap<String, ModelAxisPipelineAcc>,
+}
+
+/// One model (verbatim id) of the by_model axis.
+#[derive(Debug, Default)]
+struct ModelAxisModelAcc {
+    pairs: BTreeMap<ModelEffortKey, ModelPairAcc>,
+    efforts: BTreeMap<Option<String>, ModelAxisEffortAcc>,
+}
+
+/// Attribute one session file's observation to every model × effort bucket its
+/// identity names (ADR-0065 §3: the peak follows the file; a file naming two
+/// models counts in both). Walks the by_model tree — Node, Pipeline, Effort
+/// and Model levels each keep their own raw pool — plus the Node's own couples
+/// on the `by_pipeline` side.
+#[allow(clippy::too_many_arguments)]
+fn record_model_observation(
+    model_axis: &mut BTreeMap<String, ModelAxisModelAcc>,
+    node_pairs: &mut BTreeMap<ModelEffortKey, ModelPairAcc>,
+    pipeline_id: &str,
+    pipeline_name: &str,
+    node_id: &str,
+    node_name: &str,
+    harness: &str,
+    identity: &ModelIdentity,
+    context: (Option<f64>, Option<&'static str>),
+    duration: (Option<f64>, Option<&'static str>),
+) {
+    let key = (identity.model.clone(), identity.effort.clone());
+    node_pairs
+        .entry(key.clone())
+        .or_default()
+        .observe(harness, context, duration, identity);
+
+    let model_acc = model_axis.entry(identity.model.clone()).or_default();
+    let effort_acc = model_acc
+        .efforts
+        .entry(identity.effort.clone())
+        .or_default();
+    let pipeline_acc = effort_acc
+        .pipelines
+        .entry(pipeline_id.to_string())
+        .or_default();
+    pipeline_acc.name = pipeline_name.to_string();
+    let node_acc = pipeline_acc.nodes.entry(node_id.to_string()).or_default();
+    node_acc.name = node_name.to_string();
+    for acc in [
+        model_acc.pairs.entry(key.clone()).or_default(),
+        effort_acc.pairs.entry(key.clone()).or_default(),
+        pipeline_acc.pairs.entry(key.clone()).or_default(),
+        node_acc.pairs.entry(key).or_default(),
+    ] {
+        acc.observe(harness, context, duration, identity);
+    }
+}
+
+/// Pool a set of model × effort buckets back into one raw-observation
+/// aggregate — the level rows of the by_model tree, never a mean of means.
+fn pool_pairs(pairs: &BTreeMap<ModelEffortKey, ModelPairAcc>) -> PerformanceAggregate {
+    let mut by_harness: BTreeMap<String, HarnessAcc> = BTreeMap::new();
+    for pair in pairs.values() {
+        for (harness, acc) in &pair.by_harness {
+            let target = by_harness.entry(harness.clone()).or_default();
+            target.context.fold(&acc.context);
+            target.duration.fold(&acc.duration);
+        }
+    }
+    PerformanceAggregate {
+        harnesses: finish_by_harness(by_harness),
+    }
+}
+
+/// Observed/requested totals over a set of buckets — the provenance a level
+/// row reports.
+fn provenance_totals(pairs: &BTreeMap<ModelEffortKey, ModelPairAcc>) -> (i64, i64, i64, i64) {
+    pairs.values().fold((0, 0, 0, 0), |(mo, mr, eo, er), acc| {
+        (
+            mo + acc.model_observed,
+            mr + acc.model_requested,
+            eo + acc.effort_observed,
+            er + acc.effort_requested,
+        )
+    })
+}
+
+fn wire_model_pairs(
+    pairs: BTreeMap<ModelEffortKey, ModelPairAcc>,
+) -> Vec<PerformanceModelEffortPair> {
+    pairs
+        .into_iter()
+        .map(|((model, effort), acc)| PerformanceModelEffortPair {
+            model_provenance: crate::stats::provenance(acc.model_observed, acc.model_requested),
+            effort_provenance: effort
+                .as_ref()
+                .map(|_| crate::stats::provenance(acc.effort_observed, acc.effort_requested)),
+            aggregate: PerformanceAggregate {
+                harnesses: finish_by_harness(acc.by_harness),
+            },
+            model,
+            effort,
+        })
+        .collect()
+}
+
+/// Wire the whole Performance « By model » tree: Model → Effort → Pipeline →
+/// Node. Every level's aggregate pools its own raw observations; the Node rows
+/// carry no `models` — the path is already the drill.
+fn wire_model_axis(
+    models: BTreeMap<String, ModelAxisModelAcc>,
+) -> Vec<StatsModelPerformanceEntity> {
+    models
+        .into_iter()
+        .map(|(model, model_acc)| {
+            let (model_observed, model_requested, _, _) = provenance_totals(&model_acc.pairs);
+            let efforts = model_acc
+                .efforts
+                .into_iter()
+                .map(|(effort, effort_acc)| {
+                    let (_, _, effort_observed, effort_requested) =
+                        provenance_totals(&effort_acc.pairs);
+                    let effort_provenance = effort
+                        .as_ref()
+                        .map(|_| crate::stats::provenance(effort_observed, effort_requested));
+                    let pipelines = effort_acc
+                        .pipelines
+                        .into_iter()
+                        .map(|(id, pipeline_acc)| {
+                            let nodes = pipeline_acc
+                                .nodes
+                                .into_iter()
+                                .map(|(id, node_acc)| PerformanceEntity {
+                                    id,
+                                    name: node_acc.name,
+                                    harnesses: pool_pairs(&node_acc.pairs).harnesses,
+                                    nodes: Vec::new(),
+                                    subagents: Vec::new(),
+                                    models: Vec::new(),
+                                })
+                                .collect();
+                            PerformanceEntity {
+                                id,
+                                name: pipeline_acc.name,
+                                harnesses: pool_pairs(&pipeline_acc.pairs).harnesses,
+                                nodes,
+                                subagents: Vec::new(),
+                                models: Vec::new(),
+                            }
+                        })
+                        .collect();
+                    PerformanceEffortEntity {
+                        entity: PerformanceEntity {
+                            id: effort.clone().unwrap_or_default(),
+                            name: effort.clone().unwrap_or_else(|| "not set".to_string()),
+                            harnesses: pool_pairs(&effort_acc.pairs).harnesses,
+                            nodes: Vec::new(),
+                            subagents: Vec::new(),
+                            models: Vec::new(),
+                        },
+                        effort,
+                        provenance: effort_provenance,
+                        pipelines,
+                    }
+                })
+                .collect();
+            StatsModelPerformanceEntity {
+                entity: PerformanceEntity {
+                    id: model.clone(),
+                    name: model,
+                    harnesses: pool_pairs(&model_acc.pairs).harnesses,
+                    nodes: Vec::new(),
+                    subagents: Vec::new(),
+                    models: Vec::new(),
+                },
+                provenance: crate::stats::provenance(model_observed, model_requested),
+                efforts,
+            }
+        })
+        .collect()
 }
 
 // --- Node identity/type resolution ---------------------------------------------
@@ -427,36 +775,126 @@ fn source_root<'a>(harness: &str, claude_root: &'a Path, stores: &'a HarnessStor
     stores.root_for(harness, claude_root)
 }
 
-/// One harness's context peak for one main session, or the absence reason.
-/// The root readability check sits *after* the `can_measure_context` gate, so a
+/// One main session's observation: `(context peak, absence reason, file text)`.
+type MainObservation = (Option<f64>, Option<&'static str>, Option<String>);
+
+/// One harness's context peak for one main session, or the absence reason,
+/// plus the session file's text — the same read feeds the peak and the
+/// observed model identity (#737), so the file is read once. The root
+/// readability check sits *after* the `can_measure_context` gate, so a
 /// harness with no context source (e.g. `opencode`) never triggers a
 /// Claude/Copilot root check it does not need.
-fn main_session_context(
+fn main_session_observation(
     harness: &str,
     root: &Path,
     working_dir: &Path,
     session_id: Option<&str>,
     seen_roots: &mut HashSet<PathBuf>,
-) -> Result<(Option<f64>, Option<&'static str>), PerformanceError> {
+) -> Result<MainObservation, PerformanceError> {
     if !crate::harness_probes::can_measure_context(harness) {
-        return Ok((None, Some("harness has no context-usage source")));
+        return Ok((None, Some("harness has no context-usage source"), None));
     }
     check_root_once(root, &harness_display_label(harness), seen_roots)?;
     let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
-        return Ok((None, Some("no session identity")));
+        return Ok((None, Some("no session identity"), None));
     };
     let Some(path) =
         crate::harness_probes::resolve_transcript(harness, root, working_dir, Some(session_id))
     else {
-        return Ok((None, Some("no attributable transcript")));
+        return Ok((None, Some("no attributable transcript"), None));
     };
     Ok(match std::fs::read_to_string(&path) {
         Ok(text) => match crate::harness_probes::context_peak(harness, &text) {
-            Some(peak) => (Some(peak as f64), None),
-            None => (None, Some("no readable context usage in transcript")),
+            Some(peak) => (Some(peak as f64), None, Some(text)),
+            None => (
+                None,
+                Some("no readable context usage in transcript"),
+                Some(text),
+            ),
         },
-        Err(_) => (None, Some("no attributable transcript")),
+        Err(_) => (None, Some("no attributable transcript"), None),
     })
+}
+
+/// One session file's transcript text, by the harness's own resolution — the
+/// identity-only read for a harness whose context gate answered before the
+/// file was read (`copilot`'s journal is still worth reading for its observed
+/// model, #737).
+fn session_file_text(
+    harness: &str,
+    root: &Path,
+    working_dir: &Path,
+    session_id: Option<&str>,
+) -> Option<String> {
+    crate::harness_probes::resolve_transcript(harness, root, working_dir, session_id)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+}
+
+/// The model × effort identities one MAIN session's observation is attributed
+/// to (ADR-0065 §1): the observed identities the harness's source reports when
+/// it speaks — `effort_observed` only where the source carries the effort
+/// (`pi`, `copilot`); `claude`'s effort stays the requested one. A mute source
+/// (or no readable file) falls back to the startup event's requested identity,
+/// marked `requested`; a mute source with **no** requested model invents
+/// nothing and yields no bucket.
+fn main_session_identities(
+    harness: &str,
+    root: &Path,
+    working_dir: &Path,
+    session_id: Option<&str>,
+    requested_model: Option<&str>,
+    requested_effort: Option<&str>,
+    already_read: Option<&str>,
+) -> Vec<ModelIdentity> {
+    let source = crate::harness_probes::observed_identity_source(harness);
+    let mut observed = Vec::new();
+    if source.is_some() {
+        let text = match already_read {
+            Some(text) => Some(text.to_string()),
+            None => session_file_text(harness, root, working_dir, session_id),
+        };
+        if let Some(text) = text {
+            observed = crate::harness_probes::observed_identities(harness, &text)
+                .into_iter()
+                .map(|identity| {
+                    // The source carries the effort (`pi`, `copilot`) — an
+                    // absent one is « not set », never refilled from the
+                    // startup event (source-first, ADR-0065 §1). `claude`'s
+                    // source never writes one: the requested effort stands.
+                    let (effort, effort_observed) = match source {
+                        Some(crate::harness_probes::ObservedIdentitySource::ModelAndEffort) => {
+                            let observed_effort = identity.effort;
+                            let observed = observed_effort.clone();
+                            (observed_effort, Some(observed.is_some()))
+                        }
+                        _ => (
+                            requested_effort.map(str::to_string),
+                            requested_effort.map(|_| false),
+                        ),
+                    };
+                    ModelIdentity {
+                        model: identity.model,
+                        effort,
+                        model_observed: true,
+                        effort_observed,
+                    }
+                })
+                .collect();
+        }
+    }
+    if !observed.is_empty() {
+        return observed;
+    }
+    requested_model
+        .map(|model| {
+            vec![ModelIdentity {
+                model: model.to_string(),
+                effort: requested_effort.map(str::to_string),
+                model_observed: false,
+                effort_observed: requested_effort.map(|_| false),
+            }]
+        })
+        .unwrap_or_default()
 }
 
 /// The subagent transcript files discovered for one main session, grouped by
@@ -484,6 +922,10 @@ struct PendingNode {
     session_id: Option<String>,
     /// Where the NodeRun works (#653) — its own sub-worktree, or the Run's.
     isolated: bool,
+    /// The requested model × effort, frozen in the startup event (ADR-0046) —
+    /// the fallback when the source is mute (ADR-0065 §1).
+    requested_model: Option<String>,
+    requested_effort: Option<String>,
 }
 
 /// A `MergeResolverStarted` awaiting its pairing `MergeResolverCompleted`.
@@ -495,15 +937,28 @@ struct MergeResolverPending {
     iter: Option<i64>,
 }
 
-/// Fold discovered subagent transcripts into their declared groups. Shared by a
-/// Node's subagents and an Infrastructure role's.
+/// Fold discovered subagent transcripts into their declared groups (the
+/// `by_pipeline` tree) and into the « By model » axis. Shared by a Node's
+/// subagents and an Infrastructure role's.
 ///
 /// The duration span alone bypasses the `harness_probes` dispatch: no capability
 /// marker exists yet for "start/end bounds from a transcript", so
 /// [`crate::context_peak::claude_transcript_time_span`] stays a direct call —
 /// the seam to extend when a second harness grows subagent transcripts.
+///
+/// `node_pairs` / `model_axis` are `Some` only for a Node's own subagents —
+/// the `by_pipeline` drill's couples and the « By model » axis are Node
+/// executions; an Infrastructure role's residual subagents stay off both
+/// (module doc, « The « By model » axis »).
+#[allow(clippy::too_many_arguments)]
 fn fold_subagents(
     subagents: &mut BTreeMap<String, SubagentAcc>,
+    mut node_pairs: Option<&mut BTreeMap<ModelEffortKey, ModelPairAcc>>,
+    mut model_axis: Option<&mut BTreeMap<String, ModelAxisModelAcc>>,
+    pipeline_id: &str,
+    pipeline_name: &str,
+    node_id: &str,
+    node_name: &str,
     files: Vec<(String, String)>,
     harness: &str,
 ) {
@@ -523,17 +978,76 @@ fn fold_subagents(
                 .is_none()
                 .then_some("no reliable start/end bounds in subagent transcript"),
         );
+
+        // ADR-0065 §3: the file's peak (and span) follows the file's own model —
+        // a subagent on another model lands in its own bucket. A subagent has no
+        // startup event, so ONLY the observed identities count: a mute file
+        // invents nothing (never a "default of X" bucket).
+        if let (Some(node_pairs), Some(model_axis)) =
+            (node_pairs.as_deref_mut(), model_axis.as_deref_mut())
+        {
+            let source = crate::harness_probes::observed_identity_source(harness);
+            if source.is_some() {
+                for identity in crate::harness_probes::observed_identities(harness, &text) {
+                    // Same source-first rule as a main session (ADR-0065 §1):
+                    // `pi`/`copilot` subagents would carry their own observed
+                    // effort; a mute effort is « not set », never requested.
+                    let (effort, effort_observed) = match source {
+                        Some(crate::harness_probes::ObservedIdentitySource::ModelAndEffort) => {
+                            let observed_effort = identity.effort;
+                            let observed = observed_effort.clone();
+                            (observed_effort, Some(observed.is_some()))
+                        }
+                        _ => (None, None),
+                    };
+                    let model_identity = ModelIdentity {
+                        model: identity.model,
+                        effort,
+                        model_observed: true,
+                        effort_observed,
+                    };
+                    record_model_observation(
+                        model_axis,
+                        node_pairs,
+                        pipeline_id,
+                        pipeline_name,
+                        node_id,
+                        node_name,
+                        harness,
+                        &model_identity,
+                        (
+                            peak.map(|p| p as f64),
+                            (peak.is_none()).then_some("no readable context usage in transcript"),
+                        ),
+                        (
+                            sub_duration,
+                            sub_duration
+                                .is_none()
+                                .then_some("no reliable start/end bounds in subagent transcript"),
+                        ),
+                    );
+                }
+            }
+        }
     }
 }
 
 /// Record one successful Node execution into its Node, its Pipeline and the
-/// cohort total alike. Discovered subagent transcripts go into the Node's own
-/// subagent groups and NEVER into any of the three harness accumulators.
+/// cohort total alike, plus the « By model » axis (#737): the main session's
+/// peak + duration goes to the model × effort bucket its own session file
+/// names (observed from the source, the startup event's requested identity in
+/// fallback). Discovered subagent transcripts go into the Node's own subagent
+/// groups and NEVER into any of the three harness accumulators.
 #[allow(clippy::too_many_arguments)]
 fn record_node_success(
     node_acc: &mut NodeAcc,
     pipeline_by_harness: &mut BTreeMap<String, HarnessAcc>,
     total_by_harness: &mut BTreeMap<String, HarnessAcc>,
+    model_axis: &mut BTreeMap<String, ModelAxisModelAcc>,
+    pipeline_id: &str,
+    pipeline_name: &str,
+    node_id: &str,
+    node_name: &str,
     claude_root: &Path,
     stores: &HarnessStores,
     working_dir: &Path,
@@ -543,7 +1057,7 @@ fn record_node_success(
 ) -> Result<(), PerformanceError> {
     let harness = pending.harness.clone();
     let root = source_root(&harness, claude_root, stores);
-    let (context, reason) = main_session_context(
+    let (context, reason, main_text) = main_session_observation(
         &harness,
         root,
         working_dir,
@@ -551,6 +1065,7 @@ fn record_node_success(
         seen_roots,
     )?;
     let duration = duration_millis(&pending.started_at, completed_at);
+    let duration_reason = duration.is_none().then_some("unparseable timestamp");
 
     for acc in [
         node_acc.by_harness.entry(harness.clone()).or_default(),
@@ -558,14 +1073,47 @@ fn record_node_success(
         total_by_harness.entry(harness.clone()).or_default(),
     ] {
         acc.context.observe(context, reason);
-        acc.duration.observe(
-            duration,
-            duration.is_none().then_some("unparseable timestamp"),
+        acc.duration.observe(duration, duration_reason);
+    }
+
+    // ADR-0065 §1: the main session's observation is attributed to the model(s)
+    // its own session file names — observed first, the requested identity in
+    // fallback, nothing invented when neither speaks.
+    for identity in main_session_identities(
+        &harness,
+        root,
+        working_dir,
+        pending.session_id.as_deref(),
+        pending.requested_model.as_deref(),
+        pending.requested_effort.as_deref(),
+        main_text.as_deref(),
+    ) {
+        record_model_observation(
+            model_axis,
+            &mut node_acc.pairs,
+            pipeline_id,
+            pipeline_name,
+            node_id,
+            node_name,
+            &harness,
+            &identity,
+            (context, reason),
+            (duration, duration_reason),
         );
     }
 
     let files = subagent_groups(&harness, root, working_dir, pending.session_id.as_deref());
-    fold_subagents(&mut node_acc.subagents, files, &harness);
+    fold_subagents(
+        &mut node_acc.subagents,
+        Some(&mut node_acc.pairs),
+        Some(model_axis),
+        pipeline_id,
+        pipeline_name,
+        node_id,
+        node_name,
+        files,
+        &harness,
+    );
 
     Ok(())
 }
@@ -754,7 +1302,20 @@ fn record_infra_success(
     );
 
     if run_harness == crate::harness_registry::CLAUDE {
-        fold_subagents(&mut acc.subagents, subs, run_harness);
+        // Infrastructure stays off the « By model » axis and its Node couples
+        // (module doc): the role's residual sessions carry no model identity of
+        // their own, and the axis compares Node executions.
+        fold_subagents(
+            &mut acc.subagents,
+            None,
+            None,
+            "",
+            "",
+            "",
+            "",
+            subs,
+            run_harness,
+        );
     }
 
     Ok(())
@@ -935,6 +1496,7 @@ async fn compute_performance(
 fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, PerformanceError> {
     let mut seen_roots: HashSet<PathBuf> = HashSet::new();
     let mut pipelines: BTreeMap<String, PipelineAcc> = BTreeMap::new();
+    let mut model_axis: BTreeMap<String, ModelAxisModelAcc> = BTreeMap::new();
     let mut total_by_harness: BTreeMap<String, HarnessAcc> = BTreeMap::new();
     let mut infrastructure_total_by_harness: BTreeMap<String, HarnessAcc> = BTreeMap::new();
     let mut pipeline_manager_acc = NodeAcc::default();
@@ -970,7 +1532,7 @@ fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, Perfo
             .to_string();
 
         let pipeline_acc = pipelines.entry(pipeline_id.clone()).or_default();
-        pipeline_acc.name = pipeline_name;
+        pipeline_acc.name = pipeline_name.clone();
 
         let mut pending: HashMap<(String, i64), PendingNode> = HashMap::new();
         let mut node_starts: HashMap<(String, i64), Vec<NodeStartRecord>> = HashMap::new();
@@ -1013,6 +1575,19 @@ fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, Perfo
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                         .map(str::to_string);
+                    // The requested model × effort, frozen at spawn (ADR-0046) —
+                    // the « By model » axis's fallback when the source is mute
+                    // (ADR-0065 §1). Same payload fields the cost fold reads.
+                    let requested_model = event_payload
+                        .and_then(|p| p.get("model"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    let requested_effort = event_payload
+                        .and_then(|p| p.get("effort"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
                     node_starts
                         .entry((node_id.clone(), iter))
                         .or_default()
@@ -1032,6 +1607,8 @@ fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, Perfo
                             harness,
                             session_id,
                             isolated,
+                            requested_model,
+                            requested_effort,
                         },
                     );
                 }
@@ -1044,8 +1621,8 @@ fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, Perfo
                             .get(&node_id)
                             .map(|(name, ..)| name.clone())
                             .unwrap_or_else(|| node_id.clone());
-                        let node_acc = pipeline_acc.nodes.entry(node_id).or_default();
-                        node_acc.name = node_name;
+                        let node_acc = pipeline_acc.nodes.entry(node_id.clone()).or_default();
+                        node_acc.name = node_name.clone();
                         let working_dir = if p.isolated {
                             crate::worktree_ops::sub_worktree_path(
                                 &repo_root,
@@ -1061,6 +1638,11 @@ fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, Perfo
                             node_acc,
                             &mut pipeline_acc.by_harness,
                             &mut total_by_harness,
+                            &mut model_axis,
+                            &pipeline_id,
+                            &pipeline_name,
+                            &node_id,
+                            &node_name,
                             &claude_root,
                             &stores,
                             &working_dir,
@@ -1203,5 +1785,6 @@ fn fold_performance(contexts: Vec<RunContext>) -> Result<StatsPerformance, Perfo
         infrastructure_total: PerformanceAggregate {
             harnesses: finish_by_harness(infrastructure_total_by_harness),
         },
+        by_model: wire_model_axis(model_axis),
     })
 }

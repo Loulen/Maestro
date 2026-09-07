@@ -925,9 +925,21 @@ mod tests {
             payload: None,
             ..marker.clone()
         };
-        assert!(binding_marker_present(&[marker.clone()], "orch", 2));
-        assert!(!binding_marker_present(&[marker.clone()], "orch", 1));
-        assert!(!binding_marker_present(&[marker.clone()], "other", 2));
+        assert!(binding_marker_present(
+            std::slice::from_ref(&marker),
+            "orch",
+            2
+        ));
+        assert!(!binding_marker_present(
+            std::slice::from_ref(&marker),
+            "orch",
+            1
+        ));
+        assert!(!binding_marker_present(
+            std::slice::from_ref(&marker),
+            "other",
+            2
+        ));
         assert!(!binding_marker_present(&[interactive_spawn], "orch", 2));
     }
 

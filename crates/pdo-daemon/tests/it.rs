@@ -29,6 +29,9 @@ mod cli_run_create;
 #[path = "cost_prices.rs"]
 mod cost_prices;
 
+#[path = "stats_cost_by_model.rs"]
+mod stats_cost_by_model;
+
 #[path = "update_apply.rs"]
 mod update_apply;
 #[path = "update_check.rs"]

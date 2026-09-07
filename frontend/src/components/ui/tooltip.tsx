@@ -82,7 +82,7 @@ export function Tooltip({
         <TooltipPrimitive.Content
           side={side}
           sideOffset={6}
-          className="z-50 rounded border border-line bg-bg-4 px-2 py-1 text-fg shadow-lg"
+          className="z-50 whitespace-pre-line rounded border border-line bg-bg-4 px-2 py-1 text-fg shadow-lg"
           style={{ fontSize: "11px", maxWidth: 260, lineHeight: 1.4 }}
           data-testid="tooltip-content"
         >

@@ -10,6 +10,51 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.73.0
+
+**Stats › Performance « By model » — pic de contexte et durée par modèle** (#737 ; story #733, spec
+#734, ADR-0065). Le deuxième select de groupement (« By pipeline » / « By model ») est indépendant
+du tri (« By context » / « By duration »). En « By model », l'arbre Modèle → effort → Pipeline →
+Node porte le pic de contexte médian et la durée médiane avec les mêmes boîtes à six statistiques,
+`measured` / `expected` / `missing_reasons` inchangés : le pic de chaque fichier de session est
+attribué au **modèle de ce fichier** (un sous-agent a le sien), même découpage que Cost — source
+d'abord (ADR-0065 §1 : `claude` par message, `pi` modèle + fournisseur + niveau de réflexion,
+`copilot` modèle + effort aux points d'usage), repli sur le demandé marqué « ? » sinon, rien
+inventé quand ni l'une ni l'autre ne parle. En « By pipeline », le drill d'un Node se termine par
+ses couples modèle × effort (pics et durées distincts côte à côte) ; la ligne Infrastructure reste
+conservée sur cet axe et hors de l'axe modèle. Provenance en infobulle comme dans Cost. Wire
+additif (`by_model`, `models` sur les feuilles Node) ; memo de Performance invalidé par les mêmes
+empreintes (événements, mtimes) — rien de matérialisé.
+
+## 1.72.0
+
+**Sources pi et copilot — modèle et effort observés, fusion inter-harnais par id verbatim** (#736 ;
+story #733, spec #734, ADR-0065). La capacité de harnais (ADR-0051) étend la source d'identité
+observée au-delà de `claude` : `pi` porte modèle et fournisseur sur chaque message et lit le niveau
+de réflexion dans l'événement de changement de niveau ; `copilot` (vérifié en 1.0.83) journalise
+modèle choisi et effort de raisonnement à l'ouverture de session, puis modèle sur chaque point
+d'usage. L'effort observé prime sur l'effort demandé, provenance dite en infobulle (marque « ? »
+réservée au demandé/mixte) ; un même id de modèle lancé via deux harnais fait **une ligne** à deux
+colonnes harnais, totaux additionnés (ADR-0052) ; le fournisseur n'apparaît qu'en infobulle, jamais
+dans l'identité. Un alias épinglé et un id observé daté restent deux lignes. `opencode`, sans source
+de coût (#561), reste absent de l'axe « By model » et « — » sur les autres axes.
+
+## 1.71.0
+
+**Stats › Cost « By model » pour claude** (#735 ; story #733, spec #734, ADR-0065). Le select
+« Cost grouping » gagne l'option « By model » : drill master/detail Modèle → effort → Pipeline →
+Node réutilisant l'existant, ids de modèle verbatim (un alias épinglé et l'id observé restent deux
+lignes, jamais de repli sur une famille). Côté backend, la capacité de harnais (ADR-0051)
+s'enrichit d'une source d'identité observée : `claude` lit le modèle par message des transcripts
+(coût ventilé par message, une session à deux modèles coûtant et comptant dans chaque bucket),
+tandis que `pi`/`copilot`/`opencode` retombent sur le modèle demandé au `node_started` ; le fold
+de coût porte des slices model × effort (effort « not set » italique quand ni demandé ni observé)
+et la memo reste intacte (ADR-0029). Le wire `/stats/cost` s'enrichit additivement : `by_model`,
+couples modèle × effort en feuilles de Node sur les axes By pipeline/By project, provenance
+`observed | requested | mixed` par bucket (marque « ? », les mots vivant dans les infobulles —
+jamais le mot « real »), couvertures par bucket et `by_period` à chaque niveau. Titre
+« per execution » sur l'axe modèle et au niveau Node, « per Run » ailleurs.
+
 ## 1.70.0
 
 **Toggle « Orchestrator » + onglet Orchestration + pastilles** (#723 ; story #709, spec #719,
