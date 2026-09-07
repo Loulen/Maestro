@@ -4374,6 +4374,11 @@ fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/sessions/{session_id}/attach", post(session_attach))
         .route("/sessions/{run_id}/manager/attach", post(manager_attach))
+        // Manager on demand: start/stop the Run's Pipeline Manager from the
+        // Manager tab. Start is idempotent (a double-click is a benign
+        // re-answer); stop on a dead session is a calm no-op.
+        .route("/runs/{run_id}/manager/start", post(start_run_manager))
+        .route("/runs/{run_id}/manager/stop", post(stop_run_manager))
         .route("/sessions/{run_id}/shell", post(open_run_shell))
         // The library pipeline authoring assistant (ADR-0051). No pipeline id in the
         // path: there is ONE assistant for the whole daemon. `POST` is
@@ -8947,10 +8952,25 @@ async fn create_run_inner(
         }
     }
 
+    // Manager on demand: the automatic spawn is GATED on the instance setting
+    // (`stored → env PDO_MANAGER_ENABLED → false`), read FRESH at the edge like
+    // every instance knob. It is NOT a permission — the Manager tab's manual
+    // start is always available, which is what keeps the setting honest — and it
+    // applies to future Runs only: a live Run is unaffected by a mid-flight
+    // toggle.
+    let manager_enabled = instance_config::resolve_manager_enabled(
+        instance_config::get(&state.db)
+            .await
+            .ok()
+            .and_then(|cfg| cfg.manager_enabled),
+    );
+
     if sandbox.is_off() {
         // Host path — inline, no docker.
         spawn_ready_after_event(state, &run_id).await;
-        spawn_manager_session(state, &run_id, &worktree_dir, name_hint, false).await;
+        if manager_enabled {
+            spawn_manager_session(state, &run_id, &worktree_dir, name_hint, false).await;
+        }
     } else {
         // Eager fail-fast prep on a detached task: the 201 must not block on a
         // first-run `docker build` (ADR-0023). Image + container + staging are
@@ -9011,14 +9031,16 @@ async fn create_run_inner(
                     // single REPLAY point for every spawn deferred while the prep ran.
                     mark_sandbox_prep_ready(&task_state, &task_run_id).await;
                     spawn_ready_after_event(&task_state, &task_run_id).await;
-                    spawn_manager_session(
-                        &task_state,
-                        &task_run_id,
-                        &task_worktree,
-                        name_hint,
-                        true,
-                    )
-                    .await;
+                    if manager_enabled {
+                        spawn_manager_session(
+                            &task_state,
+                            &task_run_id,
+                            &task_worktree,
+                            name_hint,
+                            true,
+                        )
+                        .await;
+                    }
                 }
                 Ok(Err(e)) => {
                     fail_run_sandbox_prep(
@@ -9158,7 +9180,8 @@ async fn spawn_manager_session(
     let session_name = tmux_session_manager::manager_session_name(run_id);
     // The manager follows the harness OF THE RUN — `Run → instance → floor`, no node
     // tier and deliberately no model/effort — so "this Run runs on X" holds with no
-    // exception. An unknown name falls back to `claude` with a warning rather than
+    // exception … unless a stored `manager_profile` pin says otherwise (applied
+    // just below). An unknown name falls back to `claude` with a warning rather than
     // failing the Run: the first NODE spawn is where an unknown harness fails fast
     // (ADR-0037), and the manager is a best-effort assist that must not wedge the Run.
     let run_state = reload_run_state(state, run_id)
@@ -9176,7 +9199,29 @@ async fn spawn_manager_session(
         &profiles,
         agent_profile::DEFAULT_PROFILE_ID,
     );
-    let manager_harness_name = manager_agent.combo.harness.clone();
+    // The stored `manager_profile` pin, applied AFTER « Follow the Run » so a pin
+    // fully wins (design §2.2): the profile's harness · model · effort replace the
+    // Run-tier combo entirely — a pin that only replaced the floor would almost
+    // never fire, since the Run tier always resolves. A pin naming a profile that
+    // was deleted (or renamed) AFTER registration warns and falls back to « Follow
+    // the Run » — loud, and the stored value is never rewritten (#432 tombstone).
+    let stored_pin = config
+        .as_ref()
+        .and_then(|cfg| cfg.manager_profile.as_deref())
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let found = match stored_pin {
+        Some(pin) => agent_profile::find_by_name_ci(&state.db, pin)
+            .await
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    };
+    let (manager_combo, pin_warning) =
+        apply_manager_profile_pin(stored_pin, found, manager_agent.combo.clone());
+    if let Some(warning) = &pin_warning {
+        warn!("manager for run {run_id}: {warning}");
+    }
+    let manager_harness_name = manager_combo.harness.clone();
     // Resolve against the DISK TIER, through the same registry the node spawns use,
     // so "this Run runs on X" holds even when X is a user-declared harness.
     let harness_home_root = sandbox_run::sandbox_home_roots(state)
@@ -9216,6 +9261,11 @@ async fn spawn_manager_session(
         workdir: worktree_dir,
         set_env: &manager_set_env,
     });
+    // Reservation before spawn (ADR-0038, extended to every path): the durable
+    // event lands FIRST, the tmux spawn after. The projection ignores this kind —
+    // the wire's `has_manager` stays an observed tmux fact, so a spawn that fails
+    // after the reservation reads `false`, not `true`.
+    emit_run_event(state, run_id, event_log::EventKind::ManagerStarted, None).await;
     if let Err(e) = tmux_session_manager::spawn(
         &session_name,
         &full_prompt,
@@ -9231,8 +9281,8 @@ async fn spawn_manager_session(
         // being read as a node's.
         tmux_session_manager::SessionTail::Agent {
             harness: &manager_harness,
-            model: manager_agent.combo.model.as_deref(),
-            effort: manager_agent.combo.effort.as_deref(),
+            model: manager_combo.model.as_deref(),
+            effort: manager_combo.effort.as_deref(),
             session_id: None,
         },
         sandbox_wrap.as_ref(),
@@ -9243,6 +9293,42 @@ async fn spawn_manager_session(
         error!("failed to spawn manager tmux session: {e}");
     } else {
         info!("Spawned manager session: {session_name}");
+    }
+}
+
+/// Apply the stored `manager_profile` pin to the manager's « Follow the Run »
+/// combo (design §2.2 « Manager profile »). `stored` is the trimmable
+/// instance-config value; `found` is the `agent_profile::find_by_name_ci` answer
+/// for it (errors stringified so the helper stays pure and unit-testable).
+///
+/// Returns the combo to launch with — the named profile's harness · model ·
+/// effort when the pin resolves, otherwise the « Follow the Run » combo
+/// untouched — plus a warning for a pin that could not fire (profile missing or
+/// unreadable): the fallback is loud, and the stored value is never rewritten.
+fn apply_manager_profile_pin(
+    stored: Option<&str>,
+    found: Result<Option<agent_profile::AgentProfile>, String>,
+    follow_run: agent_choice::ResolvedCombo,
+) -> (agent_choice::ResolvedCombo, Option<String>) {
+    let Some(pin) = stored else {
+        return (follow_run, None);
+    };
+    match found {
+        Ok(Some(profile)) => (profile.combo(), None),
+        Ok(None) => (
+            follow_run,
+            Some(format!(
+                "manager profile `{pin}` names no agent profile — falling back to \
+                 « Follow the Run »"
+            )),
+        ),
+        Err(e) => (
+            follow_run,
+            Some(format!(
+                "cannot read agent profile `{pin}` ({e}) — falling back to \
+                 « Follow the Run »"
+            )),
+        ),
     }
 }
 
@@ -9680,6 +9766,36 @@ async fn build_settings_view(state: &AppState) -> Result<serde_json::Value, sqlx
         "default"
     };
 
+    // Manager on demand: the auto-start flag, `stored → env → default(false)` —
+    // the SAME resolver the create-run chokepoint consumes, so the disclosed
+    // value cannot drift.
+    let me_stored = cfg.manager_enabled.map(|v| v != 0);
+    let me_env = std::env::var(instance_config::MANAGER_ENABLED_ENV)
+        .ok()
+        .map(|s| {
+            let t = s.trim();
+            t.eq_ignore_ascii_case("1")
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        });
+    let me_effective = instance_config::resolve_manager_enabled(cfg.manager_enabled);
+    let me_source = if me_stored.is_some() {
+        "stored"
+    } else if me_env.is_some() {
+        "env"
+    } else {
+        "default"
+    };
+    // The profile pin: a stored agent-profile NAME, or unset (« Follow the
+    // Run »). No env tier — unlike the flag, a pin is a pure stored decision.
+    let mp_stored = cfg.manager_profile.as_deref().filter(|s| !s.is_empty());
+    let mp_source = if mp_stored.is_some() {
+        "stored"
+    } else {
+        "default"
+    };
+
     // Not a `settings_field` — it has no stored/env/default tier. Folded in here so
     // the modal learns the default AND whether Docker can run a sandbox in ONE fetch.
     // Advisory: it grays out `full`/`minimal`, but the run-advance fail-fast
@@ -9874,6 +9990,21 @@ async fn build_settings_view(state: &AppState) -> Result<serde_json::Value, sqlx
             uc_env,
             update_check::UPDATE_CHECK_DEFAULT,
         ),
+        // Manager on demand: off by default — a Run starts managerless and the
+        // Manager tab's Start button (or the Settings toggle for future Runs)
+        // brings one up.
+        "manager_enabled": settings_field_bool(
+            me_effective,
+            me_source,
+            me_stored,
+            me_env,
+            instance_config::MANAGER_ENABLED_DEFAULT,
+        ),
+        // The agent-profile NAME the manager is pinned to, or null (« Follow the
+        // Run » — the manager mirrors the Run's harness/model/effort). A stored
+        // name whose profile was deleted dangles: the UI renders the #432
+        // tombstone, and the spawn falls back to « Follow the Run ».
+        "manager_profile": settings_field_str(mp_stored, mp_source, mp_stored, None),
         "updated_at": cfg.updated_at,
     }))
 }
@@ -10841,6 +10972,37 @@ async fn put_settings(
         // RESOLVES. Same shared gate as the Trigger surfaces.
         if let Err(msg) = validate_sandbox_ref(&state.db, s).await {
             return bad(&msg);
+        }
+    }
+    if let Some(p) = req.manager_profile.as_deref() {
+        // "" = clear sentinel (back to « Follow the Run »); anything else must
+        // name an EXISTING agent profile. A pin to nothing would silently fall
+        // back at spawn time, so it is refused at registration — the #432
+        // tombstone then only ever arises from a LATER profile deletion/rename,
+        // which no PUT can prevent.
+        if !p.is_empty() {
+            match agent_profile::find_by_name_ci(&state.db, p).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    let names = agent_profile::list(&state.db)
+                        .await
+                        .map(|profiles| {
+                            profiles
+                                .iter()
+                                .map(|profile| profile.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    return bad(&format!(
+                        "unknown manager profile `{p}`: it names no agent profile — a pin to \
+                         nothing would silently fall back to « Follow the Run ». Known profiles: {names}"
+                    ));
+                }
+                Err(e) => {
+                    return bad(&format!("cannot check agent profile `{p}`: {e}"));
+                }
+            }
         }
     }
     if let Some(h) = req.default_harness.as_deref() {
@@ -12727,6 +12889,18 @@ async fn get_run(
             );
             let mut response = serde_json::to_value(run_state).expect("RunState serializes");
             inject_frozen_node_provisioning(&mut response, &events);
+            // Manager on demand: an OBSERVED fact, not a projected one — the
+            // panel must know whether the session really exists, and a live tmux
+            // probe is the only honest source (a projected flag would drift from
+            // the orphan sweep, a manual stop or a daemon restart). One
+            // `has-session` per detail fetch, the same cost class as the disk
+            // reads above.
+            let socket = state.tmux_socket();
+            let has_manager = tmux_session_manager::session_exists(
+                &socket,
+                &tmux_session_manager::manager_session_name(&run_id),
+            );
+            response["has_manager"] = serde_json::Value::Bool(has_manager);
             Json(response).into_response()
         }
 
@@ -16687,6 +16861,145 @@ async fn session_attach(
         )
             .into_response(),
     }
+}
+
+/// Response of `POST /runs/{run_id}/manager/start` (manager on demand).
+#[derive(Serialize)]
+struct ManagerStartResponse {
+    ok: bool,
+    session: String,
+    /// `true` when THIS call spawned the session; `false` when it already
+    /// existed — a double-click Start is an idempotent re-answer, not an error.
+    created: bool,
+}
+
+/// Start the Run's Pipeline Manager on demand (manager on demand).
+///
+/// The Manager tab's Start button is ALWAYS available — the `manager_enabled`
+/// setting gates only the automatic spawn at Run creation, never this — so the
+/// handler is gated on nothing but the Run existing and its worktree still
+/// being on disk (an archived Run has none left to work in).
+///
+/// Idempotency and the racing discipline are the run shell's
+/// create-then-verify rule: `session_exists` first (a benign re-answer), spawn,
+/// then verify again — a concurrent start may have won the `new-session`, and a
+/// spawn failure after our own reservation event must read as an error, not a
+/// silent success (the projection ignores `ManagerStarted`; the wire's
+/// `has_manager` stays the observed tmux fact).
+async fn start_run_manager(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let (_, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+
+    let session_name = tmux_session_manager::manager_session_name(&run_id);
+    let socket = state.tmux_socket();
+    if tmux_session_manager::session_exists(&socket, &session_name) {
+        return (
+            StatusCode::OK,
+            Json(ManagerStartResponse {
+                ok: true,
+                session: session_name,
+                created: false,
+            }),
+        )
+            .into_response();
+    }
+
+    // The manager works in the Run's worktree; an archived/cleaned Run has none
+    // left, and a session spawned into a dead cwd would only fail at tmux.
+    let repo_root = effective_repo_root(&state, &run_state);
+    let worktree_dir = crate::worktree_ops::worktree_dir_for_run(&repo_root, &run_id);
+    if !worktree_dir.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "this run's worktree no longer exists (archived or cleaned) — there is nothing for a manager to work in"
+            })),
+        )
+            .into_response();
+    }
+
+    // The create path's name_hint discipline, reconstructed from the projected
+    // state: a placeholder name still carries its rename instruction, a named
+    // Run is left alone, and a nameless Run derives from its input. The FIRST
+    // start (manual or automatic) names the Run best-effort, exactly as before.
+    let name_hint = match run_state.name.as_deref() {
+        Some(name) if name.starts_with("Untitled run") => {
+            prompt_augmenter::RunNameHint::Placeholder
+        }
+        Some(_) => prompt_augmenter::RunNameHint::UserProvided,
+        None => match run_state.input.as_deref() {
+            Some(input) if !input.trim().is_empty() => {
+                prompt_augmenter::RunNameHint::DeriveFromInput
+            }
+            _ => prompt_augmenter::RunNameHint::Placeholder,
+        },
+    };
+
+    spawn_manager_session(
+        &state,
+        &run_id,
+        &worktree_dir,
+        name_hint,
+        !run_state.sandbox.is_off(),
+    )
+    .await;
+
+    // Create-then-verify (the run shell's benign-race rule).
+    if !tmux_session_manager::session_exists(&socket, &session_name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "the manager tmux session did not come up (see the daemon logs)"
+            })),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(ManagerStartResponse {
+            ok: true,
+            session: session_name,
+            created: true,
+        }),
+    )
+        .into_response()
+}
+
+/// Stop the Run's Pipeline Manager (manager on demand). Cost control is the
+/// point of the feature, so the session must be killable from the panel — not
+/// only by the orphan sweep or a manual `tmux kill-session`.
+///
+/// Stop on a session that is already gone is a calm no-op that still answers
+/// `200` ("nothing to stop"), and still writes its `ManagerStopped` event: the
+/// projection ignores the kind, so the durable record never lies about state.
+async fn stop_run_manager(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    // Durable first, kill after — the same order the start path keeps.
+    emit_run_event(&state, &run_id, event_log::EventKind::ManagerStopped, None).await;
+
+    let session_name = tmux_session_manager::manager_session_name(&run_id);
+    let socket = state.tmux_socket();
+    if !tmux_session_manager::session_exists(&socket, &session_name) {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "stopped": false })),
+        )
+            .into_response();
+    }
+    tmux_session_manager::kill(&socket, &session_name);
+    info!("Stopped manager session: {session_name}");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "stopped": true })),
+    )
+        .into_response()
 }
 
 async fn manager_attach(
@@ -23165,6 +23478,121 @@ mod tests {
         assert!(body.get("loc").is_none() || body["loc"].is_null());
         // No transcript dir for this seeded run → `cost` is omitted (None) → "—".
         assert!(body.get("cost").is_none() || body["cost"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_run_payload_carries_has_manager_as_an_observed_fact() {
+        // Manager on demand: the wire's `has_manager` is an OBSERVED tmux fact,
+        // probed at fetch time — never a projected flag. In the test env no tmux
+        // session exists, so a freshly seeded run reads `false` even though no
+        // event ever said otherwise; a spawned-then-swept session would read the
+        // same way, which is exactly the desynchronisation a projected flag
+        // cannot survive.
+        let state = test_state().await;
+        let run_id = "manager-payload";
+        seed_completed_run(&state, run_id).await;
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["has_manager"], false);
+    }
+
+    #[tokio::test]
+    async fn start_manager_on_a_run_without_a_worktree_is_refused() {
+        // Manager on demand: the start endpoint is always available (the
+        // `manager_enabled` setting gates only the automatic spawn), but a run
+        // whose worktree is gone (archived/cleaned) has nothing for a manager
+        // to work in — refused with a 409 naming why, never a spawn into a dead
+        // cwd.
+        let state = test_state().await;
+        let run_id = "manager-start-noworktree";
+        seed_completed_run(&state, run_id).await;
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/manager/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("worktree no longer exists"),
+            "got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_manager_on_an_unknown_run_is_a_404() {
+        let state = test_state().await;
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/no-such-run/manager/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stop_manager_on_a_dead_session_is_a_calm_noop() {
+        // Manager on demand: stopping a session that is already gone answers
+        // 200 with `stopped: false` — and still writes its ManagerStopped
+        // event, which the projection ignores.
+        let state = test_state().await;
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/manager-stop-ghost/manager/stop")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["stopped"], false);
     }
 
     #[test]
@@ -37348,6 +37776,181 @@ edges:
                 .default_auto_name,
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn put_settings_round_trips_the_manager_enabled_flag_both_ways() {
+        // Manager on demand: the checkbox is authoritative in BOTH directions.
+        // Unticking must persist a stored `0` (not a clear back to NULL), or it
+        // could never override a `PDO_MANAGER_ENABLED=1`. The fresh view also
+        // discloses the built-in default: OFF — a Run starts managerless.
+        let state = test_state().await;
+
+        let (_, fresh) = put_settings_resp(&state, "{}").await;
+        assert_eq!(fresh["manager_enabled"]["effective"], false);
+        assert_eq!(fresh["manager_enabled"]["source"], "default");
+        assert_eq!(fresh["manager_enabled"]["default"], false);
+        assert_eq!(
+            fresh["manager_profile"]["effective"],
+            serde_json::Value::Null
+        );
+
+        let (status, view) = put_settings_resp(&state, r#"{"manager_enabled": true}"#).await;
+        assert_eq!(status, StatusCode::OK, "got {view}");
+        assert_eq!(view["manager_enabled"]["effective"], true);
+        assert_eq!(view["manager_enabled"]["source"], "stored");
+        assert_eq!(
+            instance_config::get(&state.db)
+                .await
+                .unwrap()
+                .manager_enabled,
+            Some(1),
+            "on must persist a stored 1"
+        );
+
+        let (status, view) = put_settings_resp(&state, r#"{"manager_enabled": false}"#).await;
+        assert_eq!(status, StatusCode::OK, "got {view}");
+        assert_eq!(view["manager_enabled"]["effective"], false);
+        assert_eq!(view["manager_enabled"]["source"], "stored");
+        assert_eq!(
+            instance_config::get(&state.db)
+                .await
+                .unwrap()
+                .manager_enabled,
+            Some(0),
+            "off must persist a stored 0, never NULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_settings_persists_and_clears_the_manager_profile_pin() {
+        let state = test_state().await;
+        let profile = agent_profile::create(&state.db, "reviewer", "claude", Some("sonnet"), None)
+            .await
+            .unwrap();
+
+        let (status, view) = put_settings_resp(&state, r#"{"manager_profile": "reviewer"}"#).await;
+        assert_eq!(status, StatusCode::OK, "got {view}");
+        assert_eq!(view["manager_profile"]["effective"], "reviewer");
+        assert_eq!(view["manager_profile"]["source"], "stored");
+
+        // "" is the clear sentinel — back to « Follow the Run », persisted as
+        // SQL NULL, never as an empty string that would win precedence.
+        let (status, view) = put_settings_resp(&state, r#"{"manager_profile": ""}"#).await;
+        assert_eq!(status, StatusCode::OK, "got {view}");
+        assert_eq!(
+            view["manager_profile"]["effective"],
+            serde_json::Value::Null
+        );
+        assert_eq!(view["manager_profile"]["source"], "default");
+        assert_eq!(
+            instance_config::get(&state.db)
+                .await
+                .unwrap()
+                .manager_profile,
+            None,
+            "clear must persist NULL, never ''"
+        );
+
+        // Keep the profile referenced so `create`'s row is not dead code.
+        assert_eq!(profile.name, "reviewer");
+    }
+
+    #[tokio::test]
+    async fn put_settings_refuses_an_unknown_manager_profile() {
+        // A pin to nothing would silently fall back to « Follow the Run » at
+        // spawn time — refused at registration instead. (The #432 tombstone
+        // only ever arises from a LATER profile deletion, which no PUT can
+        // prevent.)
+        let state = test_state().await;
+        let (status, body) = put_settings_resp(&state, r#"{"manager_profile": "ghost"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown manager profile `ghost`"),
+            "got {body}"
+        );
+        assert_eq!(
+            instance_config::get(&state.db)
+                .await
+                .unwrap()
+                .manager_profile,
+            None,
+            "a refused edit must persist nothing"
+        );
+    }
+
+    #[test]
+    fn no_pin_leaves_the_follow_the_run_combo_untouched() {
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "codex".into(),
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+        };
+        let (combo, warning) = apply_manager_profile_pin(None, Ok(None), follow_run.clone());
+        assert_eq!(combo, follow_run);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn a_resolved_pin_fully_replaces_the_follow_the_run_combo() {
+        // Strong pin (design §2.2, decision #3): harness, model AND effort come
+        // from the profile — the Run tier never leaks through.
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "codex".into(),
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+        };
+        let profile = agent_profile::AgentProfile {
+            id: "p1".into(),
+            name: "CheapManager".into(),
+            harness: "claude".into(),
+            model: Some("haiku".into()),
+            effort: None,
+            created_at: "2026-01-01".into(),
+            updated_at: "2026-01-01".into(),
+        };
+        let (combo, warning) =
+            apply_manager_profile_pin(Some("CheapManager"), Ok(Some(profile)), follow_run);
+        assert_eq!(combo.harness, "claude");
+        assert_eq!(combo.model.as_deref(), Some("haiku"));
+        assert_eq!(combo.effort, None);
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn a_pin_to_a_missing_profile_falls_back_with_a_warning_naming_it() {
+        // #432 tombstone discipline: the profile was deleted after the pin was
+        // stored — the spawn falls back to « Follow the Run », loudly, and the
+        // stored value is never rewritten (nothing here persists anything).
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "codex".into(),
+            model: None,
+            effort: None,
+        };
+        let (combo, warning) =
+            apply_manager_profile_pin(Some("ghost"), Ok(None), follow_run.clone());
+        assert_eq!(combo, follow_run);
+        let warning = warning.expect("a missing pin must warn");
+        assert!(warning.contains("`ghost`"), "got: {warning}");
+        assert!(warning.contains("Follow the Run"), "got: {warning}");
+    }
+
+    #[test]
+    fn a_pin_that_cannot_be_looked_up_falls_back_with_a_warning() {
+        let follow_run = agent_choice::ResolvedCombo {
+            harness: "claude".into(),
+            model: None,
+            effort: None,
+        };
+        let (combo, warning) =
+            apply_manager_profile_pin(Some("p"), Err("db locked".into()), follow_run.clone());
+        assert_eq!(combo, follow_run);
+        let warning = warning.expect("a failed lookup must warn");
+        assert!(warning.contains("db locked"), "got: {warning}");
+        assert!(warning.contains("Follow the Run"), "got: {warning}");
     }
 
     #[tokio::test]

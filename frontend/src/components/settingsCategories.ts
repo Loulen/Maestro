@@ -14,6 +14,7 @@ export type SettingsSectionId =
   | "version-update"
   | "harness-models"
   | "agent-profiles"
+  | "pipeline-manager"
   | "skills"
   | "sandbox"
   | "staging-profiles"
@@ -89,6 +90,12 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
         ownPersistence: true,
       },
       {
+        id: "pipeline-manager",
+        label: "Pipeline Manager",
+        description:
+          "The conversational agent attached to each Run — off by default, started on demand from the Manager tab.",
+      },
+      {
         id: "skills",
         label: "Skills",
         description:
@@ -161,7 +168,9 @@ export type SettingsFieldId =
   | "default-harness"
   | "harness-models"
   | "default-sandbox"
-  | "update-check";
+  | "update-check"
+  | "manager-enabled"
+  | "manager-profile";
 
 export const FIELD_SECTION: Record<SettingsFieldId, SettingsSectionId> = {
   "session-cap": "runtime-limits",
@@ -176,6 +185,8 @@ export const FIELD_SECTION: Record<SettingsFieldId, SettingsSectionId> = {
   "harness-models": "harness-models",
   "default-sandbox": "sandbox",
   "update-check": "version-update",
+  "manager-enabled": "pipeline-manager",
+  "manager-profile": "pipeline-manager",
 };
 
 export function categoryOf(section: SettingsSectionId): SettingsCategory {

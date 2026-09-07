@@ -10,6 +10,23 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.69.0
+
+**Le Pipeline Manager devient opt-in** — plus de session `pdo-mgr-*` systématique : un run naît
+sans manager, et l'onglet Manager apparaît sur tout run vivant avec un état vide (« No manager
+on this run », bouton « Start manager », lien vers Settings) ; la session se lance à la demande
+(`POST /runs/{id}/manager/start`, idempotent) et se stoppe avec confirmation en deux temps
+(`POST /runs/{id}/manager/stop`). Deux réglages d'instance rejoignent Settings › Agents ›
+Pipeline Manager : `manager_enabled` (auto-spawn à la création d'un run — machinerie stored →
+env → default d'ADR-0015, seam `PDO_MANAGER_ENABLED`) et `manager_profile`, qui épingle le
+manager sur un profil d'agent (harnais · modèle · effort, écrasant le tier du run) avec repli
+averti « Follow the Run » si le profil nommé a disparu — la valeur stockée n'est jamais
+réécrite, et un PUT nommant un profil inconnu est un 400. `has_manager` est un fait observé
+(sonde `tmux has-session` à chaque `GET /runs/{id}`), jamais un état projeté : arrêt manuel,
+sweep d'orphelins et restart du daemon ne peuvent pas désynchroniser l'UI. La réservation du
+nom passe sur des events `ManagerStarted` / `ManagerStopped` (ADR-0038) émis avant le spawn
+tmux sur tous les chemins, auto comme manuel.
+
 ## 1.68.0
 
 **Liaison forte orchestrateur ↔ enfants** (#724 ; story #709, spec #719, ADR-0064). Un nœud

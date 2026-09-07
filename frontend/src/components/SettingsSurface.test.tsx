@@ -129,6 +129,9 @@ function sample(overrides: Partial<InstanceSettings> = {}): InstanceSettings {
       env: null,
       default: true,
     },
+    // Manager on demand: off by default (a Run starts managerless), no pin (« Follow the Run »).
+    manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+    manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
     // Price table (#427): the default state of every instance — neither file exists,
     // never synced, nothing inert. The paths are reported all the same.
     update_check: { effective: true, source: "default", stored: null, env: null, default: true },
@@ -958,6 +961,106 @@ describe("SettingsSurface — default Run auto-naming (#338)", () => {
     expect(note).toHaveTextContent(/stored value \(off\)/i);
     expect(note).toHaveTextContent("PDO_DEFAULT_AUTO_NAME=on");
     expect(note).toHaveTextContent(/overridden/i);
+  });
+});
+
+describe("SettingsSurface — Pipeline Manager section (manager on demand)", () => {
+  beforeEach(() => {
+    fetchSettingsMock.mockReset();
+    updateSettingsMock.mockReset();
+    browseFsMock.mockReset();
+    browseFsMock.mockResolvedValue(BROWSE_HOME);
+    resetProfileMocks();
+    fetchAgentProfilesMock.mockReset();
+    fetchAgentProfilesMock.mockResolvedValue({
+      profiles: [
+        { id: "default", name: "Default", harness: "claude", model: null, effort: null },
+        { id: "p-easy", name: "claude very easy", harness: "claude", model: "sonnet", effort: "low" },
+      ],
+    });
+  });
+
+  it("renders the toggle (off by default) and the profile select seeded on « Follow the Run »", async () => {
+    fetchSettingsMock.mockResolvedValue(sample());
+    render(<SettingsSurface open onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("settings-category-agents"));
+    const box = (await screen.findByTestId("setting-manager-enabled")) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    const select = screen.getByTestId("setting-manager-profile") as HTMLSelectElement;
+    expect(select.value).toBe("");
+    // The profile options arrive with the async profiles fetch.
+    await waitFor(() =>
+      expect(
+        within(select).getAllByRole("option").map((o) => o.textContent),
+      ).toContain("claude very easy"),
+    );
+    const options = within(select).getAllByRole("option").map((o) => o.textContent);
+    expect(options).toContain("Follow the Run");
+  });
+
+  it("shows the tombstone and a warning for a stored pin whose profile is gone — never a rewrite", async () => {
+    fetchSettingsMock.mockResolvedValue(
+      sample({
+        manager_profile: { effective: "gone", source: "stored", stored: "gone", env: null, default: null },
+      }),
+    );
+    render(<SettingsSurface open onClose={() => {}} />);
+    const select = (await screen.findByTestId("setting-manager-profile")) as HTMLSelectElement;
+    expect(select.value).toBe("gone");
+    expect(screen.getByTestId("setting-manager-profile-missing")).toBeInTheDocument();
+    expect(screen.getByTestId("setting-manager-profile-missing-note")).toHaveTextContent(
+      /falls back to « Follow the Run »/i,
+    );
+  });
+
+  it("saves the flag as a plain bool and the pin as a profile name; Save stays clean otherwise", async () => {
+    fetchSettingsMock.mockResolvedValue(sample());
+    updateSettingsMock.mockResolvedValue(sample());
+    render(<SettingsSurface open onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("settings-category-agents"));
+
+    fireEvent.click(await screen.findByTestId("setting-manager-enabled"));
+    // Wait for the profiles fetch so the option exists before the change.
+    await screen.findByTestId("settings-section-body-pipeline-manager");
+    await waitFor(() =>
+      expect(screen.getByTestId("setting-manager-profile").textContent).toContain("Follow the Run"),
+    );
+    await waitFor(() => {
+      const select = screen.getByTestId("setting-manager-profile");
+      expect([...select.querySelectorAll("option")].some((o) => o.value === "claude very easy")).toBe(true);
+    });
+    fireEvent.change(screen.getByTestId("setting-manager-profile"), {
+      target: { value: "claude very easy" },
+    });
+    fireEvent.click(screen.getByTestId("settings-save"));
+
+    await waitFor(() => expect(updateSettingsMock).toHaveBeenCalledTimes(1));
+    expect(updateSettingsMock).toHaveBeenCalledWith({
+      manager_enabled: true,
+      manager_profile: "claude very easy",
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-footer-status")).toHaveTextContent("Saved"),
+    );
+  });
+
+  it("clears the pin with the empty-string sentinel when back on « Follow the Run »", async () => {
+    fetchSettingsMock.mockResolvedValue(
+      sample({
+        manager_profile: { effective: "claude very easy", source: "stored", stored: "claude very easy", env: null, default: null },
+      }),
+    );
+    updateSettingsMock.mockResolvedValue(sample());
+    render(<SettingsSurface open onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId("settings-category-agents"));
+
+    fireEvent.change(await screen.findByTestId("setting-manager-profile"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByTestId("settings-save"));
+
+    await waitFor(() => expect(updateSettingsMock).toHaveBeenCalledTimes(1));
+    expect(updateSettingsMock).toHaveBeenCalledWith({ manager_profile: "" });
   });
 });
 
@@ -1877,12 +1980,17 @@ describe("SettingsSurface — Agents and Sandbox & worktrees as inline sections 
       .map((b) => b.textContent?.replace("Unsaved changes", "").trim() ?? "");
   }
 
-  it("Agents lists Harness & models, Agent profiles, Skills and mounts the profiles panel inline", async () => {
+  it("Agents lists Harness & models, Agent profiles, Pipeline Manager, Skills and mounts the profiles panel inline", async () => {
     render(<SettingsSurface open onClose={() => {}} />);
     await screen.findByTestId("setting-session-cap");
     fireEvent.click(screen.getByTestId("settings-category-agents"));
     const page = screen.getByTestId("settings-page-agents");
-    expect(sectionLabels(page)).toEqual(["Harness & models", "Agent profiles", "Skills"]);
+    expect(sectionLabels(page)).toEqual([
+      "Harness & models",
+      "Agent profiles",
+      "Pipeline Manager",
+      "Skills",
+    ]);
 
     // The instance form fields sit in Harness & models.
     const harness = screen.getByTestId("settings-section-body-harness-models");

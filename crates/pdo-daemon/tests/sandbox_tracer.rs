@@ -232,6 +232,7 @@ async fn minimal_run_prepares_wraps_and_completes() {
         TestDaemon::spawn_with_docker_override(seed("#!/usr/bin/env bash\ntrue\n"), docker)
             .await
             .unwrap();
+    daemon.enable_manager().await;
 
     let run_id = start_run(&daemon, Some("minimal")).await;
 
@@ -631,6 +632,7 @@ async fn full_run_stages_allowlist_and_completes() {
         TestDaemon::spawn_with_docker_override(seed("#!/usr/bin/env bash\ntrue\n"), docker)
             .await
             .unwrap();
+    daemon.enable_manager().await;
     fabricate_host_claude(daemon.repo_root());
 
     let run_id = start_run(&daemon, Some("full")).await;
@@ -737,6 +739,7 @@ async fn minimal_run_stages_the_staging_set_against_a_fabricated_host() {
         TestDaemon::spawn_with_docker_override(seed("#!/usr/bin/env bash\ntrue\n"), docker)
             .await
             .unwrap();
+    daemon.enable_manager().await;
     fabricate_host_claude(daemon.repo_root());
 
     let run_id = start_run(&daemon, Some("minimal")).await;
@@ -795,6 +798,7 @@ async fn full_excludes_projects_and_bulky_host_state() {
         TestDaemon::spawn_with_docker_override(seed("#!/usr/bin/env bash\ntrue\n"), docker)
             .await
             .unwrap();
+    daemon.enable_manager().await;
     fabricate_host_claude(daemon.repo_root());
 
     let run_id = start_run(&daemon, Some("full")).await;
@@ -1547,6 +1551,7 @@ async fn sandboxed_manager_preamble_uses_the_container_side_url() {
         TestDaemon::spawn_with_docker_override(seed("#!/usr/bin/env bash\ntrue\n"), docker)
             .await
             .unwrap();
+    daemon.enable_manager().await;
 
     let run_id = start_run(&daemon, Some("minimal")).await;
     wait_node_status(&daemon, &run_id, "running").await;
@@ -1585,6 +1590,12 @@ async fn off_run_manager_preamble_stays_on_localhost() {
         TestDaemon::spawn_with_docker_override(seed("#!/usr/bin/env bash\ntrue\n"), docker)
             .await
             .unwrap();
+    daemon.enable_manager().await;
+    // The enable call answers through `GET /settings`' view, which runs the
+    // advisory Docker probe — a docker invocation that is NOT the Run's. Reset
+    // the argv baseline so the assertion below still means "the off RUN never
+    // invokes docker".
+    std::fs::write(&log, b"").unwrap();
 
     let run_id = start_run(&daemon, None).await;
     let port = daemon.addr.port();

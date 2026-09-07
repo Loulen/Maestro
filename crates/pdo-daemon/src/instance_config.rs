@@ -132,6 +132,33 @@ pub(crate) struct InstanceConfig {
     /// nullable TEXT column; `NULL` ⇒ empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<crate::skill_selection::SkillRef>,
+    /// Stored manager auto-start flag as `0`/`1`, or `None` when unset (manager
+    /// on demand). `None` falls through to the env seam
+    /// ([`MANAGER_ENABLED_ENV`]) then the built-in default (`false` — a Run
+    /// starts managerless and the user starts one from the Manager tab when they
+    /// want it). The resolver ([`resolve_manager_enabled`]) owns the precedence;
+    /// the create-run chokepoint reads it FRESH at the edge and it gates **only
+    /// the automatic spawn** — a manual start from the Manager tab is always
+    /// available, which is what keeps the setting honest ("default off", not
+    /// "forbidden").
+    ///
+    /// `Option<i64>` and not `Option<bool>` for the same reason as
+    /// [`Self::autocomplete_turn_end`]: `NULL` is what makes the
+    /// `stored → env → default` fall-through work; a stored `0` is a decision
+    /// that beats the env.
+    pub manager_enabled: Option<i64>,
+    /// Stored **agent-profile name** the manager is pinned to, or `None` when
+    /// unset (« Follow the Run »): the manager mirrors the Run's harness
+    /// (`Run → instance → floor` via `agent_choice::resolve_infra`) and lands on
+    /// the default agent profile for model/effort. A stored name **pins** the
+    /// manager to that profile's harness · model · effort, overriding the Run
+    /// tier — the Run tier always resolves, so a pin that merely replaced the
+    /// floor would almost never fire. `Some("")` is the clear sentinel —
+    /// [`update`] normalises it to SQL `NULL`. A stored name whose profile was
+    /// later deleted (or renamed) falls back to « Follow the Run » at resolve
+    /// time, never a silent rewrite of the stored value (the #432 tombstone
+    /// treatment; `GET /settings` names the dangle in the UI).
+    pub manager_profile: Option<String>,
     /// RFC3339-millis UTC timestamp of the last write (or the seed).
     pub updated_at: String,
 }
@@ -200,6 +227,16 @@ pub(crate) struct UpdateInstanceConfig {
     /// A flat `Option<Vec>` rather than a double-`Option`: an empty selection IS
     /// the clear, there is no third state.
     pub skills: Option<Vec<crate::skill_selection::SkillRef>>,
+    /// Set the manager auto-start flag (manager on demand): `Some(true)` stores
+    /// `1`, `Some(false)` stores `0`, `None` leaves it untouched. Same set-only,
+    /// `0`-not-`NULL` discipline as [`Self::autocomplete_turn_end`]: unticking
+    /// must persist a stored `0` that beats a `PDO_MANAGER_ENABLED=1`, which a
+    /// `NULL` fall-through would not.
+    pub manager_enabled: Option<bool>,
+    /// Set the manager profile pin (an agent-profile NAME): `Some("")` clears it
+    /// back to unset (« Follow the Run », same `""`-sentinel as
+    /// `default_model`); `None` leaves it untouched.
+    pub manager_profile: Option<String>,
 }
 
 impl UpdateInstanceConfig {
@@ -218,6 +255,8 @@ impl UpdateInstanceConfig {
             && self.update_check.is_none()
             && self.agent_choice.is_none()
             && self.skills.is_none()
+            && self.manager_enabled.is_none()
+            && self.manager_profile.is_none()
     }
 }
 
@@ -245,6 +284,8 @@ pub(crate) async fn init(db: &SqlitePool) -> Result<(), sqlx::Error> {
             libassist_idle_ttl_secs INTEGER,
             agent_choice       TEXT,
             update_check       INTEGER,
+            manager_enabled    INTEGER,
+            manager_profile    TEXT,
             updated_at         TEXT NOT NULL
         )",
     )
@@ -422,6 +463,36 @@ pub(crate) async fn init(db: &SqlitePool) -> Result<(), sqlx::Error> {
             .await?;
     }
 
+    // Additive migration (manager on demand): NULLABLE keeps every existing
+    // install on the pre-change behaviour is FALSE here on purpose — the change
+    // itself — but the column must stay NULLABLE so a stored `0` remains a
+    // *decision* that beats the env, and so the env tier can still speak.
+    let has_manager_enabled = sqlx::query(
+        "SELECT 1 FROM pragma_table_info('instance_config') WHERE name = 'manager_enabled'",
+    )
+    .fetch_optional(db)
+    .await?
+    .is_some();
+    if !has_manager_enabled {
+        sqlx::query("ALTER TABLE instance_config ADD COLUMN manager_enabled INTEGER")
+            .execute(db)
+            .await?;
+    }
+
+    // Additive migration (manager on demand): the agent-profile pin, NULLABLE so
+    // unset reads « Follow the Run ».
+    let has_manager_profile = sqlx::query(
+        "SELECT 1 FROM pragma_table_info('instance_config') WHERE name = 'manager_profile'",
+    )
+    .fetch_optional(db)
+    .await?
+    .is_some();
+    if !has_manager_profile {
+        sqlx::query("ALTER TABLE instance_config ADD COLUMN manager_profile TEXT")
+            .execute(db)
+            .await?;
+    }
+
     Ok(())
 }
 
@@ -455,6 +526,10 @@ fn row_to_config(row: &sqlx::sqlite::SqliteRow) -> InstanceConfig {
         skills: crate::skill_selection::from_stored_json(
             row.try_get::<Option<String>, _>("skills").unwrap_or(None),
         ),
+        // Manager on demand: `try_get` so a row read before the column migration
+        // still maps (same posture as `update_check` above).
+        manager_enabled: row.try_get("manager_enabled").unwrap_or(None),
+        manager_profile: row.try_get("manager_profile").unwrap_or(None),
         updated_at: row.get("updated_at"),
     }
 }
@@ -523,6 +598,12 @@ pub(crate) async fn update(
     }
     if edit.skills.is_some() {
         sets.push("skills = ?");
+    }
+    if edit.manager_enabled.is_some() {
+        sets.push("manager_enabled = ?");
+    }
+    if edit.manager_profile.is_some() {
+        sets.push("manager_profile = ?");
     }
     // Always bump the write timestamp on a real edit.
     sets.push("updated_at = ?");
@@ -598,6 +679,17 @@ pub(crate) async fn update(
             &crate::skill_selection::normalise(v),
         ));
     }
+    if let Some(v) = edit.manager_enabled {
+        // 0/1, never NULL: unticking must persist a stored `0` that beats a
+        // `PDO_MANAGER_ENABLED=1`, not fall through to it (manager on demand).
+        query = query.bind(if v { 1_i64 } else { 0_i64 });
+    }
+    if let Some(v) = edit.manager_profile {
+        // "" = clear sentinel → SQL NULL (back to « Follow the Run »), mirroring
+        // default_model/default_harness: a stored "" would win precedence and be
+        // read as a pin to nothing.
+        query = query.bind(if v.is_empty() { None } else { Some(v) });
+    }
     query = query.bind(crate::event_log::now_iso());
     query.execute(db).await?;
 
@@ -633,6 +725,38 @@ pub(crate) async fn set_triggers_paused(db: &SqlitePool, paused: bool) -> Result
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Env seam for the manager auto-start flag (manager on demand / ADR-0015).
+/// Read only inside [`resolve_manager_enabled`], the `stored → env → default`
+/// precedence — never elsewhere. Same truthy vocabulary as
+/// [`AUTO_FAIL_ENV`]: `1`/`true`/`yes`/`on` (case-insensitive) is truthy;
+/// anything else (incl. unset) is falsey.
+pub(crate) const MANAGER_ENABLED_ENV: &str = "PDO_MANAGER_ENABLED";
+
+/// Built-in default for the manager auto-start flag: **off** — a Run starts
+/// managerless and the user starts one from the Manager tab when they want it.
+pub(crate) const MANAGER_ENABLED_DEFAULT: bool = false;
+
+/// The manager auto-start flag, `stored → env → default(false)` (manager on
+/// demand). `stored` is the `manager_enabled` column value (`Some(0/1)`: a
+/// stored decision, `None` unset). Pure over its `stored` arg; reads the env
+/// only when `stored` is `None`, so a stored `0` beats a
+/// `PDO_MANAGER_ENABLED=1`.
+pub(crate) fn resolve_manager_enabled(stored: Option<i64>) -> bool {
+    match stored {
+        Some(v) => v != 0,
+        None => std::env::var(MANAGER_ENABLED_ENV)
+            .ok()
+            .map(|s| {
+                let t = s.trim();
+                t.eq_ignore_ascii_case("1")
+                    || t.eq_ignore_ascii_case("true")
+                    || t.eq_ignore_ascii_case("yes")
+                    || t.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(MANAGER_ENABLED_DEFAULT),
+    }
 }
 
 /// Env seam for the instance-wide `auto_fail` default (ADR-0049 / ADR-0015).
@@ -744,6 +868,8 @@ mod tests {
         assert_eq!(cfg.default_auto_name, None);
         assert_eq!(cfg.default_harness, None);
         assert!(cfg.default_harness_model.is_empty());
+        assert_eq!(cfg.manager_enabled, None);
+        assert_eq!(cfg.manager_profile, None);
         assert!(!cfg.updated_at.is_empty(), "seed must stamp updated_at");
     }
 
@@ -795,6 +921,80 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(get(&db).await.unwrap().default_harness_model, map);
+    }
+
+    /// Manager on demand: the auto-start flag is a set-only `0`/`1` knob — both
+    /// directions persist a stored decision. The resolver is pure over its
+    /// `stored` arg, so a stored `0` beats the env tier by construction (no env
+    /// manipulation here: parallel tests share the process environment).
+    #[tokio::test]
+    async fn update_sets_and_reads_back_manager_enabled_both_ways() {
+        let db = test_db().await;
+        let updated = update(
+            &db,
+            UpdateInstanceConfig {
+                manager_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.manager_enabled, Some(1));
+        assert!(resolve_manager_enabled(updated.manager_enabled));
+
+        let off = update(
+            &db,
+            UpdateInstanceConfig {
+                manager_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(off.manager_enabled, Some(0));
+        assert!(
+            !resolve_manager_enabled(off.manager_enabled),
+            "a stored 0 is a decision, not a fall-through"
+        );
+    }
+
+    /// Manager on demand: the profile pin round-trips, `""` clears back to SQL
+    /// NULL (« Follow the Run »), and unset resolves to the default (false) with
+    /// no env tier speaking.
+    #[tokio::test]
+    async fn update_sets_and_clears_manager_profile() {
+        let db = test_db().await;
+        let updated = update(
+            &db,
+            UpdateInstanceConfig {
+                manager_profile: Some("reviewer".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.manager_profile.as_deref(), Some("reviewer"));
+
+        let cleared = update(
+            &db,
+            UpdateInstanceConfig {
+                manager_profile: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cleared.manager_profile, None,
+            "empty string must clear the pin back to NULL"
+        );
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT manager_profile FROM instance_config WHERE id = 1")
+                .fetch_optional(&db)
+                .await
+                .unwrap()
+                .flatten();
+        assert_eq!(raw, None, "clear must persist NULL, never ''");
     }
 
     #[tokio::test]

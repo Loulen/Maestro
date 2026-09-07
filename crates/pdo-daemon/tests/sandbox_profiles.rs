@@ -1324,6 +1324,9 @@ async fn unchecking_settings_json_still_starts_thanks_to_the_staging_set() {
     let daemon = TestDaemon::spawn_with_docker_override(seed(), docker)
         .await
         .unwrap();
+    // Manager on demand: the Run's first claude session (hence the staged set)
+    // is the manager — opt back in, the new default starts every Run managerless.
+    daemon.enable_manager().await;
     fabricate_host_home(daemon.repo_root());
 
     assert_eq!(

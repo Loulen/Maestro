@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { RunState, PipelineDef } from "../types";
 
@@ -7,7 +7,7 @@ import type { RunState, PipelineDef } from "../types";
 // children (network-fetching diff, tmux terminal) so the test stays focused on the
 // #410 sandbox surface and never touches the network.
 vi.mock("./DiffSection", () => ({ default: () => null }));
-vi.mock("./TmuxTerminal", () => ({ default: () => null }));
+vi.mock("./TmuxTerminal", () => ({ default: vi.fn(() => null) }));
 
 // #302 / ADR-0048: the Assistant tab drives create-if-absent / reap-on-leave
 // against the daemon. Mock those two api helpers so the tests can assert the
@@ -18,12 +18,16 @@ const {
   fetchPipelineDocument,
   fetchRunPipelineDocument,
   fetchPipelineSkillsSidecar,
+  startRunManager,
+  stopRunManager,
 } = vi.hoisted(() => ({
   openLibraryAssistant: vi.fn(),
   closeLibraryAssistant: vi.fn(),
   fetchPipelineDocument: vi.fn(),
   fetchRunPipelineDocument: vi.fn(),
   fetchPipelineSkillsSidecar: vi.fn(),
+  startRunManager: vi.fn(),
+  stopRunManager: vi.fn(),
 }));
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -34,10 +38,13 @@ vi.mock("../api", async (importOriginal) => {
     fetchPipelineDocument,
     fetchRunPipelineDocument,
     fetchPipelineSkillsSidecar,
+    startRunManager,
+    stopRunManager,
   };
 });
 
 import PipelineInfoPanel from "./PipelineInfoPanel";
+import TmuxTerminal from "./TmuxTerminal";
 import type { TabId } from "./PipelineInfoPanel";
 
 function makeRun(overrides: Partial<RunState> = {}): RunState {
@@ -129,6 +136,148 @@ describe("PipelineInfoPanel — accessible names (#397)", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Close pipeline info" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Manager on demand: the Manager tab shows for EVERY live Run — an empty
+// state with a Start button when no session exists, the terminal when one
+// does — plus the transient starting state, the failure retry, and the
+// confirmed Stop.
+describe("PipelineInfoPanel — Manager tab (manager on demand)", () => {
+  beforeEach(() => {
+    startRunManager.mockReset();
+    stopRunManager.mockReset();
+    startRunManager.mockResolvedValue({ ok: true, session: "pdo-mgr-run-abc1234567", created: true });
+    stopRunManager.mockResolvedValue({ ok: true, stopped: true });
+  });
+
+  it("shows the empty state with a Start button for a managerless run (the new default)", () => {
+    renderPanel(makeRun());
+    const tab = screen.getByTestId("info-tab-manager");
+    expect(tab).toBeInTheDocument();
+    expect(screen.queryByTestId("manager-empty-state")).not.toBeInTheDocument();
+    fireEvent.click(tab);
+    expect(screen.getByTestId("manager-empty-state")).toBeInTheDocument();
+    expect(screen.getByTestId("manager-start")).toHaveTextContent("Start manager");
+    expect(screen.getByTestId("manager-enable-settings")).toBeInTheDocument();
+    expect(screen.queryByTestId("manager-live")).not.toBeInTheDocument();
+  });
+
+  it("shows the amber nudge dot only while the run waits on the user with no manager", () => {
+    const { rerender } = render(
+      <PipelineInfoPanel run={makeRun({ status: "awaiting_user" })} pipeline={null} onClose={() => {}} />,
+    );
+    expect(screen.getByTestId("manager-tab-dot")).toBeInTheDocument();
+
+    rerender(
+      <PipelineInfoPanel run={makeRun({ status: "running" })} pipeline={null} onClose={() => {}} />,
+    );
+    expect(screen.queryByTestId("manager-tab-dot")).not.toBeInTheDocument();
+  });
+
+  it("does not show the nudge dot once a manager is live", () => {
+    render(
+      <PipelineInfoPanel
+        run={makeRun({ status: "awaiting_user", has_manager: true })}
+        pipeline={null}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId("manager-tab-dot")).not.toBeInTheDocument();
+  });
+
+  it("mounts the terminal for a run whose manager exists, with a Stop control", () => {
+    vi.mocked(TmuxTerminal).mockImplementation(() => <div data-testid="terminal-stub" />);
+    renderPanel(makeRun({ has_manager: true }));
+    fireEvent.click(screen.getByTestId("info-tab-manager"));
+    expect(screen.getByTestId("manager-live")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-stub")).toBeInTheDocument();
+    expect(screen.getByTestId("manager-stop")).toBeInTheDocument();
+    expect(screen.queryByTestId("manager-empty-state")).not.toBeInTheDocument();
+  });
+
+  it("starts the manager from the empty state and refetches the run", async () => {
+    const onRefreshRun = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <PipelineInfoPanel run={makeRun()} pipeline={null} onClose={() => {}} onRefreshRun={onRefreshRun} />,
+    );
+    fireEvent.click(screen.getByTestId("info-tab-manager"));
+    await user.click(screen.getByTestId("manager-start"));
+
+    await waitFor(() => expect(startRunManager).toHaveBeenCalledWith("run-abc1234567"));
+    expect(onRefreshRun).toHaveBeenCalled();
+    // The transient state holds until the refreshed run state flips has_manager.
+    expect(screen.getByTestId("manager-starting")).toBeInTheDocument();
+  });
+
+  it("swaps to the live terminal once has_manager flips true", async () => {
+    vi.mocked(TmuxTerminal).mockImplementation(() => <div data-testid="terminal-stub" />);
+    const { rerender } = render(
+      <PipelineInfoPanel run={makeRun()} pipeline={null} onClose={() => {}} onRefreshRun={() => {}} />,
+    );
+    fireEvent.click(screen.getByTestId("info-tab-manager"));
+    fireEvent.click(screen.getByTestId("manager-start"));
+    await waitFor(() => expect(startRunManager).toHaveBeenCalled());
+    expect(screen.getByTestId("manager-starting")).toBeInTheDocument();
+
+    rerender(
+      <PipelineInfoPanel
+        run={makeRun({ has_manager: true })}
+        pipeline={null}
+        onClose={() => {}}
+        onRefreshRun={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("manager-live")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-stub")).toBeInTheDocument();
+  });
+
+  it("renders the failure with a Retry when the start refuses", async () => {
+    startRunManager.mockRejectedValue(new Error("tmux server dead"));
+    const user = userEvent.setup();
+    renderPanel(makeRun());
+    fireEvent.click(screen.getByTestId("info-tab-manager"));
+    await user.click(screen.getByTestId("manager-start"));
+
+    expect(await screen.findByTestId("manager-start-error")).toHaveTextContent(
+      /failed to start the manager/i,
+    );
+    expect(screen.getByTestId("manager-retry")).toBeInTheDocument();
+  });
+
+  it("stops the manager only through the confirmation, then refetches", async () => {
+    vi.mocked(TmuxTerminal).mockImplementation(() => <div data-testid="terminal-stub" />);
+    const onRefreshRun = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <PipelineInfoPanel
+        run={makeRun({ has_manager: true })}
+        pipeline={null}
+        onClose={() => {}}
+        onRefreshRun={onRefreshRun}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("info-tab-manager"));
+
+    // One click only asks — it must not kill anything yet.
+    await user.click(screen.getByTestId("manager-stop"));
+    expect(stopRunManager).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("manager-stop-confirm"));
+    await waitFor(() => expect(stopRunManager).toHaveBeenCalledWith("run-abc1234567"));
+    expect(onRefreshRun).toHaveBeenCalled();
+  });
+
+  it("opens Settings from the empty state's enable-for-every-run link", async () => {
+    const onOpenSettings = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <PipelineInfoPanel run={makeRun()} pipeline={null} onClose={() => {}} onOpenSettings={onOpenSettings} />,
+    );
+    fireEvent.click(screen.getByTestId("info-tab-manager"));
+    await user.click(screen.getByTestId("manager-enable-settings"));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
 });
 
