@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import {
   Bar,
@@ -15,8 +15,11 @@ import type {
   StatsCostAggregate,
   StatsCostEntity,
   StatsCostPeriod,
+  StatsEffortCostEntity,
   StatsHarnessCost,
+  StatsModelEffortPair,
   StatsOverview,
+  StatsProvenance,
   StatsDistribution,
   StatsPerformance,
   StatsPerformanceAggregate,
@@ -186,12 +189,15 @@ function MasterList<T extends { id: string; name: string }>({
   valueLabel,
   onSelect,
   ariaLabel = "Spenders",
+  monoName = false,
 }: {
   rows: T[];
   selected: string | null;
   valueLabel: (row: T) => string;
   onSelect: (id: string | null) => void;
   ariaLabel?: string;
+  /** Model ids are ids — render them mono (ADR-0065 §2). */
+  monoName?: boolean;
 }) {
   const options = [{ id: "__total__", name: "Total" } as T, ...rows];
   const selectedIndex = Math.max(
@@ -237,7 +243,7 @@ function MasterList<T extends { id: string; name: string }>({
             }`}
             style={{ fontSize: "11.5px" }}
           >
-            <span className="truncate">{row.name}</span>
+            <span className={`truncate ${monoName ? "font-mono" : ""}`}>{row.name}</span>
             <span className="shrink-0 font-mono text-fg-2">
               {row.id === "__total__" ? "" : valueLabel(row)}
             </span>
@@ -430,18 +436,131 @@ function CostCell({
   );
 }
 
+/** Where a requested value was read from — the « ? » tooltip copy (ADR-0065 §1).
+ *  Observed values are the norm and carry nothing; the vocabulary never says
+ *  "real". */
+const PROVENANCE_COPY: Record<Exclude<StatsProvenance, "observed">, string> = {
+  requested: "requested at node startup, not observed in transcripts",
+  mixed: "partly requested at node startup, not observed in every transcript",
+};
+
+/** Hovering the italic "not set" effort says why the bucket exists. */
+const NOT_SET_COPY = "no effort requested at node startup nor observed in transcripts";
+
+function ProvenanceMark({
+  provenance,
+  target,
+}: {
+  provenance: Exclude<StatsProvenance, "observed">;
+  target: "model" | "effort";
+}) {
+  const copy = PROVENANCE_COPY[provenance];
+  return (
+    <Tooltip content={copy} side="top">
+      <button
+        type="button"
+        aria-label={copy}
+        data-testid={`stats-provenance-${target}`}
+        className="ml-0.5 align-super text-fg-4 hover:text-fg-2"
+        style={{ fontSize: "8.5px" }}
+      >
+        ?
+      </button>
+    </Tooltip>
+  );
+}
+
+function Breadcrumb({
+  crumbs,
+}: {
+  crumbs: { label: string; onClick?: () => void }[];
+}) {
+  return (
+    <div
+      className="mb-3 text-fg-4"
+      style={{ fontSize: "10.5px" }}
+      data-testid="stats-cost-breadcrumb"
+    >
+      {crumbs.map((crumb, index) => (
+        <span key={`${crumb.label}-${index}`}>
+          {index > 0 ? " / " : ""}
+          {crumb.onClick ? (
+            <button
+              type="button"
+              aria-label={`Back to ${crumb.label}`}
+              onClick={crumb.onClick}
+              className="hover:text-fg-2 underline decoration-dotted underline-offset-2"
+            >
+              {crumb.label}
+            </button>
+          ) : (
+            <span className="text-fg-3">{crumb.label}</span>
+          )}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function pairMetric(pair: StatsModelEffortPair): StatsHarnessCost {
+  return {
+    harness: "total",
+    usd: pair.usd,
+    estimated: pair.estimated,
+    partial: pair.partial,
+    executions: pair.executions,
+    readable: pair.readable,
+    unknown: pair.unknown,
+    average_usd: pair.average_usd,
+    unpriced_models: pair.unpriced_models,
+    missing_reasons: pair.missing_reasons,
+  };
+}
+
+function effortNameCell(row: StatsEffortCostEntity): React.ReactNode {
+  if (row.effort === null) {
+    // The "not set" bucket: hovering the italic word explains it (ADR-0065 §1).
+    // A plain span — the row-name button around it stays the single interactive
+    // element, and the tooltip is a description, not a second control.
+    return (
+      <Tooltip content={NOT_SET_COPY} side="top">
+        <span className="italic text-fg-4">not set</span>
+      </Tooltip>
+    );
+  }
+  return (
+    <span className="inline-flex items-baseline gap-0.5">
+      {row.name}
+      {row.provenance && row.provenance !== "observed" && (
+        <ProvenanceMark provenance={row.provenance} target="effort" />
+      )}
+    </span>
+  );
+}
+
 function CostTable({
   rows,
   harnesses,
   unit,
   onOpen,
+  renderName,
+  expandablePairs = false,
 }: {
   rows: StatsCostEntity[];
   harnesses: string[];
   unit: "Run" | "execution";
   onOpen?: (row: StatsCostEntity) => void;
+  /** Replaces the default (button-or-plain) name cell — the model axis marks
+   *  provenance and renders "not set" in its own voice. */
+  renderName?: (row: StatsCostEntity) => React.ReactNode;
+  /** Node rows gain a chevron unfolding their model × effort pairs (ADR-0065).
+   *  Off on the model axis, where the model × effort path is already the drill. */
+  expandablePairs?: boolean;
 }) {
   const sorted = [...rows].sort((a, b) => (b.usd ?? -1) - (a.usd ?? -1));
+  // Expansion state lives HERE and dies with the table: the parent keys the
+  // table on the drill path, so a stale expanded set never leaks across Nodes.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   return (
     <TooltipProvider>
       <table className="w-full table-fixed text-left" style={{ fontSize: "11px" }}>
@@ -463,59 +582,143 @@ function CostTable({
           </tr>
         </thead>
         <tbody>
-          {sorted.map((row) => (
-            <tr
-              key={row.id}
-              className="border-t border-line text-fg-2"
-              tabIndex={0}
-              data-testid="stats-detail-row"
-            >
-              <td className="py-2 pr-2">
-                {onOpen ? (
-                  <button
-                    type="button"
-                    aria-label={`Open ${row.name}`}
-                    onClick={() => onOpen(row)}
-                    className="text-left hover:text-fg"
-                  >
-                    {row.name}
-                  </button>
-                ) : (
-                  row.name
-                )}
-              </td>
-              <td className="py-2 text-right">
-                <CostCell
-                  unit={unit}
-                  metric={{
-                    harness: "total",
-                    usd: row.usd,
-                    estimated: row.estimated,
-                    partial: row.partial,
-                    executions: row.executions,
-                    readable: row.readable,
-                    unknown: row.unknown,
-                    average_usd: row.average_usd,
-                    unpriced_models: row.unpriced_models,
-                    missing_reasons: row.missing_reasons,
-                  }}
-                />
-              </td>
-              {harnesses.map((harness) => (
-                <td key={harness} className="py-2 text-right">
-                  <CostCell
-                    unit={unit}
-                    metric={row.harnesses.find((item) => item.harness === harness)}
-                  />
-                </td>
-              ))}
-            </tr>
-          ))}
+          {sorted.map((row) => {
+            const pairs = expandablePairs ? (row.models ?? []) : [];
+            return (
+              <Fragment key={row.id}>
+                <tr
+                  className="border-t border-line text-fg-2"
+                  tabIndex={0}
+                  data-testid="stats-detail-row"
+                >
+                  <td className="py-2 pr-2">
+                    <span className="inline-flex items-center gap-1">
+                      {pairs.length > 0 ? (
+                        <button
+                          type="button"
+                          aria-label={`${expanded.has(row.id) ? "Collapse" : "Expand"} ${row.name} models`}
+                          data-testid="stats-node-toggle"
+                          onClick={() =>
+                            setExpanded((current) => {
+                              const next = new Set(current);
+                              if (next.has(row.id)) next.delete(row.id);
+                              else next.add(row.id);
+                              return next;
+                            })
+                          }
+                          className="shrink-0 hover:text-fg"
+                        >
+                          {expanded.has(row.id) ? (
+                            <ChevronDown size={12} />
+                          ) : (
+                            <ChevronRight size={12} />
+                          )}
+                        </button>
+                      ) : null}
+                      {(() => {
+                        const content = renderName ? renderName(row) : row.name;
+                        return onOpen ? (
+                          <button
+                            type="button"
+                            aria-label={`Open ${row.name}`}
+                            onClick={() => onOpen(row)}
+                            className="text-left hover:text-fg"
+                          >
+                            {content}
+                          </button>
+                        ) : (
+                          <span>{content}</span>
+                        );
+                      })()}
+                    </span>
+                  </td>
+                  <td className="py-2 text-right">
+                    <CostCell
+                      unit={unit}
+                      metric={{
+                        harness: "total",
+                        usd: row.usd,
+                        estimated: row.estimated,
+                        partial: row.partial,
+                        executions: row.executions,
+                        readable: row.readable,
+                        unknown: row.unknown,
+                        average_usd: row.average_usd,
+                        unpriced_models: row.unpriced_models,
+                        missing_reasons: row.missing_reasons,
+                      }}
+                    />
+                  </td>
+                  {harnesses.map((harness) => (
+                    <td key={harness} className="py-2 text-right">
+                      <CostCell
+                        unit={unit}
+                        metric={row.harnesses.find((item) => item.harness === harness)}
+                      />
+                    </td>
+                  ))}
+                </tr>
+                {expanded.has(row.id)
+                  ? pairs.map((pair) => (
+                      <tr
+                        key={`${row.id}-${pair.model}-${pair.effort ?? ""}`}
+                        className="border-t border-line bg-bg-3/40 text-fg-3"
+                        data-testid="stats-model-effort-row"
+                      >
+                        <td className="py-2 pl-7 pr-2">
+                          <span className="inline-flex items-baseline gap-0.5">
+                            <span className="font-mono">{pair.model}</span>
+                            {pair.model_provenance !== "observed" && (
+                              <ProvenanceMark
+                                provenance={pair.model_provenance}
+                                target="model"
+                              />
+                            )}
+                            <span className="text-fg-4">·</span>
+                            {pair.effort === null ? (
+                              <Tooltip content={NOT_SET_COPY} side="top">
+                                <span className="italic text-fg-4">not set</span>
+                              </Tooltip>
+                            ) : (
+                              <span className="inline-flex items-baseline gap-0.5">
+                                {pair.effort}
+                                {pair.effort_provenance &&
+                                  pair.effort_provenance !== "observed" && (
+                                    <ProvenanceMark
+                                      provenance={pair.effort_provenance}
+                                      target="effort"
+                                    />
+                                  )}
+                              </span>
+                            )}
+                          </span>
+                        </td>
+                        <td className="py-2 text-right">
+                          <CostCell unit={unit} metric={pairMetric(pair)} />
+                        </td>
+                        {harnesses.map((harness) => (
+                          <td key={harness} className="py-2 text-right">
+                            <CostCell
+                              unit={unit}
+                              metric={pair.harnesses.find(
+                                (item) => item.harness === harness,
+                              )}
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    ))
+                  : null}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </TooltipProvider>
   );
 }
+
+type CostAxis = "pipeline" | "project" | "model";
 
 function CostTab({
   cost,
@@ -524,9 +727,15 @@ function CostTab({
   cost: StatsCost | null;
   error: string | null;
 }) {
-  const [axis, setAxis] = useState<"pipeline" | "project">("pipeline");
+  const [axis, setAxis] = useState<CostAxis>("pipeline");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drilledPipelineId, setDrilledPipelineId] = useState<string | null>(null);
+  // The model axis drills Model → Effort → Pipeline → Node (ADR-0065). The
+  // effort id is "" for the "not set" bucket, so selection is `null` vs value,
+  // never falsy-compared.
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [selectedEffortId, setSelectedEffortId] = useState<string | null>(null);
+  const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
 
   if (error) {
     return (
@@ -537,35 +746,128 @@ function CostTab({
   }
   if (!cost) return <EmptyNote>Loading cost…</EmptyNote>;
 
-  const rows = axis === "pipeline" ? cost.by_pipeline : cost.by_project;
-  const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const toTotal = () => {
+    setSelectedId(null);
+    setDrilledPipelineId(null);
+    setSelectedModelId(null);
+    setSelectedEffortId(null);
+    setSelectedPipelineId(null);
+  };
+
+  // Model axis: resolve the drill path.
+  const model =
+    axis === "model"
+      ? (cost.by_model.find((row) => row.id === selectedModelId) ?? null)
+      : null;
+  const effort =
+    model && selectedEffortId !== null
+      ? (model.efforts.find((row) => row.id === selectedEffortId) ?? null)
+      : null;
+  const modelPipeline =
+    effort && selectedPipelineId !== null
+      ? (effort.pipelines.find((row) => row.id === selectedPipelineId) ?? null)
+      : null;
+
+  const rows: StatsCostEntity[] =
+    axis === "pipeline"
+      ? cost.by_pipeline
+      : axis === "project"
+        ? cost.by_project
+        : cost.by_model;
+  const selected =
+    axis === "model" ? null : (rows.find((row) => row.id === selectedId) ?? null);
   const drilledPipeline =
     axis === "project" && selected
-      ? (selected as StatsProjectCostEntity).pipelines.find(
+      ? ((selected as StatsProjectCostEntity).pipelines.find(
           (pipeline) => pipeline.id === drilledPipelineId,
-        ) ?? null
+        ) ?? null)
       : null;
-  const aggregate = drilledPipeline ?? selected ?? cost.total;
-  const periods = drilledPipeline
-    ? drilledPipeline.by_period
-    : selected
-      ? selected.by_period
-      : cost.by_period;
+
+  const aggregate =
+    axis === "model"
+      ? (modelPipeline ?? effort ?? model ?? cost.total)
+      : (drilledPipeline ?? selected ?? cost.total);
+  const periods =
+    axis === "model"
+      ? (modelPipeline ?? effort ?? model)?.by_period ?? cost.by_period
+      : drilledPipeline
+        ? drilledPipeline.by_period
+        : selected
+          ? selected.by_period
+          : cost.by_period;
+
+  // The denominator the headline names (ADR-0065 §3): a model bucket counts
+  // executions — the whole model axis reads "per execution" — and so does the
+  // Node level of the other axes.
+  const atNodeLevel =
+    axis === "model" ? true : axis === "pipeline" ? selected !== null : drilledPipeline !== null;
+  const detailUnit: "Run" | "execution" = atNodeLevel ? "execution" : "Run";
+
   let detailRows: StatsCostEntity[];
-  let detailUnit: "Run" | "execution" = "Run";
+  let detailRenderName: ((row: StatsCostEntity) => React.ReactNode) | undefined;
   let onOpen: ((row: StatsCostEntity) => void) | undefined;
-  if (drilledPipeline) {
+  if (axis === "model") {
+    if (modelPipeline) {
+      detailRows = modelPipeline.nodes;
+    } else if (effort) {
+      detailRows = effort.pipelines;
+      onOpen = (row) => setSelectedPipelineId(row.id);
+    } else if (model) {
+      detailRows = model.efforts;
+      detailRenderName = (row) => effortNameCell(row as StatsEffortCostEntity);
+      onOpen = (row) => setSelectedEffortId(row.id);
+    } else {
+      detailRows = cost.by_model;
+      detailRenderName = (row) => (
+        <span className="inline-flex items-baseline gap-0.5">
+          <span className="font-mono" title={row.name}>
+            {row.name}
+          </span>
+          {(() => {
+            const provenance = cost.by_model.find((m) => m.id === row.id)?.provenance;
+            return provenance && provenance !== "observed" ? (
+              <ProvenanceMark provenance={provenance} target="model" />
+            ) : null;
+          })()}
+        </span>
+      );
+      onOpen = (row) => setSelectedModelId(row.id);
+    }
+  } else if (drilledPipeline) {
     detailRows = drilledPipeline.nodes;
-    detailUnit = "execution";
   } else if (!selected) {
-    detailRows = axis === "project" ? cost.by_project : cost.by_pipeline;
+    detailRows = rows;
   } else if (axis === "project") {
     detailRows = (selected as StatsProjectCostEntity).pipelines;
     onOpen = (pipeline) => setDrilledPipelineId(pipeline.id);
   } else {
     detailRows = selected.nodes;
-    detailUnit = "execution";
   }
+
+  const crumbs: { label: string; onClick?: () => void }[] = [
+    { label: "Total", onClick: toTotal },
+  ];
+  if (axis === "model") {
+    if (model)
+      crumbs.push({
+        label: model.name,
+        onClick: () => {
+          setSelectedEffortId(null);
+          setSelectedPipelineId(null);
+        },
+      });
+    if (effort)
+      crumbs.push({ label: effort.name, onClick: () => setSelectedPipelineId(null) });
+    if (modelPipeline) crumbs.push({ label: modelPipeline.name });
+  } else {
+    if (selected) crumbs.push({ label: selected.name, onClick: () => setDrilledPipelineId(null) });
+    if (drilledPipeline) crumbs.push({ label: drilledPipeline.name });
+  }
+  // Every crumb but the last pops the levels it shadows (design: clickable
+  // breadcrumb for all three axes once there are four levels).
+  const clickableCrumbs = crumbs.map((crumb, index) =>
+    index === crumbs.length - 1 ? { label: crumb.label } : crumb,
+  );
 
   return (
     <div className="relative flex min-h-full" data-testid="stats-chart-cost">
@@ -581,51 +883,59 @@ function CostTab({
             aria-label="Cost grouping"
             value={axis}
             onChange={(event) => {
-              setAxis(event.target.value as "pipeline" | "project");
-              setSelectedId(null);
-              setDrilledPipelineId(null);
+              setAxis(event.target.value as CostAxis);
+              toTotal();
             }}
             className="rounded border border-line bg-bg-3 px-2 py-1 text-fg-2"
           >
             <option value="pipeline">By pipeline</option>
             <option value="project">By project</option>
+            <option value="model">By model</option>
           </select>
         </div>
         <MasterList
           rows={rows}
-          selected={selectedId}
+          selected={axis === "model" ? selectedModelId : selectedId}
+          monoName={axis === "model"}
           valueLabel={(row) => formatCostAmount(row.usd, row.partial, row.estimated)}
           onSelect={(id) => {
-            setSelectedId(id);
-            setDrilledPipelineId(null);
+            if (axis === "model") {
+              setSelectedModelId(id);
+              setSelectedEffortId(null);
+              setSelectedPipelineId(null);
+            } else {
+              setSelectedId(id);
+              setDrilledPipelineId(null);
+            }
           }}
         />
+        {axis === "model" && (
+          <div className="mt-3 text-fg-4" style={{ fontSize: "10.5px" }}>
+            Model ids verbatim, one row per id. Hover ? for where a value comes
+            from. Harnesses without a cost source do not appear.
+          </div>
+        )}
       </aside>
 
       <div
         className="min-w-0 flex-1 pl-5"
         data-testid="stats-drilldown-detail"
       >
-        <div
-          className="mb-3 text-fg-4"
-          style={{ fontSize: "10.5px" }}
-          data-testid="stats-cost-breadcrumb"
-        >
-          Total{selected ? ` / ${selected.name}` : ""}
-          {drilledPipeline ? ` / ${drilledPipeline.name}` : ""}
-        </div>
+        <Breadcrumb crumbs={clickableCrumbs} />
         <HarnessLegend harnesses={cost.harnesses} />
         <div className="mt-4 text-fg" data-testid="stats-selection-headline">
           {formatCostAmount(aggregate.usd, aggregate.partial, aggregate.estimated)} total
           {" · "}
-          {formatCostAmount(aggregate.average_usd, aggregate.partial, aggregate.estimated)} per Run
+          {formatCostAmount(aggregate.average_usd, aggregate.partial, aggregate.estimated)} per{" "}
+          {detailUnit}
         </div>
         <div className="mt-4">
           <HarnessCards aggregate={aggregate} />
         </div>
         {aggregate.unknown > 0 && (
           <div className="mt-4 text-st-await" style={{ fontSize: "10.5px" }}>
-            {aggregate.unknown} Run{aggregate.unknown === 1 ? "" : "s"} without computable cost
+            {aggregate.unknown} {detailUnit}
+            {aggregate.unknown === 1 ? "" : "s"} without computable cost
           </div>
         )}
         <div className="mt-4">
@@ -633,10 +943,13 @@ function CostTab({
         </div>
         <div className="mt-4 min-h-[240px]">
           <CostTable
+            key={`${axis}-${selectedId ?? ""}-${drilledPipelineId ?? ""}-${selectedModelId ?? ""}-${selectedEffortId ?? "total"}-${selectedPipelineId ?? ""}`}
             rows={detailRows}
             harnesses={cost.harnesses}
             unit={detailUnit}
             onOpen={onOpen}
+            renderName={detailRenderName}
+            expandablePairs={axis !== "model"}
           />
         </div>
       </div>

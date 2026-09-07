@@ -244,7 +244,7 @@ fn write_output(daemon: &TestDaemon, run_id: &str, node: &str, port: &str) {
         .join(".pdo")
         .join("artifacts")
         .join(node)
-        .join(format!("iter-1"))
+        .join("iter-1")
         .join(port);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("output.md"), "done\n").unwrap();

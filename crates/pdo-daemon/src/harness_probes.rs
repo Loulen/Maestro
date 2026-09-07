@@ -86,6 +86,24 @@ pub(crate) enum CostSource {
     ReportedByConstant,
 }
 
+/// The **observed execution identity** capability (ADR-0065): what of the
+/// model × effort pair a harness's **source** reports for a running execution.
+/// The startup event is never this — it is the *requested* fallback, and Stats
+/// always says which of the two it read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedIdentitySource {
+    /// The source names the model **per message** (claude's transcript); the
+    /// effort is never written by the source, so it stays requested.
+    ModelPerMessage,
+    /// The source names both the model and the effort (`pi` per message,
+    /// `copilot` per usage point). **Deferred**: no first-party harness returns
+    /// this yet — they declare `None` explicitly until their ticket (ADR-0051:
+    /// `None` is a declared absence, not a missing dispatch), so both values
+    /// fall back to the requested ones.
+    #[allow(dead_code)] // the variant IS the next harness ticket's dispatch target
+    ModelAndEffort,
+}
+
 impl CostSource {
     /// How this source reads in the published support table
     /// ([`crate::harness_support`]). The label lives on the variant so the table
@@ -423,6 +441,12 @@ pub(crate) trait HarnessProbes: Sync {
     fn cost_source(&self) -> Option<CostSource> {
         None
     }
+    /// What of the model × effort pair the harness's source reports, or `None`
+    /// (both values fall back to the requested ones — declared absence,
+    /// ADR-0065 §1).
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        None
+    }
     /// How PDO finds this harness's transcript, or `None`.
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         None
@@ -555,6 +579,12 @@ struct ClaudeProbes;
 impl HarnessProbes for ClaudeProbes {
     fn cost_source(&self) -> Option<CostSource> {
         Some(CostSource::DerivedFromTranscript)
+    }
+    /// The transcript names the model per assistant message — the observed
+    /// model ADR-0065 reads first. The effort is never written by the source,
+    /// so it stays requested (measured 2026-09-07, #733).
+    fn observed_identity_source(&self) -> Option<ObservedIdentitySource> {
+        Some(ObservedIdentitySource::ModelPerMessage)
     }
     fn transcript_resolution(&self) -> Option<TranscriptResolution> {
         Some(TranscriptResolution::ClaudeJsonl)
@@ -1074,6 +1104,14 @@ pub(crate) fn capabilities(harness: &str) -> Capabilities {
     }
 }
 
+/// The observed-execution-identity capability of `harness` (ADR-0065), or `None`
+/// when the source is mute — the fold then falls back to the requested model and
+/// effort and marks them `requested`. `pi`/`copilot` declare `None` explicitly
+/// until their ticket, even though their sources could answer.
+pub(crate) fn observed_identity_source(harness: &str) -> Option<ObservedIdentitySource> {
+    probes_for(harness).and_then(|probes| probes.observed_identity_source())
+}
+
 /// Whether PDO can derive a Run's cost for `harness`: it needs both a cost source
 /// and a way to find the transcript that source reads. A data-declared harness has
 /// neither, so its Run's cost is "—" with a reason rather than a silent `$0`.
@@ -1168,6 +1206,22 @@ mod tests {
             }
         );
         assert!(can_cost(CLAUDE));
+    }
+
+    #[test]
+    fn only_claude_declares_the_observed_identity_capability() {
+        // ADR-0065: the observed model/effort is a capability, read source-first.
+        // `claude` implements it here (model per message); `pi` and `copilot`
+        // return `None` EXPLICITLY until their ticket — a declared absence, not a
+        // missing dispatch (ADR-0051) — so both fall back to the requested values.
+        assert_eq!(
+            observed_identity_source(CLAUDE),
+            Some(ObservedIdentitySource::ModelPerMessage)
+        );
+        assert_eq!(observed_identity_source(COPILOT), None);
+        assert_eq!(observed_identity_source(PI), None);
+        assert_eq!(observed_identity_source(OPENCODE), None);
+        assert_eq!(observed_identity_source("never-seen"), None);
     }
 
     #[test]
@@ -1388,16 +1442,14 @@ mod tests {
 
     #[test]
     fn copilot_turn_end_dispatches_to_its_journal_parser_not_claudes() {
-        let copilot_tail =
-            "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"assistant.turn_end\",\"data\":{}}\n";
+        let copilot_tail = "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"assistant.turn_end\",\"data\":{}}\n";
         assert!(turn_ended(COPILOT, copilot_tail));
         assert!(
             !turn_ended(CLAUDE, copilot_tail),
             "not claude's JSONL shape"
         );
         // A trailing hard error is not a finished turn (harness exits 0 on it).
-        let errored =
-            "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"session.error\",\"data\":{\"message\":\"boom\"}}\n";
+        let errored = "{\"type\":\"assistant.turn_start\",\"data\":{}}\n{\"type\":\"session.error\",\"data\":{\"message\":\"boom\"}}\n";
         assert!(!turn_ended(COPILOT, errored));
     }
 
