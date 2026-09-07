@@ -1142,4 +1142,29 @@ describe("StatsCharts — Performance « By model » (#737, ADR-0065)", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
     expect(screen.getByText("No model observed in this period.")).toBeInTheDocument();
   });
+
+  it("keeps the « ? » mark out of the drill button — no nested interactive (FP finding)", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderModel();
+
+    // On the By-model root the requested model's « ? » mark sits INSIDE the
+    // row's « Open … » button: the mark must be a plain span, not a second
+    // button (interactive-inside-interactive is invalid DOM).
+    await user.selectOptions(screen.getByRole("combobox", { name: "Performance grouping" }), "model");
+    const open = screen.getByRole("button", { name: "Open sonnet" });
+    expect(within(open).getAllByTestId("stats-provenance-model")).toHaveLength(1);
+    expect(open.querySelectorAll("button")).toHaveLength(0);
+    expect(within(open).getByTestId("stats-provenance-model").getAttribute("aria-label")).toMatch(
+      /requested at node startup/,
+    );
+    unmount();
+
+    // The Cost axis's « By model » root had the same nesting — fixed at the
+    // source, in the mark itself.
+    render(<StatsCharts tab="cost" overview={null} cost={COST} costError={null} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Cost grouping" }), "model");
+    const costOpen = screen.getByRole("button", { name: "Open sonnet" });
+    expect(within(costOpen).getAllByTestId("stats-provenance-model")).toHaveLength(1);
+    expect(costOpen.querySelectorAll("button")).toHaveLength(0);
+  });
 });

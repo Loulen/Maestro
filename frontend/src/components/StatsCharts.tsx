@@ -467,17 +467,21 @@ function ProvenanceMark({
   target: "model" | "effort";
 }) {
   const copy = PROVENANCE_COPY[provenance];
+  // A plain span, not a button: the mark often lands inside the row-name drill
+  // button (« Open claude-… »), and interactive-inside-interactive is invalid
+  // DOM (FP #737 finding). The tooltip is a description, not a control — same
+  // voice as the « not set » bucket's italic word.
   return (
     <Tooltip content={copy} side="top">
-      <button
-        type="button"
+      <span
+        role="img"
         aria-label={copy}
         data-testid={`stats-provenance-${target}`}
-        className="ml-0.5 align-super text-fg-4 hover:text-fg-2"
+        className="ml-0.5 align-super text-fg-4"
         style={{ fontSize: "8.5px" }}
       >
         ?
-      </button>
+      </span>
     </Tooltip>
   );
 }
