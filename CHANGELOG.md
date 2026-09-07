@@ -10,6 +10,19 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.72.0
+
+**Sources pi et copilot — modèle et effort observés, fusion inter-harnais par id verbatim** (#736 ;
+story #733, spec #734, ADR-0065). La capacité de harnais (ADR-0051) étend la source d'identité
+observée au-delà de `claude` : `pi` porte modèle et fournisseur sur chaque message et lit le niveau
+de réflexion dans l'événement de changement de niveau ; `copilot` (vérifié en 1.0.83) journalise
+modèle choisi et effort de raisonnement à l'ouverture de session, puis modèle sur chaque point
+d'usage. L'effort observé prime sur l'effort demandé, provenance dite en infobulle (marque « ? »
+réservée au demandé/mixte) ; un même id de modèle lancé via deux harnais fait **une ligne** à deux
+colonnes harnais, totaux additionnés (ADR-0052) ; le fournisseur n'apparaît qu'en infobulle, jamais
+dans l'identité. Un alias épinglé et un id observé daté restent deux lignes. `opencode`, sans source
+de coût (#561), reste absent de l'axe « By model » et « — » sur les autres axes.
+
 ## 1.71.0
 
 **Stats › Cost « By model » pour claude** (#735 ; story #733, spec #734, ADR-0065). Le select

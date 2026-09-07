@@ -543,6 +543,19 @@ pub(crate) struct StatsHarnessCost {
     pub average_usd: Option<f64>,
     pub unpriced_models: Vec<String>,
     pub missing_reasons: Vec<String>,
+    /// Where THIS harness's model value in the row was read from (ADR-0065 §1)
+    /// — only meaningful on the « By model » rows and the Node leaves' pairs
+    /// (#736: the tooltip says, harness by harness, where the value came from);
+    /// omitted on the rows that carry no slices (totals, other axes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<StatsProvenance>,
+    /// Same, for the effort half of the row; absent on model-only rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_provenance: Option<StatsProvenance>,
+    /// The provider the harness's source named for this model (`pi` via
+    /// openrouter) — tooltip only, never part of the identity (ADR-0065 §2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -748,6 +761,9 @@ impl CostMetricAcc {
             average_usd: (self.readable > 0).then_some(self.readable_usd / self.readable as f64),
             unpriced_models: self.unpriced_models.iter().cloned().collect(),
             missing_reasons: self.missing_reasons.iter().cloned().collect(),
+            provenance: None,
+            effort_provenance: None,
+            provider: None,
         }
     }
 
@@ -777,7 +793,55 @@ impl CostMetricAcc {
 #[derive(Debug, Clone, Default)]
 struct CostAggregateAcc {
     total: CostMetricAcc,
-    harnesses: BTreeMap<String, CostMetricAcc>,
+    harnesses: BTreeMap<String, HarnessMetricAcc>,
+}
+
+/// One harness's slice of a row: its dollars plus the provenance counters and
+/// providers the wire's harness entry carries on the « By model » rows and the
+/// Node pairs (#736). Everything is read off the slices — the run-level adds
+/// (`add_run` / `add_contribution`) touch only the metric, so rows without
+/// slices wire no provenance at all.
+#[derive(Debug, Clone, Default)]
+struct HarnessMetricAcc {
+    metric: CostMetricAcc,
+    model_observed: i64,
+    model_requested: i64,
+    effort_observed: i64,
+    effort_requested: i64,
+    providers: BTreeSet<String>,
+}
+
+impl HarnessMetricAcc {
+    fn add_slice(&mut self, slice: &crate::run_cost::ModelEffortSlice) {
+        self.metric.add_slice(slice);
+        if slice.model_observed {
+            self.model_observed += 1;
+        } else {
+            self.model_requested += 1;
+        }
+        match slice.effort_observed {
+            Some(true) => self.effort_observed += 1,
+            Some(false) => self.effort_requested += 1,
+            None => {}
+        }
+        if let Some(provider) = &slice.provider {
+            self.providers.insert(provider.clone());
+        }
+    }
+
+    fn wire(self, harness: String) -> StatsHarnessCost {
+        let mut wired = self.metric.wire_harness(harness);
+        if self.model_observed + self.model_requested > 0 {
+            wired.provenance = Some(provenance(self.model_observed, self.model_requested));
+        }
+        if self.effort_observed + self.effort_requested > 0 {
+            wired.effort_provenance = Some(provenance(self.effort_observed, self.effort_requested));
+        }
+        if !self.providers.is_empty() {
+            wired.provider = Some(self.providers.into_iter().collect::<Vec<_>>().join(", "));
+        }
+        wired
+    }
 }
 
 impl CostAggregateAcc {
@@ -798,6 +862,7 @@ impl CostAggregateAcc {
             self.harnesses
                 .entry(harness)
                 .or_default()
+                .metric
                 .add_run(&matching);
         }
     }
@@ -807,6 +872,7 @@ impl CostAggregateAcc {
         self.harnesses
             .entry(contribution.harness.clone())
             .or_default()
+            .metric
             .add_contribution(contribution);
     }
 
@@ -823,7 +889,7 @@ impl CostAggregateAcc {
         aggregate.harnesses = self
             .harnesses
             .iter()
-            .map(|(harness, metric)| metric.wire_harness(harness.clone()))
+            .map(|(harness, metric)| metric.clone().wire(harness.clone()))
             .collect();
         aggregate
     }
@@ -847,7 +913,7 @@ struct CostEntityAcc {
 #[derive(Debug, Clone, Default)]
 struct ModelPairAcc {
     metric: CostMetricAcc,
-    harnesses: BTreeMap<String, CostMetricAcc>,
+    harnesses: BTreeMap<String, HarnessMetricAcc>,
     model_observed: i64,
     model_requested: i64,
     effort_observed: i64,
@@ -878,7 +944,7 @@ impl ModelPairAcc {
         aggregate.harnesses = self
             .harnesses
             .into_iter()
-            .map(|(harness, metric)| metric.wire_harness(harness))
+            .map(|(harness, acc)| acc.wire(harness))
             .collect();
         StatsModelEffortPair {
             aggregate,
@@ -1897,6 +1963,7 @@ mod tests {
             model_observed: observed,
             effort: effort.map(String::from),
             effort_observed: effort.map(|_| false),
+            provider: None,
             usd,
             estimated: usd.is_some(),
             partial: false,
@@ -2055,6 +2122,95 @@ mod tests {
             .unwrap();
         assert_eq!(other.models.len(), 1);
         assert_eq!(other.models[0].model_provenance, StatsProvenance::Requested);
+    }
+
+    #[test]
+    fn by_model_merges_one_id_across_harnesses_and_says_where_each_half_was_read() {
+        // The same id via `claude` (observed per message, effort requested) and
+        // via `pi` (observed per message, effort observed from the thinking
+        // level, provider openrouter) is ONE row with TWO harness columns
+        // (#736, ADR-0065 §2); the totals add up (ADR-0052).
+        let mut claude = claude_node_contribution(
+            "n",
+            Some(3.0),
+            vec![model_slice(
+                "claude-sonnet-5",
+                true,
+                Some("high"),
+                Some(3.0),
+            )],
+        );
+        claude.harness = "claude".to_string();
+        let mut pi_slice = model_slice("claude-sonnet-5", true, Some("low"), Some(0.5));
+        pi_slice.effort_observed = Some(true);
+        pi_slice.estimated = false;
+        pi_slice.provider = Some("openrouter".to_string());
+        let pi = crate::run_cost::CostContribution {
+            harness: "pi".to_string(),
+            ..claude.clone()
+        };
+        let pi = crate::run_cost::CostContribution {
+            model_slices: vec![pi_slice],
+            ..pi
+        };
+        let stats = fold_harness_cost(
+            &[node_run_row("2026-09-01", "n", "Worker", vec![claude, pi])],
+            Vec::new(),
+        );
+
+        assert_eq!(stats.by_model.len(), 1, "one id, one row across harnesses");
+        let row = &stats.by_model[0];
+        assert_eq!(row.entity.id, "claude-sonnet-5");
+        assert_eq!(row.entity.aggregate.usd, Some(3.5), "the totals add up");
+        assert_eq!(row.entity.aggregate.executions, 2);
+        let harnesses = &row.entity.aggregate.harnesses;
+        assert_eq!(
+            harnesses
+                .iter()
+                .map(|h| h.harness.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "pi"]
+        );
+        let claude_entry = &harnesses[0];
+        assert_eq!(claude_entry.usd, Some(3.0));
+        assert_eq!(claude_entry.provenance, Some(StatsProvenance::Observed));
+        assert_eq!(
+            claude_entry.effort_provenance,
+            Some(StatsProvenance::Requested),
+            "claude's source never writes the effort"
+        );
+        assert_eq!(claude_entry.provider, None);
+        let pi_entry = &harnesses[1];
+        assert_eq!(pi_entry.usd, Some(0.5));
+        assert_eq!(pi_entry.provenance, Some(StatsProvenance::Observed));
+        assert_eq!(
+            pi_entry.effort_provenance,
+            Some(StatsProvenance::Observed),
+            "the thinking level is observed"
+        );
+        assert_eq!(
+            pi_entry.provider.as_deref(),
+            Some("openrouter"),
+            "the provider rides the harness entry, tooltip only"
+        );
+        assert!(!pi_entry.estimated, "a reported slice is not an estimate");
+
+        // Two efforts under the one model row: low (observed) and high
+        // (requested), each carrying its per-harness provenance.
+        let efforts: Vec<&str> = row.efforts.iter().map(|e| e.entity.id.as_str()).collect();
+        assert_eq!(efforts, vec!["high", "low"], "ranked by cost");
+        let low = &row.efforts[1];
+        assert_eq!(low.provenance, Some(StatsProvenance::Observed));
+        assert_eq!(
+            low.entity
+                .aggregate
+                .harnesses
+                .iter()
+                .find(|h| h.harness == "pi")
+                .unwrap()
+                .effort_provenance,
+            Some(StatsProvenance::Observed)
+        );
     }
 
     #[test]

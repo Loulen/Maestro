@@ -70,7 +70,7 @@ const COST_HARNESSES: StatsHarnessCost[] = [
     unknown: 1,
     average_usd: null,
     unpriced_models: [],
-    missing_reasons: ["no cost source"],
+    missing_reasons: ["harness has no cost source"],
   },
 ];
 
@@ -122,7 +122,7 @@ const COST: StatsCost = {
         unknown: 1,
         average_usd: null,
         unpriced_models: [],
-        missing_reasons: ["no cost source"],
+        missing_reasons: ["harness has no cost source"],
       },
     ],
   },
@@ -332,6 +332,27 @@ COST.by_model = [
   },
 ];
 COST.by_pipeline[0].nodes[1].models = [MODEL_PAIR];
+
+// #736: the observed opus row was costed by TWO harnesses — claude off its
+// transcript, pi off its session (via openrouter) — each entry saying where
+// its half was read.
+COST.by_model[1].harnesses = [
+  { ...COST_HARNESSES[0], provenance: "observed" },
+  {
+    harness: "pi",
+    usd: 1.5,
+    estimated: false,
+    partial: false,
+    executions: 1,
+    readable: 1,
+    unknown: 0,
+    average_usd: 1.5,
+    unpriced_models: [],
+    missing_reasons: [],
+    provenance: "observed",
+    provider: "openrouter",
+  },
+];
 
 const OVERVIEW: StatsOverview = {
   buckets: ["2026-08-27"],
@@ -567,6 +588,32 @@ describe("StatsCharts — Cost « By model » (#735, ADR-0065)", () => {
     ).toHaveLength(0);
     // The axis hint, only on By model.
     expect(screen.getByText(/Model ids verbatim, one row per id/i)).toBeInTheDocument();
+  });
+
+  it("says where each harness read a model value on hover, provider included (#736)", async () => {
+    const user = userEvent.setup();
+    render(<StatsCharts tab="cost" overview={null} cost={COST} costError={null} />);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Cost grouping" }), "model");
+
+    // The cross-harness row: the model id itself is the tooltip trigger, one
+    // line per harness that costed it, the provider only in the tooltip.
+    const opusRow = screen.getAllByTestId("stats-detail-row")[1];
+    const name = within(opusRow).getByTestId("stats-model-name");
+    expect(name).toHaveTextContent("claude-opus-4-8");
+    await user.hover(name);
+    const tooltip = await screen.findByTestId("tooltip-content");
+    expect(tooltip).toHaveTextContent("claude: observed — each message in the transcript");
+    expect(tooltip).toHaveTextContent(
+      "pi: observed — each message in the session · via openrouter",
+    );
+    expect(within(opusRow).queryAllByTestId("stats-provenance-model")).toHaveLength(0);
+
+    // A harness without a cost source is not a column on this axis, and the
+    // axis hint names it.
+    expect(
+      screen.queryByRole("columnheader", { name: /opencode/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/has no cost source and is not on this axis/)).toBeInTheDocument();
   });
 
   it("drills model → effort → pipeline → node and pops back through the crumbs", async () => {

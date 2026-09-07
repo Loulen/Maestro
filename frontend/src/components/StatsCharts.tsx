@@ -470,6 +470,74 @@ function ProvenanceMark({
   );
 }
 
+// Per-harness source of a model/effort value (#736): the wire carries
+// `provenance` (+ `effort_provenance`) and `provider` on StatsHarnessCost.
+
+const OBSERVED_HOW: Record<"model" | "effort", Record<string, string>> = {
+  model: {
+    claude: "observed — each message in the transcript",
+    pi: "observed — each message in the session",
+    copilot: "observed — session open, then each usage point",
+  },
+  effort: {
+    pi: "observed — thinking-level change event",
+    copilot: "observed — reasoning effort at session open",
+  },
+};
+
+function sourceLines(harnesses: StatsHarnessCost[], target: "model" | "effort"): string[] {
+  return harnesses
+    .filter((h) => h.usd !== null || h.executions > 0)
+    .map((h) => {
+      const prov = target === "model" ? h.provenance : h.effort_provenance;
+      if (!prov) return null;
+      const how =
+        prov === "observed"
+          ? (OBSERVED_HOW[target][h.harness] ?? "observed — harness source")
+          : prov === "requested"
+            ? "requested — node startup event, the source is silent"
+            : "mixed — requested in some executions, observed in others";
+      const via = target === "model" && h.provider ? ` · via ${h.provider}` : "";
+      return `${h.harness}: ${how}${via}`;
+    })
+    .filter((line): line is string => line !== null);
+}
+
+/** The hoverable name of a model or effort: the value itself is the trigger, the
+ *  tooltip says, harness by harness, where it was read and (models) the provider.
+ *  The « ? » superscript stays as the at-a-glance mark for a requested/mixed value. */
+function ProvenanceName({
+  name,
+  mono,
+  provenance,
+  harnesses,
+  target,
+}: {
+  name: React.ReactNode;
+  mono?: boolean;
+  provenance: StatsProvenance | null | undefined;
+  harnesses: StatsHarnessCost[];
+  target: "model" | "effort";
+}) {
+  const lines = sourceLines(harnesses, target);
+  const content = lines.length ? lines.join("\n") : (provenance ?? "observed");
+  return (
+    <span className="inline-flex items-baseline gap-0.5">
+      <Tooltip content={content} side="top">
+        <span
+          className={`${mono ? "font-mono" : ""} cursor-help whitespace-pre-line underline decoration-dotted decoration-transparent underline-offset-2 hover:decoration-fg-4`}
+          data-testid={`stats-${target}-name`}
+        >
+          {name}
+        </span>
+      </Tooltip>
+      {provenance && provenance !== "observed" && (
+        <ProvenanceMark provenance={provenance} target={target} />
+      )}
+    </span>
+  );
+}
+
 function Breadcrumb({
   crumbs,
 }: {
@@ -529,12 +597,12 @@ function effortNameCell(row: StatsEffortCostEntity): React.ReactNode {
     );
   }
   return (
-    <span className="inline-flex items-baseline gap-0.5">
-      {row.name}
-      {row.provenance && row.provenance !== "observed" && (
-        <ProvenanceMark provenance={row.provenance} target="effort" />
-      )}
-    </span>
+    <ProvenanceName
+      name={row.name}
+      provenance={row.provenance}
+      harnesses={row.harnesses}
+      target="effort"
+    />
   );
 }
 
@@ -666,30 +734,26 @@ function CostTable({
                         data-testid="stats-model-effort-row"
                       >
                         <td className="py-2 pl-7 pr-2">
-                          <span className="inline-flex items-baseline gap-0.5">
-                            <span className="font-mono">{pair.model}</span>
-                            {pair.model_provenance !== "observed" && (
-                              <ProvenanceMark
-                                provenance={pair.model_provenance}
-                                target="model"
-                              />
-                            )}
+                          <span className="inline-flex items-baseline gap-1">
+                            <ProvenanceName
+                              name={pair.model}
+                              mono
+                              provenance={pair.model_provenance}
+                              harnesses={pair.harnesses}
+                              target="model"
+                            />
                             <span className="text-fg-4">·</span>
                             {pair.effort === null ? (
                               <Tooltip content={NOT_SET_COPY} side="top">
                                 <span className="italic text-fg-4">not set</span>
                               </Tooltip>
                             ) : (
-                              <span className="inline-flex items-baseline gap-0.5">
-                                {pair.effort}
-                                {pair.effort_provenance &&
-                                  pair.effort_provenance !== "observed" && (
-                                    <ProvenanceMark
-                                      provenance={pair.effort_provenance}
-                                      target="effort"
-                                    />
-                                  )}
-                              </span>
+                              <ProvenanceName
+                                name={pair.effort}
+                                provenance={pair.effort_provenance}
+                                harnesses={pair.harnesses}
+                                target="effort"
+                              />
                             )}
                           </span>
                         </td>
@@ -819,17 +883,13 @@ function CostTab({
     } else {
       detailRows = cost.by_model;
       detailRenderName = (row) => (
-        <span className="inline-flex items-baseline gap-0.5">
-          <span className="font-mono" title={row.name}>
-            {row.name}
-          </span>
-          {(() => {
-            const provenance = cost.by_model.find((m) => m.id === row.id)?.provenance;
-            return provenance && provenance !== "observed" ? (
-              <ProvenanceMark provenance={provenance} target="model" />
-            ) : null;
-          })()}
-        </span>
+        <ProvenanceName
+          name={row.name}
+          mono
+          provenance={cost.by_model.find((m) => m.id === row.id)?.provenance}
+          harnesses={row.harnesses}
+          target="model"
+        />
       );
       onOpen = (row) => setSelectedModelId(row.id);
     }
@@ -843,6 +903,18 @@ function CostTab({
   } else {
     detailRows = selected.nodes;
   }
+
+  // #736: a harness without a cost source (opencode) has no model row,
+  // so the model axis drops its column; the other axes keep it and show « — ».
+  // The daemon's reason string is "harness has no cost source" — match on the
+  // stable substring, not the full wire value.
+  const noCostSource = cost.harnesses.filter((h) =>
+    cost.total.harnesses
+      .find((m) => m.harness === h)
+      ?.missing_reasons.some((r) => r.includes("no cost source")),
+  );
+  const tableHarnesses =
+    axis === "model" ? cost.harnesses.filter((h) => !noCostSource.includes(h)) : cost.harnesses;
 
   const crumbs: { label: string; onClick?: () => void }[] = [
     { label: "Total", onClick: toTotal },
@@ -911,8 +983,16 @@ function CostTab({
         />
         {axis === "model" && (
           <div className="mt-3 text-fg-4" style={{ fontSize: "10.5px" }}>
-            Model ids verbatim, one row per id. Hover ? for where a value comes
-            from. Harnesses without a cost source do not appear.
+            Model ids verbatim, one row per id — the same id run through two
+            harnesses is one row, one column per harness. Hover a model or an
+            effort for where the value was read and its provider.
+            {noCostSource.length > 0 && (
+              <>
+                {" "}
+                <span className="font-mono">{noCostSource.join(", ")}</span> has no cost
+                source and is not on this axis.
+              </>
+            )}
           </div>
         )}
       </aside>
@@ -945,7 +1025,7 @@ function CostTab({
           <CostTable
             key={`${axis}-${selectedId ?? ""}-${drilledPipelineId ?? ""}-${selectedModelId ?? ""}-${selectedEffortId ?? "total"}-${selectedPipelineId ?? ""}`}
             rows={detailRows}
-            harnesses={cost.harnesses}
+            harnesses={tableHarnesses}
             unit={detailUnit}
             onOpen={onOpen}
             renderName={detailRenderName}

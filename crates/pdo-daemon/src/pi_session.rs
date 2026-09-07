@@ -231,6 +231,118 @@ pub(crate) enum ReportedCost {
     Usd(f64),
 }
 
+/// One observed model × effort group of a session (#736, ADR-0065 §1): the
+/// verbatim model id the assistant messages carry, the provider they name (the
+/// tooltip's « via openrouter » — never part of the identity), and the thinking
+/// level in effect when they were written (observed from the
+/// `thinking_level_change` events). The raw material of the « By model » axis
+/// for `pi`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ObservedUsage {
+    pub model: String,
+    pub provider: Option<String>,
+    pub effort: Option<String>,
+    /// The group's `usage.cost.total` sum, already in dollars (constant 1.0,
+    /// ADR-0052 §2 amended).
+    pub usd: f64,
+}
+
+/// The observed model × effort ventilation of one pi session (#736): the
+/// deduplicated, token-bearing assistant messages grouped by the verbatim
+/// `message.model` × the `thinking_level_change` level in effect, in
+/// first-appearance order. Pure and tolerant, like every reader here: a torn
+/// line is skipped; a message with zero tokens (an errored call that never
+/// reached the model) is ignored; a message without a model is skipped (nothing
+/// was observed).
+pub(crate) fn observed_usage(text: &str) -> Vec<ObservedUsage> {
+    let mut effort: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut groups: Vec<ObservedUsage> = Vec::new();
+    let mut index: std::collections::HashMap<(String, Option<String>), usize> =
+        std::collections::HashMap::new();
+    for raw in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(raw.trim()) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            // The level in effect from here on; only a written level moves it.
+            Some("thinking_level_change") => {
+                if let Some(level) = v
+                    .get("thinkingLevel")
+                    .and_then(|t| t.as_str())
+                    .filter(|t| !t.is_empty())
+                {
+                    effort = Some(level.to_string());
+                }
+            }
+            Some("message") => {
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
+                if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                    continue;
+                }
+                let Some(model) = msg
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .filter(|m| !m.is_empty())
+                else {
+                    continue;
+                };
+                let Some(usage) = msg.get("usage") else {
+                    continue;
+                };
+                let field = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                let total_tokens = usage
+                    .get("totalTokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or_else(|| {
+                        field("input") + field("output") + field("cacheRead") + field("cacheWrite")
+                    });
+                if total_tokens == 0 {
+                    continue;
+                }
+                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                    if !seen.insert(id.to_string()) {
+                        continue; // replayed entry: dedup, same discipline as the cost
+                    }
+                }
+                let provider = msg
+                    .get("provider")
+                    .and_then(|p| p.as_str())
+                    .filter(|p| !p.is_empty())
+                    .map(String::from);
+                let usd = usage
+                    .get("cost")
+                    .and_then(|c| c.get("total"))
+                    .and_then(|t| t.as_f64())
+                    .unwrap_or(0.0);
+                let key = (model.to_string(), effort.clone());
+                let entry = match index.get(&key) {
+                    Some(&i) => &mut groups[i],
+                    None => {
+                        groups.push(ObservedUsage {
+                            model: model.to_string(),
+                            provider: None,
+                            effort: effort.clone(),
+                            usd: 0.0,
+                        });
+                        let i = groups.len() - 1;
+                        index.insert(key, i);
+                        &mut groups[i]
+                    }
+                };
+                entry.usd += usd;
+                if entry.provider.is_none() {
+                    entry.provider = provider;
+                }
+            }
+            _ => {}
+        }
+    }
+    groups
+}
+
 /// The reason a token-bearing message without a cost makes the total unavailable.
 /// Named here so `run_cost` and the tests agree on the wording a user reads.
 pub(crate) const CATALOGUE_ABSENT_REASON: &str =
@@ -418,6 +530,52 @@ mod tests {
 
     /// The five assistant messages of the fixture, `usage.cost.total` summed by hand.
     const FIXTURE_USD: f64 = 0.004496 + 0.003191 + 0.003654 + 0.005052 + 0.004289;
+
+    /// One more test case (#736): the observed model × effort ventilation of the
+    /// fixture — every message carries the model verbatim and the provider, the
+    /// thinking level comes from the `thinking_level_change` event before them.
+    #[test]
+    fn observed_usage_names_the_model_provider_and_thinking_level_per_message() {
+        let usage = observed_usage(TURN_ENDED);
+        assert_eq!(usage.len(), 1, "one session, one model, one level");
+        assert_eq!(usage[0].model, "~anthropic/claude-haiku-latest");
+        assert_eq!(usage[0].provider.as_deref(), Some("openrouter"));
+        assert_eq!(usage[0].effort.as_deref(), Some("low"));
+        assert!(
+            (usage[0].usd - FIXTURE_USD).abs() < 1e-9,
+            "{:?}",
+            usage[0].usd
+        );
+    }
+
+    #[test]
+    fn observed_usage_follows_a_mid_session_thinking_level_change() {
+        // A second level change, then a fresh message: the messages after the
+        // change land in their own observed group (the axis unfolds per effort).
+        let change = r#"{"type":"thinking_level_change","id":"zz","thinkingLevel":"high"}"#;
+        let fresh = TURN_ENDED
+            .lines()
+            .find(|l| l.contains("\"role\":\"assistant\""))
+            .unwrap()
+            .replace("\"id\":\"c0eb4fa9\"", "\"id\":\"zz00zz00\"");
+        let usage = observed_usage(&format!("{TURN_ENDED}\n{change}\n{fresh}\n"));
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].effort.as_deref(), Some("low"));
+        assert_eq!(usage[1].effort.as_deref(), Some("high"));
+        assert_eq!(usage[1].model, "~anthropic/claude-haiku-latest");
+        assert!((usage[0].usd - FIXTURE_USD).abs() < 1e-9);
+        // The fresh entry id is its own message — counted once, in the high group.
+        assert!((usage[1].usd - 0.004496).abs() < 1e-9, "{:?}", usage[1].usd);
+    }
+
+    #[test]
+    fn observed_usage_skips_zero_token_errored_and_model_less_messages() {
+        // The hard-error fixture's trailing message has zero tokens and the
+        // awaiting fixture's last record is not an assistant message.
+        assert!(observed_usage(HARD_ERROR.lines().last().unwrap()).is_empty());
+        assert!(observed_usage("{not json\n").is_empty());
+        assert!(observed_usage("").is_empty());
+    }
 
     #[test]
     fn reported_cost_sums_every_assistant_messages_cost_total_in_dollars() {

@@ -1534,6 +1534,14 @@ export interface StatsHarnessCost {
   average_usd: number | null;
   unpriced_models: string[];
   missing_reasons: string[];
+  /** Where THIS harness's model value in the row was read from (ADR-0065 §1) —
+   *  « By model » rows and Node pairs only (#736); absent elsewhere. */
+  provenance?: StatsProvenance;
+  /** Same, for the effort half of the row; absent on model-only rows. */
+  effort_provenance?: StatsProvenance;
+  /** The provider the source named for this model (pi via openrouter) —
+   *  tooltip only, never part of the identity (ADR-0065 §2). */
+  provider?: string | null;
 }
 
 /** Cost shared by Total, periods, Projects, Pipelines and Nodes. */
