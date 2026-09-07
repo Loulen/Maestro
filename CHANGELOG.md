@@ -10,6 +10,22 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.71.0
+
+**Stats › Cost « By model » pour claude** (#735 ; story #733, spec #734, ADR-0065). Le select
+« Cost grouping » gagne l'option « By model » : drill master/detail Modèle → effort → Pipeline →
+Node réutilisant l'existant, ids de modèle verbatim (un alias épinglé et l'id observé restent deux
+lignes, jamais de repli sur une famille). Côté backend, la capacité de harnais (ADR-0051)
+s'enrichit d'une source d'identité observée : `claude` lit le modèle par message des transcripts
+(coût ventilé par message, une session à deux modèles coûtant et comptant dans chaque bucket),
+tandis que `pi`/`copilot`/`opencode` retombent sur le modèle demandé au `node_started` ; le fold
+de coût porte des slices model × effort (effort « not set » italique quand ni demandé ni observé)
+et la memo reste intacte (ADR-0029). Le wire `/stats/cost` s'enrichit additivement : `by_model`,
+couples modèle × effort en feuilles de Node sur les axes By pipeline/By project, provenance
+`observed | requested | mixed` par bucket (marque « ? », les mots vivant dans les infobulles —
+jamais le mot « real »), couvertures par bucket et `by_period` à chaque niveau. Titre
+« per execution » sur l'axe modèle et au niveau Node, « per Run » ailleurs.
+
 ## 1.70.0
 
 **Toggle « Orchestrator » + onglet Orchestration + pastilles** (#723 ; story #709, spec #719,
