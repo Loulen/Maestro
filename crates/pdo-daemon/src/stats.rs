@@ -606,8 +606,8 @@ pub(crate) enum StatsProvenance {
 }
 
 /// Observed and requested counts decide the label; both present in one bucket is
-/// the honest « mixed ».
-fn provenance(observed: i64, requested: i64) -> StatsProvenance {
+/// the honest « mixed ». Shared with the Performance « By model » axis (#737).
+pub(crate) fn provenance(observed: i64, requested: i64) -> StatsProvenance {
     match (observed > 0, requested > 0) {
         (true, false) => StatsProvenance::Observed,
         (false, true) => StatsProvenance::Requested,

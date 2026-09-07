@@ -10,6 +10,22 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.73.0
+
+**Stats › Performance « By model » — pic de contexte et durée par modèle** (#737 ; story #733, spec
+#734, ADR-0065). Le deuxième select de groupement (« By pipeline » / « By model ») est indépendant
+du tri (« By context » / « By duration »). En « By model », l'arbre Modèle → effort → Pipeline →
+Node porte le pic de contexte médian et la durée médiane avec les mêmes boîtes à six statistiques,
+`measured` / `expected` / `missing_reasons` inchangés : le pic de chaque fichier de session est
+attribué au **modèle de ce fichier** (un sous-agent a le sien), même découpage que Cost — source
+d'abord (ADR-0065 §1 : `claude` par message, `pi` modèle + fournisseur + niveau de réflexion,
+`copilot` modèle + effort aux points d'usage), repli sur le demandé marqué « ? » sinon, rien
+inventé quand ni l'une ni l'autre ne parle. En « By pipeline », le drill d'un Node se termine par
+ses couples modèle × effort (pics et durées distincts côte à côte) ; la ligne Infrastructure reste
+conservée sur cet axe et hors de l'axe modèle. Provenance en infobulle comme dans Cost. Wire
+additif (`by_model`, `models` sur les feuilles Node) ; memo de Performance invalidé par les mêmes
+empreintes (événements, mtimes) — rien de matérialisé.
+
 ## 1.72.0
 
 **Sources pi et copilot — modèle et effort observés, fusion inter-harnais par id verbatim** (#736 ;

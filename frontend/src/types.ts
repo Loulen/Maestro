@@ -1663,6 +1663,39 @@ export interface StatsPerformanceEntity extends StatsPerformanceAggregate {
   name: string;
   nodes: StatsPerformanceEntity[];
   subagents: StatsPerformanceEntity[];
+  /** The Node's observations split into model × effort couples (ADR-0065) —
+   *  Node leaves only, in « By pipeline »; the server omits it (never sends an
+   *  empty array) on other levels, and the « By model » path is already the
+   *  drill (#737). */
+  models?: PerformanceModelEffortPair[];
+}
+
+/** One model × effort couple of a Performance Node leaf (ADR-0065): the same
+ *  aggregate shape plus the pair identity and where each half was read from.
+ *  `effort = null` is the "not set" bucket — never merged with a real effort.
+ *  The peak of each session file is attributed to the model of that file, a
+ *  subagent having its own (#737). */
+export interface PerformanceModelEffortPair extends StatsPerformanceAggregate {
+  model: string;
+  model_provenance: StatsProvenance;
+  effort: string | null;
+  effort_provenance: StatsProvenance | null;
+}
+
+/** One effort level under a model in Performance « By model »: `id` is the
+ *  effort string ("" for not set) and `name` the effort or "not set". */
+export interface PerformanceEffortEntity extends StatsPerformanceEntity {
+  effort: string | null;
+  provenance?: StatsProvenance | null;
+  pipelines: StatsPerformanceEntity[];
+}
+
+/** One model (verbatim id) of Performance « By model », with its effort tree:
+ *  Model → Effort → Pipeline → Node (#737). The same id run through two
+ *  harnesses is one row, the harness staying a column. */
+export interface StatsModelPerformanceEntity extends StatsPerformanceEntity {
+  provenance: StatsProvenance;
+  efforts: PerformanceEffortEntity[];
 }
 
 /** Derived `GET /stats/performance` payload. */
@@ -1672,6 +1705,9 @@ export interface StatsPerformance {
   infrastructure_total: StatsPerformanceAggregate;
   by_pipeline: StatsPerformanceEntity[];
   infrastructure: StatsPerformanceEntity[];
+  /** The « By model » axis (ADR-0065): the same observations bucketed by the
+   *  model of the session file each came from (#737). */
+  by_model: StatsModelPerformanceEntity[];
 }
 
 // ---------------------------------------------------------------------------

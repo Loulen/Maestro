@@ -11,12 +11,14 @@ import {
   YAxis,
 } from "recharts";
 import type {
+  PerformanceEffortEntity,
   StatsCost,
   StatsCostAggregate,
   StatsCostEntity,
   StatsCostPeriod,
   StatsEffortCostEntity,
   StatsHarnessCost,
+  StatsHarnessPerformance,
   StatsModelEffortPair,
   StatsOverview,
   StatsProvenance,
@@ -447,6 +449,16 @@ const PROVENANCE_COPY: Record<Exclude<StatsProvenance, "observed">, string> = {
 /** Hovering the italic "not set" effort says why the bucket exists. */
 const NOT_SET_COPY = "no effort requested at node startup nor observed in transcripts";
 
+/** The Performance « By model » tooltip (#737): the wire carries the provenance
+ *  but not the per-harness source lines Cost shows, so the copy is the axis's
+ *  own honest summary (ADR-0065 §1). */
+function performanceProvenanceCopy(provenance: StatsProvenance | null | undefined): string {
+  if (!provenance || provenance === "observed") {
+    return "observed — the harness's source named the value";
+  }
+  return PROVENANCE_COPY[provenance];
+}
+
 function ProvenanceMark({
   provenance,
   target,
@@ -512,18 +524,22 @@ function ProvenanceName({
   provenance,
   harnesses,
   target,
+  content,
 }: {
   name: React.ReactNode;
   mono?: boolean;
   provenance: StatsProvenance | null | undefined;
   harnesses: StatsHarnessCost[];
   target: "model" | "effort";
+  /** Overrides the hover copy — the Performance axis carries provenance but no
+   *  per-harness source lines (#737). */
+  content?: string;
 }) {
   const lines = sourceLines(harnesses, target);
-  const content = lines.length ? lines.join("\n") : (provenance ?? "observed");
+  const tooltip = content ?? (lines.length ? lines.join("\n") : (provenance ?? "observed"));
   return (
     <span className="inline-flex items-baseline gap-0.5">
-      <Tooltip content={content} side="top">
+      <Tooltip content={tooltip} side="top">
         <span
           className={`${mono ? "font-mono" : ""} cursor-help whitespace-pre-line underline decoration-dotted decoration-transparent underline-offset-2 hover:decoration-fg-4`}
           data-testid={`stats-${target}-name`}
@@ -540,14 +556,18 @@ function ProvenanceName({
 
 function Breadcrumb({
   crumbs,
+  testid = "stats-cost-breadcrumb",
 }: {
   crumbs: { label: string; onClick?: () => void }[];
+  /** The Performance « By model » axis reuses the same breadcrumb under its own
+   *  test id (#737). */
+  testid?: string;
 }) {
   return (
     <div
       className="mb-3 text-fg-4"
       style={{ fontSize: "10.5px" }}
-      data-testid="stats-cost-breadcrumb"
+      data-testid={testid}
     >
       {crumbs.map((crumb, index) => (
         <span key={`${crumb.label}-${index}`}>
@@ -1195,16 +1215,49 @@ function PerformanceCards({ aggregate }: { aggregate: StatsPerformanceAggregate 
   );
 }
 
+function performanceEffortName(row: PerformanceEffortEntity): React.ReactNode {
+  if (row.effort === null) {
+    // The "not set" bucket: hovering the italic word explains it (ADR-0065 §1).
+    return (
+      <Tooltip content={NOT_SET_COPY} side="top">
+        <span className="italic text-fg-4">not set</span>
+      </Tooltip>
+    );
+  }
+  return (
+    <ProvenanceName
+      name={row.name}
+      provenance={row.provenance}
+      harnesses={[]}
+      target="effort"
+      content={performanceProvenanceCopy(row.provenance)}
+    />
+  );
+}
+
 function PerformanceTable({
   rows,
   harnesses,
   sort,
+  renderName,
+  onOpen,
+  expandablePairs = false,
 }: {
   rows: StatsPerformanceEntity[];
   harnesses: string[];
   sort: PerformanceMetric;
+  /** Replaces the default (button-or-plain) name cell — the model axis marks
+   *  provenance and renders "not set" in its own voice (#737). */
+  renderName?: (row: StatsPerformanceEntity) => React.ReactNode;
+  onOpen?: (row: StatsPerformanceEntity) => void;
+  /** Node rows gain a chevron unfolding their model × effort couples (ADR-0065).
+   *  Off on the model axis, where the model × effort path is already the drill. */
+  expandablePairs?: boolean;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // The couples' own expansion, dying with the table like `expanded` — the
+  // parent keys the table on the drill path, so a stale set never leaks.
+  const [couplesExpanded, setCouplesExpanded] = useState<Set<string>>(new Set());
   const ordered = sortPerformance(rows, sort);
   const visible = ordered.flatMap((row) => [
     { row, child: false },
@@ -1212,6 +1265,8 @@ function PerformanceTable({
       ? sortPerformance(row.subagents, sort).map((child) => ({ row: child, child: true }))
       : []),
   ]);
+  // The shared scale is drawn from the rows and their subagents — a couple's
+  // peaks/durations come from those same session files, so they fit it.
   const scaleRows = rows.flatMap((row) => [row, ...row.subagents]);
   const scaleMax = (metric: PerformanceMetric) =>
     Math.max(
@@ -1222,6 +1277,39 @@ function PerformanceTable({
     );
   const contextMax = scaleMax("context");
   const durationMax = scaleMax("duration");
+
+  const metricCell = (
+    name: string,
+    rowHarnesses: StatsHarnessPerformance[] | undefined,
+    metric: PerformanceMetric,
+  ) => (
+    <td key={metric} className="py-2 pr-3 align-top">
+      <div className="grid gap-1.5">
+        {harnesses.map((harness) => (
+          <div key={harness} className="flex items-start gap-2">
+            <span
+              className="mt-1 h-[7px] w-[7px] shrink-0 rounded-full"
+              style={{ backgroundColor: harnessColor(harness) }}
+            />
+            <DistributionPlot
+              name={name}
+              harness={harness}
+              metric={metric}
+              value={
+                rowHarnesses?.find((item) => item.harness === harness)?.[metric] ?? {
+                  stats: null,
+                  measured: 0,
+                  expected: 0,
+                  missing_reasons: [`never ran on ${harness}`],
+                }
+              }
+              scaleMax={metric === "context" ? contextMax : durationMax}
+            />
+          </div>
+        ))}
+      </div>
+    </td>
+  );
 
   return (
     <TooltipProvider>
@@ -1234,65 +1322,130 @@ function PerformanceTable({
           </tr>
         </thead>
         <tbody>
-          {visible.map(({ row, child }) => (
-            <tr key={`${child ? "subagent" : "entity"}-${row.id}`} className="border-t border-line">
-              <td className={`py-2 pr-2 text-fg-2 ${child ? "pl-7" : ""}`}>
-                {!child && row.subagents.length > 0 ? (
-                  <button
-                    type="button"
-                    aria-label={`${expanded.has(row.id) ? "Collapse" : "Expand"} ${row.name} subagents`}
-                    onClick={() =>
-                      setExpanded((current) => {
-                        const next = new Set(current);
-                        if (next.has(row.id)) next.delete(row.id);
-                        else next.add(row.id);
-                        return next;
-                      })
-                    }
-                    className="inline-flex items-center gap-1 hover:text-fg"
-                  >
-                    {expanded.has(row.id) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                    {row.name}
-                  </button>
-                ) : (
-                  row.name
-                )}
-              </td>
-              {(["context", "duration"] as const).map((metric) => (
-                <td key={metric} className="py-2 pr-3 align-top">
-                  <div className="grid gap-1.5">
-                    {harnesses.map((harness) => (
-                      <div key={harness} className="flex items-start gap-2">
-                        <span
-                          className="mt-1 h-[7px] w-[7px] shrink-0 rounded-full"
-                          style={{ backgroundColor: harnessColor(harness) }}
-                        />
-                        <DistributionPlot
-                          name={row.name}
-                          harness={harness}
-                          metric={metric}
-                          value={
-                            row.harnesses.find((item) => item.harness === harness)?.[metric] ?? {
-                              stats: null,
-                              measured: 0,
-                              expected: 0,
-                              missing_reasons: [`never ran on ${harness}`],
-                            }
+          {visible.map(({ row, child }) => {
+            const couples = !child && expandablePairs ? (row.models ?? []) : [];
+            return (
+              <Fragment key={`${child ? "subagent" : "entity"}-${row.id}`}>
+                <tr className="border-t border-line" data-testid="stats-detail-row">
+                  <td className={`py-2 pr-2 text-fg-2 ${child ? "pl-7" : ""}`}>
+                    <span className="inline-flex items-center gap-1">
+                      {couples.length > 0 ? (
+                        <button
+                          type="button"
+                          aria-label={`${couplesExpanded.has(row.id) ? "Collapse" : "Expand"} ${row.name} models`}
+                          data-testid="stats-node-toggle"
+                          onClick={() =>
+                            setCouplesExpanded((current) => {
+                              const next = new Set(current);
+                              if (next.has(row.id)) next.delete(row.id);
+                              else next.add(row.id);
+                              return next;
+                            })
                           }
-                          scaleMax={metric === "context" ? contextMax : durationMax}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </td>
-              ))}
-            </tr>
-          ))}
+                          className="shrink-0 hover:text-fg"
+                        >
+                          {couplesExpanded.has(row.id) ? (
+                            <ChevronDown size={12} />
+                          ) : (
+                            <ChevronRight size={12} />
+                          )}
+                        </button>
+                      ) : null}
+                      {!child && row.subagents.length > 0 ? (
+                        <button
+                          type="button"
+                          aria-label={`${expanded.has(row.id) ? "Collapse" : "Expand"} ${row.name} subagents`}
+                          onClick={() =>
+                            setExpanded((current) => {
+                              const next = new Set(current);
+                              if (next.has(row.id)) next.delete(row.id);
+                              else next.add(row.id);
+                              return next;
+                            })
+                          }
+                          className="shrink-0 hover:text-fg"
+                        >
+                          {expanded.has(row.id) ? (
+                            <ChevronDown size={12} />
+                          ) : (
+                            <ChevronRight size={12} />
+                          )}
+                        </button>
+                      ) : null}
+                      {(() => {
+                        const content = renderName ? renderName(row) : row.name;
+                        return onOpen ? (
+                          <button
+                            type="button"
+                            aria-label={`Open ${row.name}`}
+                            onClick={() => onOpen(row)}
+                            className="text-left hover:text-fg"
+                          >
+                            {content}
+                          </button>
+                        ) : (
+                          <span>{content}</span>
+                        );
+                      })()}
+                    </span>
+                  </td>
+                  {(["context", "duration"] as const).map((metric) =>
+                    metricCell(row.name, row.harnesses, metric),
+                  )}
+                </tr>
+                {couplesExpanded.has(row.id)
+                  ? couples.map((pair) => (
+                      <tr
+                        key={`${row.id}-${pair.model}-${pair.effort ?? ""}`}
+                        className="border-t border-line bg-bg-3/40 text-fg-3"
+                        data-testid="stats-performance-model-effort-row"
+                      >
+                        <td className="py-2 pl-7 pr-2">
+                          <span className="inline-flex items-baseline gap-1">
+                            <ProvenanceName
+                              name={pair.model}
+                              mono
+                              provenance={pair.model_provenance}
+                              harnesses={[]}
+                              target="model"
+                              content={performanceProvenanceCopy(pair.model_provenance)}
+                            />
+                            <span className="text-fg-4">·</span>
+                            {pair.effort === null ? (
+                              <Tooltip content={NOT_SET_COPY} side="top">
+                                <span className="italic text-fg-4">not set</span>
+                              </Tooltip>
+                            ) : (
+                              <ProvenanceName
+                                name={pair.effort}
+                                provenance={pair.effort_provenance}
+                                harnesses={[]}
+                                target="effort"
+                                content={performanceProvenanceCopy(pair.effort_provenance)}
+                              />
+                            )}
+                          </span>
+                        </td>
+                        {(["context", "duration"] as const).map((metric) =>
+                          metricCell(
+                            `${pair.model} · ${pair.effort ?? "not set"}`,
+                            pair.harnesses,
+                            metric,
+                          ),
+                        )}
+                      </tr>
+                    ))
+                  : null}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </TooltipProvider>
   );
 }
+
+type PerformanceAxis = "pipeline" | "model";
 
 function PerformanceTab({
   performance,
@@ -1301,8 +1454,18 @@ function PerformanceTab({
   performance: StatsPerformance | null;
   error: string | null;
 }) {
+  // The second select (#737): grouping (« By pipeline » / « By model »), fully
+  // independent of the sort (« By context » / « By duration ») beside it.
+  const [axis, setAxis] = useState<PerformanceAxis>("pipeline");
   const [sort, setSort] = useState<PerformanceMetric>("context");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The model axis drills Model → Effort → Pipeline → Node (ADR-0065). The
+  // effort id is "" for the "not set" bucket, so selection is `null` vs value,
+  // never falsy-compared.
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [selectedEffortId, setSelectedEffortId] = useState<string | null>(null);
+  const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
+
   if (error) {
     return (
       <div className="rounded-md border border-st-failed/30 bg-st-failed-bg px-3 py-2 text-st-failed">
@@ -1311,9 +1474,25 @@ function PerformanceTab({
     );
   }
   if (!performance) return <EmptyNote>Loading performance…</EmptyNote>;
-  if (performance.by_pipeline.length === 0 && performance.infrastructure.length === 0) {
+  if (
+    performance.by_pipeline.length === 0 &&
+    performance.infrastructure.length === 0 &&
+    performance.by_model.length === 0
+  ) {
     return <EmptyNote>No successful executions in this period.</EmptyNote>;
   }
+  // A period whose observations all lack a resolvable model is an empty axis —
+  // its own absence, not a broken tab.
+  if (axis === "model" && performance.by_model.length === 0) {
+    return <EmptyNote>No model observed in this period.</EmptyNote>;
+  }
+
+  const toTotal = () => {
+    setSelectedId(null);
+    setSelectedModelId(null);
+    setSelectedEffortId(null);
+    setSelectedPipelineId(null);
+  };
 
   const infrastructureRow: StatsPerformanceEntity = {
     id: "__infrastructure__",
@@ -1322,22 +1501,99 @@ function PerformanceTab({
     nodes: performance.infrastructure,
     subagents: [],
   };
-  const masterRows = sortPerformance(
-    [...performance.by_pipeline, infrastructureRow],
-    sort,
-  );
-  const selected = masterRows.find((row) => row.id === selectedId) ?? null;
-  const aggregate = selected ?? performance.total;
-  const detailRows = selected
-    ? selected.id === "__infrastructure__"
-      ? performance.infrastructure
-      : selected.nodes
-    : masterRows;
+
+  // Model axis: resolve the drill path.
+  const model =
+    axis === "model"
+      ? (performance.by_model.find((row) => row.id === selectedModelId) ?? null)
+      : null;
+  const effort =
+    model && selectedEffortId !== null
+      ? (model.efforts.find((row) => row.id === selectedEffortId) ?? null)
+      : null;
+  const modelPipeline =
+    effort && selectedPipelineId !== null
+      ? (effort.pipelines.find((row) => row.id === selectedPipelineId) ?? null)
+      : null;
+
+  const masterRows =
+    axis === "model"
+      ? sortPerformance(performance.by_model, sort)
+      : sortPerformance([...performance.by_pipeline, infrastructureRow], sort);
+  const selected =
+    axis === "pipeline" ? (masterRows.find((row) => row.id === selectedId) ?? null) : null;
+  const aggregate =
+    axis === "model"
+      ? (modelPipeline ?? effort ?? model ?? performance.total)
+      : (selected ?? performance.total);
+
+  let detailRows: StatsPerformanceEntity[];
+  let detailRenderName: ((row: StatsPerformanceEntity) => React.ReactNode) | undefined;
+  let onOpen: ((row: StatsPerformanceEntity) => void) | undefined;
+  if (axis === "model") {
+    if (modelPipeline) {
+      // Node leaves are the floor: the model × effort path is the drill.
+      detailRows = modelPipeline.nodes;
+    } else if (effort) {
+      detailRows = effort.pipelines;
+      onOpen = (row) => setSelectedPipelineId(row.id);
+    } else if (model) {
+      detailRows = model.efforts;
+      detailRenderName = (row) => {
+        const match = model.efforts.find((item) => item.id === row.id);
+        return match ? performanceEffortName(match) : row.name;
+      };
+      onOpen = (row) => setSelectedEffortId(row.id);
+    } else {
+      detailRows = performance.by_model;
+      detailRenderName = (row) => {
+        const provenance = performance.by_model.find((m) => m.id === row.id)?.provenance;
+        return (
+          <ProvenanceName
+            name={row.name}
+            mono
+            provenance={provenance}
+            harnesses={[]}
+            target="model"
+            content={performanceProvenanceCopy(provenance)}
+          />
+        );
+      };
+      onOpen = (row) => setSelectedModelId(row.id);
+    }
+  } else if (selected) {
+    detailRows =
+      selected.id === "__infrastructure__" ? performance.infrastructure : selected.nodes;
+  } else {
+    detailRows = masterRows;
+  }
+
   const contexts = aggregate.harnesses.map((item) =>
     item.context.stats ? formatPerformanceValue(item.context.stats.median, "context") : "—",
   );
   const durations = aggregate.harnesses.map((item) =>
     item.duration.stats ? formatPerformanceValue(item.duration.stats.median, "duration") : "—",
+  );
+
+  // The model axis's breadcrumb; « By pipeline » keeps its one-line header.
+  const crumbs: { label: string; onClick?: () => void }[] = [
+    { label: "Total", onClick: toTotal },
+  ];
+  if (axis === "model") {
+    if (model)
+      crumbs.push({
+        label: model.name,
+        onClick: () => {
+          setSelectedEffortId(null);
+          setSelectedPipelineId(null);
+        },
+      });
+    if (effort) crumbs.push({ label: effort.name, onClick: () => setSelectedPipelineId(null) });
+    if (modelPipeline) crumbs.push({ label: modelPipeline.name });
+  }
+  // Every crumb but the last pops the levels it shadows.
+  const clickableCrumbs = crumbs.map((crumb, index) =>
+    index === crumbs.length - 1 ? { label: crumb.label } : crumb,
   );
 
   return (
@@ -1347,31 +1603,65 @@ function PerformanceTab({
           <span className="text-fg-4" style={{ fontSize: "10.5px" }}>
             Ranked by {sort}
           </span>
-          <select
-            aria-label="Performance sort"
-            value={sort}
-            onChange={(event) => setSort(event.target.value as PerformanceMetric)}
-            className="rounded border border-line bg-bg-3 px-2 py-1 text-fg-2"
-          >
-            <option value="context">By context</option>
-            <option value="duration">By duration</option>
-          </select>
+          <span className="flex items-center gap-1.5">
+            <select
+              aria-label="Performance grouping"
+              value={axis}
+              onChange={(event) => {
+                setAxis(event.target.value as PerformanceAxis);
+                toTotal();
+              }}
+              className="rounded border border-line bg-bg-3 px-2 py-1 text-fg-2"
+            >
+              <option value="pipeline">By pipeline</option>
+              <option value="model">By model</option>
+            </select>
+            <select
+              aria-label="Performance sort"
+              value={sort}
+              onChange={(event) => setSort(event.target.value as PerformanceMetric)}
+              className="rounded border border-line bg-bg-3 px-2 py-1 text-fg-2"
+            >
+              <option value="context">By context</option>
+              <option value="duration">By duration</option>
+            </select>
+          </span>
         </div>
         <MasterList
           rows={masterRows}
-          selected={selectedId}
+          selected={axis === "model" ? selectedModelId : selectedId}
+          monoName={axis === "model"}
           ariaLabel="Performance groups"
           valueLabel={(row) => {
             const [mean] = performanceScore(row, sort);
             return mean < 0 ? "—" : formatPerformanceValue(mean, sort);
           }}
-          onSelect={setSelectedId}
+          onSelect={(id) => {
+            if (axis === "model") {
+              setSelectedModelId(id);
+              setSelectedEffortId(null);
+              setSelectedPipelineId(null);
+            } else {
+              setSelectedId(id);
+            }
+          }}
         />
+        {axis === "model" && (
+          <div className="mt-3 text-fg-4" style={{ fontSize: "10.5px" }}>
+            Model ids verbatim, one row per id — the same id run through two
+            harnesses is one row, one column per harness. Hover a model or an
+            effort for where the value was read.
+          </div>
+        )}
       </aside>
       <div className="min-w-0 flex-1 pl-5">
-        <div className="mb-3 text-fg-4" style={{ fontSize: "10.5px" }}>
-          Total{selected ? ` / ${selected.name}` : ""}
-        </div>
+        {axis === "model" ? (
+          <Breadcrumb testid="stats-performance-breadcrumb" crumbs={clickableCrumbs} />
+        ) : (
+          <div className="mb-3 text-fg-4" style={{ fontSize: "10.5px" }}>
+            Total{selected ? ` / ${selected.name}` : ""}
+          </div>
+        )}
         <HarnessLegend harnesses={performance.harnesses} />
         <div className="mt-4 text-fg" data-testid="stats-performance-headline">
           {contexts.join(" / ") || "—"} median peak context · {durations.join(" / ") || "—"} median
@@ -1382,9 +1672,13 @@ function PerformanceTab({
         </div>
         <div className="mt-4 min-h-[240px]">
           <PerformanceTable
+            key={`${axis}-${selectedId ?? ""}-${selectedModelId ?? "total"}-${selectedEffortId ?? "total"}-${selectedPipelineId ?? ""}`}
             rows={detailRows}
             harnesses={performance.harnesses}
             sort={sort}
+            renderName={detailRenderName}
+            onOpen={onOpen}
+            expandablePairs={axis === "pipeline"}
           />
         </div>
       </div>
