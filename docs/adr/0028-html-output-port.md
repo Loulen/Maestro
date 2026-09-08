@@ -1,6 +1,6 @@
 # ADR-0028 — Type de port de sortie `html` : artefact HTML rendu, statique et sandboxé
 
-Date : 2026-07-18 · Statut : accepté · Issue : #333
+Date : 2026-07-18 · Statut : accepté · Issue : #333 · Amendé par ADR-0066 : l'interdiction du `text/html` vise les **artefacts** ; un *page mount* explicite (`/pages/<nom>/`) sert du HTML navigable.
 
 ## Contexte
 
