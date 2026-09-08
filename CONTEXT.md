@@ -224,7 +224,7 @@ Le **Blackboard** est le store partagé où vivent tous les artefacts d'un Pipel
 
 Résolution des inputs : wire simple → dernière itération **complétée** du nœud source ; wire d'accumulation (`repeated`) → un artefact par itération complétée, ordonné par N. La résolution passe par la projection, pas par un glob disque (#353).
 
-**html** *(type de port de sortie)* : un port dont l'artefact est un `output.html` **rendu** dans une iframe sandboxée — HTML + CSS statiques, **aucun JS exécuté**, jamais servi en `text/html` par le daemon (ADR-0028). Surface de relecture, non consommée en aval en v1. _Éviter_ : « aperçu HTML interactif ».
+**html** *(type de port de sortie)* : un port dont l'artefact est un `output.html` **rendu** dans une iframe sandboxée — HTML + CSS statiques, **aucun JS exécuté**, jamais servi en `text/html` par le daemon (ADR-0028). Surface de relecture, non consommée en aval en v1. Pour montrer un prototype navigable, on passe par un **Page mount** (ADR-0066), pas par ce port. _Éviter_ : « aperçu HTML interactif ».
 
 ### Frontmatter — minimal
 
@@ -490,6 +490,10 @@ Le **repo cible** d'un Run ou d'un Trigger est le dépôt git dans lequel il tra
 La brique **unique** de sélection de chemin à la souris : un listing à **un niveau**, un composant, plusieurs consommateurs (sélecteur de repo, sélecteur de Dockerfile). Jamais de récursion, jamais de **contenus** renvoyés (noms seulement) ; liens cassés et fichiers spéciaux invisibles ; mode fichier = select-then-confirm. Surface non authentifiée comme tout le HTTP du daemon — portée LAN assumée (#260 closed). _Éviter_ : « repo browser » (généralisé en #431, sans alias).
 
 ---
+
+## Page mount
+
+**Page mount** *(montage de page)* : liaison explicite d'un **nom** à un **répertoire du disque**, servi en lecture seule et en vrai HTML (scripts exécutés) sous `/pages/<nom>/` — c'est ainsi qu'un agent ou un opérateur montre un prototype, un rapport ou un mockup à travers l'instance, sans rebuild (le contenu est celui du disque à la requête). Le geste est **délibéré** (`pdo page mount|unmount|list`, `POST/DELETE/GET /pages`) : c'est ce qui l'autorise à déroger à la sandbox des artefacts `html` (ADR-0066 amende ADR-0028). Un fichier absent sous `/pages/` est un **vrai 404**, jamais la coquille SPA ; le Blackboard n'est pas montable. Monté depuis un node, il porte le `run_id` et tombe à l'archivage du Run ; monté hors Run, il vit jusqu'au `unmount`. _Éviter_ : « static server », « artefact HTML » (ça, c'est le port `html`), « upload » (le répertoire existe déjà sur disque).
 
 ## Projet
 
