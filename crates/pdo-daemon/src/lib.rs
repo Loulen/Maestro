@@ -43,6 +43,7 @@ mod node_io_resolver;
 mod node_primitives;
 mod node_spawn;
 mod outputs_validator;
+mod page_mount;
 mod pi_session;
 mod pipeline;
 mod pipeline_migrator;
@@ -107,12 +108,13 @@ use axum::extract::{
     FromRequest, Json, Multipart, Path as AxumPath, Query, State, WebSocketUpgrade,
 };
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 use tokio::time;
 use tracing::{error, info, warn};
@@ -235,6 +237,21 @@ pub enum Commands {
         #[command(subcommand)]
         action: Box<RunAction>,
     },
+    /// Mount directories as live pages through the daemon.
+    Page {
+        #[command(subcommand)]
+        action: PageAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PageAction {
+    /// Bind a name to a directory and serve it under `/pages/<name>/`.
+    Mount { name: String, directory: PathBuf },
+    /// List active page mounts.
+    List,
+    /// Remove a page mount.
+    Unmount { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -348,6 +365,10 @@ struct AppState {
     repo_root: PathBuf,
     port: u16,
     merge_lock: tokio::sync::Mutex<()>,
+    /// Serializes page-mount mutations with Run archival. The guard stays held
+    /// until `RunArchived` lands, so a verified node session cannot insert a
+    /// run-owned mount after cleanup removed that Run's mounts.
+    page_mount_lock: tokio::sync::Mutex<()>,
     /// Serializes admission so the slot check is atomic check-and-reserve. A
     /// spawn holds this from the moment it counts live sessions until it has
     /// appended the reservation event (`NodeStarted` / `NodeWaiting`). Without
@@ -1217,6 +1238,7 @@ pub fn run_run_create(action: RunAction) -> Result<()> {
     if let Some(v) = variables {
         body.insert("variables".into(), parse_json_arg("variables", &v)?);
     }
+
     if let Some(v) = skills {
         body.insert("skills".into(), parse_skills_arg(&v)?);
     }
@@ -1292,6 +1314,78 @@ pub fn run_run_create(action: RunAction) -> Result<()> {
         None => println!("Run {run_id} created (root run)."),
     }
     Ok(())
+}
+
+pub fn run_page(action: PageAction) -> Result<()> {
+    let url = cli_daemon_url();
+    let client = reqwest::blocking::Client::new();
+    let session = session_env_claim();
+    let with_identity = |request: reqwest::blocking::RequestBuilder| {
+        let mut request = request.header("X-PDO-Actor", "cli");
+        if let Some((run_id, node_id)) = &session {
+            request = request
+                .header(SESSION_RUN_HEADER, run_id)
+                .header(SESSION_NODE_HEADER, node_id);
+        }
+        request
+    };
+
+    match action {
+        PageAction::Mount { name, directory } => {
+            let directory = directory
+                .canonicalize()
+                .with_context(|| format!("cannot resolve {}", directory.display()))?;
+            let response = with_identity(client.post(format!("{url}/pages")))
+                .json(&serde_json::json!({ "name": name, "directory": directory }))
+                .send()
+                .context("failed to reach daemon")?;
+            let mount: page_mount::PageMount = page_cli_response(response, "mount page")?;
+            println!(
+                "Mounted {} at /pages/{}/ from {}.",
+                mount.name, mount.name, mount.directory
+            );
+        }
+        PageAction::List => {
+            let response = with_identity(client.get(format!("{url}/pages")))
+                .send()
+                .context("failed to reach daemon")?;
+            let mounts: Vec<page_mount::PageMount> = page_cli_response(response, "list pages")?;
+            for mount in mounts {
+                let run = mount.run_id.as_deref().unwrap_or("-");
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    mount.name, mount.directory, run, mount.created_at
+                );
+            }
+        }
+        PageAction::Unmount { name } => {
+            let response = with_identity(client.delete(format!("{url}/pages/{name}")))
+                .send()
+                .context("failed to reach daemon")?;
+            let _: page_mount::PageMount = page_cli_response(response, "unmount page")?;
+            println!("Unmounted {name}.");
+        }
+    }
+    Ok(())
+}
+
+fn page_cli_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    operation: &str,
+) -> Result<T> {
+    let status = response.status();
+    let raw = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let detail = parsed
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or(raw.as_str());
+        anyhow::bail!("daemon refused to {operation} ({status}): {detail}");
+    }
+    serde_json::from_str(&raw)
+        .with_context(|| format!("unreadable success body from daemon: {raw}"))
 }
 
 /// One-shot `pdo docs`: render the documentation PDO generates from its own code,
@@ -2733,6 +2827,7 @@ pub async fn serve_with_config(
         repo_root,
         port: bound_addr.port(),
         merge_lock: tokio::sync::Mutex::new(()),
+        page_mount_lock: tokio::sync::Mutex::new(()),
         admission_lock: tokio::sync::Mutex::new(()),
         trigger_tick_lock: tokio::sync::Mutex::new(()),
         recent_writes,
@@ -4328,6 +4423,14 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines", post(create_pipeline))
         .route("/runs", post(create_run))
         .route("/runs", get(list_runs))
+        .route("/pages", get(list_page_mounts).post(create_page_mount))
+        .route("/pages/", get(list_page_mounts))
+        .route(
+            "/pages/{name}",
+            get(redirect_page_mount).delete(delete_page_mount),
+        )
+        .route("/pages/{name}/", get(serve_page_mount_root))
+        .route("/pages/{name}/{*path}", get(serve_page_mount_file))
         // Static path — must stay declared before `/runs/{run_id}`.
         .route("/runs/reapable", get(list_reapable_runs))
         .route("/sessions", get(sessions))
@@ -4584,6 +4687,271 @@ struct ProvisioningPreviewRequest {
 
 fn default_provisioning_git_ref() -> String {
     "HEAD".to_string()
+}
+
+#[derive(Deserialize)]
+struct CreatePageMountRequest {
+    name: String,
+    directory: PathBuf,
+}
+
+async fn list_page_mounts(State(state): State<Arc<AppState>>) -> Response {
+    match page_mount::list(&state.db).await {
+        Ok(mounts) => Json(mounts).into_response(),
+        Err(error) => {
+            error!("failed to list page mounts: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "page mount storage error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn create_page_mount(
+    State(state): State<Arc<AppState>>,
+    actor: audit_log::Actor,
+    headers: HeaderMap,
+    Json(request): Json<CreatePageMountRequest>,
+) -> Response {
+    let _guard = state.page_mount_lock.lock().await;
+    let session = session_claim_from_headers(&headers);
+    if let Some(claim) = &session {
+        if let Err((status, body)) = verify_session_claim(&state, claim).await {
+            return (status, Json(body)).into_response();
+        }
+    }
+
+    let mount = match page_mount::create(
+        &state.db,
+        &request.name,
+        &request.directory,
+        session.as_ref().map(|claim| claim.run_id.as_str()),
+    )
+    .await
+    {
+        Ok(mount) => mount,
+        Err(page_mount::MountError::Invalid(message)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response()
+        }
+        Err(page_mount::MountError::Duplicate(name)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("page mount `{name}` is already mounted")
+                })),
+            )
+                .into_response()
+        }
+        Err(page_mount::MountError::Database(error)) => {
+            error!("failed to create page mount: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "page mount storage error" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(error) = record_page_mount_mutation(
+        &state,
+        actor,
+        session.as_ref(),
+        "page_mount.mounted",
+        None,
+        Some(serde_json::json!(mount)),
+    )
+    .await
+    {
+        if let Err(rollback_error) = page_mount::remove(&state.db, &mount.name).await {
+            error!(
+                "failed to roll back page mount {} after event error: {rollback_error}",
+                mount.name
+            );
+        }
+        error!("failed to record page mount event: {error:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "page mount event log error" })),
+        )
+            .into_response();
+    }
+    (StatusCode::CREATED, Json(mount)).into_response()
+}
+
+async fn delete_page_mount(
+    State(state): State<Arc<AppState>>,
+    actor: audit_log::Actor,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    let _guard = state.page_mount_lock.lock().await;
+    let session = session_claim_from_headers(&headers);
+    if let Some(claim) = &session {
+        if let Err((status, body)) = verify_session_claim(&state, claim).await {
+            return (status, Json(body)).into_response();
+        }
+    }
+
+    let mount = match page_mount::remove(&state.db, &name).await {
+        Ok(Some(mount)) => mount,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("page mount `{name}` not found") })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            error!("failed to remove page mount: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "page mount storage error" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(error) = record_page_mount_mutation(
+        &state,
+        actor,
+        session.as_ref(),
+        "page_mount.unmounted",
+        Some(serde_json::json!(mount)),
+        None,
+    )
+    .await
+    {
+        if let Err(rollback_error) = page_mount::restore(&state.db, &mount).await {
+            error!(
+                "failed to restore page mount {} after event error: {rollback_error}",
+                mount.name
+            );
+        }
+        error!("failed to record page unmount event: {error:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "page mount event log error" })),
+        )
+            .into_response();
+    }
+    Json(mount).into_response()
+}
+
+async fn record_page_mount_mutation(
+    state: &AppState,
+    actor: audit_log::Actor,
+    session: Option<&SessionClaim>,
+    action: &str,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+) -> Result<()> {
+    let mount = before.as_ref().or(after.as_ref());
+    let name = mount
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if let Some(claim) = session {
+        append_event(
+            state,
+            &event_log::Event {
+                id: None,
+                run_id: claim.run_id.clone(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::CommandIssued,
+                node_id: Some(claim.node_id.clone()),
+                iter: None,
+                payload: Some(serde_json::json!({
+                    "command": action,
+                    "page_mount": mount,
+                })),
+            },
+        )
+        .await?;
+    } else {
+        audit_log::record_best_effort(
+            &state.db,
+            audit_log::NewAuditEntry {
+                actor_hint: actor.as_hint().to_string(),
+                action: action.to_string(),
+                target_kind: Some("page_mount".to_string()),
+                target_id: Some(name.to_string()),
+                before,
+                after,
+            },
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn redirect_page_mount(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    match page_mount::get(&state.db, &name).await {
+        Ok(Some(_)) => Redirect::permanent(&format!("/pages/{name}/")).into_response(),
+        Ok(None) => page_not_found(),
+        Err(error) => {
+            error!("failed to resolve page mount: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn serve_page_mount_root(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    serve_page_mount(&state, &name, "").await
+}
+
+async fn serve_page_mount_file(
+    State(state): State<Arc<AppState>>,
+    AxumPath((name, path)): AxumPath<(String, String)>,
+) -> Response {
+    serve_page_mount(&state, &name, &path).await
+}
+
+async fn serve_page_mount(state: &AppState, name: &str, path: &str) -> Response {
+    let mount = match page_mount::get(&state.db, name).await {
+        Ok(Some(mount)) => mount,
+        Ok(None) => return page_not_found(),
+        Err(error) => {
+            error!("failed to resolve page mount: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let Some(opened) = page_mount::open_file(&mount, path) else {
+        return page_not_found();
+    };
+    let mime = mime_guess::from_path(&opened.mime_path).first_or_octet_stream();
+    let mut file = tokio::fs::File::from_std(opened.file);
+    let mut content = Vec::new();
+    if let Err(error) = file.read_to_end(&mut content).await {
+        error!("failed to read mounted page: {error}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, mime.as_ref())],
+        content,
+    )
+        .into_response()
+}
+
+fn page_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "page not found",
+    )
+        .into_response()
 }
 
 fn provisioning_rules_through_scope(
@@ -5085,6 +5453,10 @@ async fn init_db(db: &sqlx::SqlitePool) -> Result<()> {
     audit_log::init(db)
         .await
         .context("failed to create audit_log table")?;
+
+    page_mount::init(db)
+        .await
+        .context("failed to create page_mounts table")?;
 
     // Materialised on demand — nothing seeded.
     project_store::init(db)
@@ -8105,6 +8477,12 @@ async fn verify_session_claim(
             claim.run_id
         )));
     };
+    if !parent.status.is_live() {
+        return Err(refuse(format!(
+            "session claim refused: run `{}` is not live (status: {:?})",
+            claim.run_id, parent.status
+        )));
+    }
     let Some(node) = parent.nodes.get(&claim.node_id) else {
         return Err(refuse(format!(
             "session claim refused: run `{}` has no node `{}`",
@@ -17715,6 +18093,7 @@ fn spawn_terminal_attach(terminal: &str, socket: &str, session_name: &str) -> Re
 }
 
 async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
+    let _page_mount_guard = state.page_mount_lock.lock().await;
     let (_, run_state) = match load_projected(state, run_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
@@ -17724,6 +18103,15 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "run is already archived" })),
+        )
+            .into_response();
+    }
+
+    if let Err(error) = page_mount::remove_for_run(&state.db, run_id).await {
+        error!("cleanup_run: failed to remove page mounts for run {run_id}: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "page mount cleanup failed" })),
         )
             .into_response();
     }
@@ -20183,6 +20571,7 @@ mod tests {
             repo_root: std::env::current_dir().unwrap(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -22505,6 +22894,7 @@ mod tests {
             repo_root: std::env::current_dir().unwrap(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -27085,6 +27475,7 @@ mod tests {
             repo_root: dir.to_path_buf(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -33337,6 +33728,7 @@ edges: []
             repo_root: repo.clone(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -33545,6 +33937,7 @@ edges: []
             repo_root: repo.clone(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),

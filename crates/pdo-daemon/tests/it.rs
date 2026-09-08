@@ -46,6 +46,9 @@ mod frontmatter_validation;
 #[path = "fs_browse.rs"]
 mod fs_browse;
 
+#[path = "page_mounts.rs"]
+mod page_mounts;
+
 #[path = "guard_dry_run.rs"]
 mod guard_dry_run;
 
