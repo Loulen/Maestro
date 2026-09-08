@@ -827,7 +827,9 @@ pub(crate) fn build_preamble(ctx: &AugmentContext<'_>) -> String {
          `--source-branch`, `--name`, `--auto-name`, `--auto-fail`, \
          `--provisioning '<json>'`.\n\
          - The daemon's refusals (unknown pipeline, …) print on stderr with a \
-         non-zero exit.\n\n",
+         non-zero exit.\n\
+         - Mount a directory of generated pages with `pdo page mount <name> <dir>`; \
+         the daemon serves it live under `/pages/<name>/`.\n\n",
     );
 
     if !ctx.variables.is_empty() {
@@ -1587,6 +1589,7 @@ mod tests {
         assert!(preamble.contains("pdo run create"));
         assert!(preamble.contains("mechanically linked"));
         assert!(preamble.contains("--target-repo"));
+        assert!(preamble.contains("pdo page mount"));
     }
 
     #[test]

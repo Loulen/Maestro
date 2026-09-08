@@ -48,6 +48,7 @@ export default defineConfig({
       // as `/nodes`/`/stats`/`/fs`: without it a dev GET /audit answers 200 with
       // the SPA.
       '/audit': daemonTarget,
+      '/pages': daemonTarget,
       // #552: Projets (harness middle tier + group-header pencil). New top-level
       // `/projects` prefix — same trap as `/audit`: without it a dev
       // GET/POST /projects answers 200 with the SPA and the pencil would silently
