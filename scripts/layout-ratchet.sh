@@ -24,9 +24,14 @@ cd "$(git rev-parse --show-toplevel)"
 #   already present on main (the CI ratchet is red there since the run behind
 #   #718); #722 adds no top-level file to either directory, the flat counts are
 #   re-admitted as-is to green the gate again. Ratchet down when tidied.
+# frontend/src/components: 188 and crates/pdo-daemon/src: 87 (#750) — 188 re-admits
+#   three top-level components that landed on main after the previous reconcile
+#   (the review UI itself lives under components/review/, not counted); 87 admits
+#   review_comments.rs, the review-comment concern (ids, excerpt, batch message,
+#   projection fold — ADR-0067 §2). Ratchet down when tidied.
 BASELINES='
-frontend/src/components 185
-crates/pdo-daemon/src 83
+frontend/src/components 188
+crates/pdo-daemon/src 87
 '
 
 fail=0

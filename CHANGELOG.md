@@ -10,6 +10,23 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.77.0
+
+**Page de Review — commentaires inline, brouillons et envoi au manager** (#750 ; story #746, ADR-0067).
+Le widget `+` d'une ligne du diff ouvre un éditeur sous la ligne (Write/Preview markdown, ⌘/Ctrl+Entrée,
+Échap, Cancel · Send now · Save draft). Un **brouillon** vit dans le navigateur (`localStorage` par Run,
+texte en cours en `sessionStorage`), éditable et supprimable, marqué d'un point ambre sur la ligne.
+L'envoi — par carte, via la pastille de la barre d'outils ou la barre de pied de page « Send all » —
+écrit un évènement `review_comment_sent` par commentaire (ids `rc-001…`, `batch_id` partagé, paire de
+refs et SHAs), projeté dans `RunState.review_comments` (absent quand vide : payloads historiques
+inchangés), et colle **un seul message** dans le pane du manager (démarré à la demande) via
+`load-buffer` + `paste-buffer`. Un commentaire envoyé devient immuable et affiche `rc-NNN · paire ·
+Awaiting manager reply`. Nouveaux endpoints `GET /runs/{id}/review/comments` et
+`POST /runs/{id}/review/comments/send` ; branche du Run disparue ou Run archivé → `409 run_branch_gone`,
+envoi désactivé avec la raison, rien n'est écrit. Les évènements `review_comment_replied` /
+`resolved` / `reopened` sont définis mais pas encore émis (#751). Le prompt builtin du manager gagne
+une section « Review comments ». Navigation entre commentaires : `c` / `C`.
+
 ## 1.76.0
 
 **Page de Review — relecture de diff GitHub-like** (#749 ; story #746, ADR-0067). Depuis l'onglet Diff,

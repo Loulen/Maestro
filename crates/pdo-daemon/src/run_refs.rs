@@ -317,7 +317,12 @@ pub(crate) enum Resolved {
 }
 
 /// Resolve a stable ref id against the Run's log. Pure: no git call.
-pub(crate) fn resolve_id(run_id: &str, run_state: &RunState, events: &[Event], id: &str) -> Resolved {
+pub(crate) fn resolve_id(
+    run_id: &str,
+    run_state: &RunState,
+    events: &[Event],
+    id: &str,
+) -> Resolved {
     if id == FORK_ID {
         return Resolved::Git(fork_base(run_state).to_string());
     }
@@ -500,7 +505,10 @@ mod tests {
         assert_eq!(refs.deliveries[0].node_name, "Design");
         assert_eq!(refs.deliveries[0].status, DeliveryStatus::Delivered);
         assert_eq!(refs.deliveries[0].before, "node:design:1:before");
-        assert_eq!(refs.deliveries[0].after.as_deref(), Some("node:design:1:after"));
+        assert_eq!(
+            refs.deliveries[0].after.as_deref(),
+            Some("node:design:1:after")
+        );
         assert_eq!(refs.deliveries[2].status, DeliveryStatus::Running);
         assert_eq!(refs.deliveries[2].before, "tip");
         assert_eq!(refs.deliveries[2].live.as_deref(), Some("live:review"));
@@ -536,7 +544,13 @@ mod tests {
         assert_eq!(design_after.sha.as_deref(), Some("eee5"));
         // Still first among the deliveries.
         assert_eq!(refs.deliveries[0].node_id, "design");
-        assert_eq!(refs.deliveries.iter().filter(|d| d.node_id == "design").count(), 1);
+        assert_eq!(
+            refs.deliveries
+                .iter()
+                .filter(|d| d.node_id == "design")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -598,7 +612,10 @@ mod tests {
         assert!(is_default_pair(Some("fork"), Some("tip")));
         assert!(is_default_pair(Some("fork"), None));
         assert!(!is_default_pair(Some("tip"), Some("fork")));
-        assert!(!is_default_pair(Some("node:a:1:before"), Some("node:a:1:after")));
+        assert!(!is_default_pair(
+            Some("node:a:1:before"),
+            Some("node:a:1:after")
+        ));
         assert!(!is_default_pair(None, Some("abc123")));
     }
 }

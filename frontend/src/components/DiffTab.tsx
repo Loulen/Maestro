@@ -11,6 +11,7 @@ import {
 import { fetchRunStructuredDiff } from "../api";
 import { wordDiff } from "../lib/wordDiff";
 import { reviewUrl } from "../lib/runRefs";
+import { pendingCount } from "../lib/reviewComments";
 import {
   LARGE_DIFF_FILES,
   TRUNCATE_LINES,
@@ -271,6 +272,17 @@ export default function DiffTab({ run, collapsed, onCollapsedChange }: Props) {
           >
             <SquareArrowOutUpRight size={11} />
             Expand and comment
+            {pendingCount(run.review_comments) > 0 && (
+              // #750: pending review comments (sent, not resolved) — CONTEXT.md « Accès rapide Review ».
+              <span
+                className="ml-0.5 inline-flex h-[14px] items-center rounded-[7px] bg-st-running-bg px-[5px] font-medium text-st-running"
+                style={{ fontSize: "9.5px" }}
+                title={`${pendingCount(run.review_comments)} review comment(s) awaiting the manager`}
+                data-testid="diff-review-pending"
+              >
+                {pendingCount(run.review_comments)}
+              </span>
+            )}
           </a>
         </span>
       </div>

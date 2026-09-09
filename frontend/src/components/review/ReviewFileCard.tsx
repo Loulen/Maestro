@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Copy, SquareArrowOutUpRight } from "lucide-react";
-import { DiffView, DiffModeEnum } from "@git-diff-view/react";
-import type { DiffFile } from "../../types";
+import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
+import type { DiffFile, ReviewSide } from "../../types";
 import { fetchRunFileAtRef } from "../../api";
 import { baseName, fileHunks, filePath, langOf, statusLetter } from "../../lib/runRefs";
 import type { RefPair, ViewMode } from "../../lib/runRefs";
+import type { Anchor, ReviewEntry } from "../../lib/reviewComments";
+import { entryAt, plural, wipKey } from "../../lib/reviewComments";
+import CommentEditor from "./CommentEditor";
+import CommentCard, { Badge } from "./CommentCard";
 
 /**
  * One file of the Review page (#749): a sticky header (chevron, status letter,
- * `dir/` + basename, `+a −d`, copy path, open at destination ref) and the
- * third-party diff body — split or unified, with GitHub-style `↑ ⇕ ↓` context
- * expansion in every hunk separator.
+ * `dir/` + basename, `+a −d`, comment badges, copy path, open at destination
+ * ref) and the third-party diff body — split or unified, with GitHub-style
+ * `↑ ⇕ ↓` context expansion in every hunk separator.
  *
  * The daemon's structured diff carries the hunks; the component needs the
  * **full content at each ref** to expand context. It is fetched lazily — the
@@ -19,7 +23,37 @@ import type { RefPair, ViewMode } from "../../lib/runRefs";
  * the content is in). A side that does not exist at its ref (an added file's
  * old side, a deleted file's new side) is not fetched: the component composes
  * it from the diff.
+ *
+ * Review comments (#750): every entry of this file (draft or sent) occupies the
+ * library's **extend slot** under its line — `extendData[side][line]` — and the
+ * `+` widget on a line number opens the editor (widget row) for a line without
+ * a comment, re-opens the draft for edit when there is one, and only toasts on
+ * a sent (immutable) comment: **one comment per line**. Anchored lines carry a
+ * dot on the number and a 2px bar on the content cell, amber for a draft, blue
+ * for a sent comment, through a per-card `<style>` scoped to the card's id.
  */
+
+/** What the page hands every card to act on comments (#750). */
+export interface ReviewCommentsApi {
+  /** Draft key currently opened for edit (its card becomes the editor). */
+  editingKey: string | null;
+  /** Draft keys travelling in a send right now. */
+  sendingKeys: ReadonlySet<string>;
+  /** The in-flight send has to start the manager first. */
+  startingManager: boolean;
+  /** `Fork point → Run tip` for the sent card's footer. */
+  pairLabel: string;
+  sendDisabledReason: string | null;
+  saveNew: (anchor: Anchor, text: string) => void;
+  sendNew: (anchor: Anchor, text: string) => void;
+  editDraft: (key: string) => void;
+  updateDraft: (key: string, text: string) => void;
+  cancelEdit: () => void;
+  deleteDraft: (key: string) => void;
+  sendDraft: (key: string) => void;
+  /** The `+` landed on a sent comment: nothing to open, the page explains. */
+  sentLineClicked: () => void;
+}
 
 interface Props {
   runId: string;
@@ -30,6 +64,9 @@ interface Props {
   onToggle: () => void;
   /** Lets the page track the card for scroll-spy and "click a file → scroll". */
   registerEl: (path: string, el: HTMLDivElement | null) => void;
+  /** This file's comments for the current pair (drafts + sent). */
+  entries?: ReviewEntry[];
+  comments?: ReviewCommentsApi;
 }
 
 type Contents =
@@ -45,12 +82,29 @@ const LETTER_CLASS: Record<"A" | "M" | "D" | "R", string> = {
   R: "text-edit-tint",
 };
 
-export default function ReviewFileCard({ runId, file, pair, view, collapsed, onToggle, registerEl }: Props) {
+const NO_ENTRIES: ReviewEntry[] = [];
+
+function sideOf(s: SplitSide): ReviewSide {
+  return s === SplitSide.old ? "old" : "new";
+}
+
+export default function ReviewFileCard({
+  runId,
+  file,
+  pair,
+  view,
+  collapsed,
+  onToggle,
+  registerEl,
+  entries = NO_ENTRIES,
+  comments,
+}: Props) {
   const path = filePath(file);
   const letter = statusLetter(file);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [contents, setContents] = useState<Contents>({ kind: "idle" });
   const [copied, setCopied] = useState(false);
+  const cssId = `rc-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
   const pureRename = file.status === "renamed" && file.hunks.length === 0;
   const hasBody = !file.binary && !pureRename && file.hunks.length > 0;
@@ -116,6 +170,43 @@ export default function ReviewFileCard({ runId, file, pair, view, collapsed, onT
     };
   }, [file.old_path, file.new_path, hunks, contents]);
 
+  // --- Comments (#750) --------------------------------------------------------
+  const extendData = useMemo(() => {
+    const oldFile: Record<string, { data: ReviewEntry }> = {};
+    const newFile: Record<string, { data: ReviewEntry }> = {};
+    for (const e of entries) {
+      const slot = e.anchor.side === "old" ? oldFile : newFile;
+      // Sent wins over a stale draft on the same line (entries are sorted so).
+      if (!slot[String(e.anchor.line)]) slot[String(e.anchor.line)] = { data: e };
+    }
+    return { oldFile, newFile };
+  }, [entries]);
+
+  const nDrafts = entries.filter((e) => e.kind === "draft").length;
+  const nSent = entries.length - nDrafts;
+
+  /** Per-card CSS: dot + bar on anchored lines, `+` hidden where a comment sits. */
+  const anchorCss = useMemo(() => {
+    if (entries.length === 0) return "";
+    const rules: string[] = [];
+    for (const e of entries) {
+      const color = e.kind === "draft" ? "var(--color-st-await)" : "var(--color-st-running)";
+      const { side, line } = e.anchor;
+      // Split: `td.diff-line-<side>-num > span[data-line-num]`, content cell next.
+      const num = `#${cssId} td.diff-line-${side}-num:has(> span[data-line-num="${line}"])`;
+      rules.push(`${num}::before{content:"";position:absolute;left:5px;top:7px;width:6px;height:6px;border-radius:50%;background:${color}}`);
+      rules.push(`${num} + td.diff-line-${side}-content{box-shadow:inset 2px 0 0 ${color}}`);
+      rules.push(`${num} [data-add-widget]{display:none}`);
+      // Unified: both numbers on one row, `span[data-line-<side>-num]`.
+      const row = `#${cssId} tr.diff-line:has(span[data-line-${side}-num="${line}"])`;
+      rules.push(`${row} td.diff-line-num{position:relative}`);
+      rules.push(`${row} td.diff-line-num::before{content:"";position:absolute;left:5px;top:7px;width:6px;height:6px;border-radius:50%;background:${color}}`);
+      rules.push(`${row} td.diff-line-content{box-shadow:inset 2px 0 0 ${color}}`);
+      rules.push(`${row} [data-add-widget]{display:none}`);
+    }
+    return rules.join("\n");
+  }, [entries, cssId]);
+
   const copyPath = () => {
     navigator.clipboard?.writeText(path).then(
       () => {
@@ -135,12 +226,16 @@ export default function ReviewFileCard({ runId, file, pair, view, collapsed, onT
   return (
     <div
       ref={rootRef}
+      id={cssId}
       data-testid="review-file"
       data-path={path}
       data-collapsed={collapsed}
       data-content={contents.kind}
+      data-drafts={nDrafts}
+      data-sent={nSent}
       className="mx-3 my-2.5 overflow-hidden rounded-md border border-line bg-bg-2"
     >
+      {anchorCss && <style>{anchorCss}</style>}
       <div
         role="button"
         tabIndex={0}
@@ -184,7 +279,9 @@ export default function ReviewFileCard({ runId, file, pair, view, collapsed, onT
             <span className="text-st-done">+{file.additions}</span> <span className="text-st-failed">−{file.deletions}</span>
           </span>
         )}
-        <span className="ml-auto flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <span className="ml-auto flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+          {nDrafts > 0 && <Badge kind="draft">✎ {plural(nDrafts, "draft")}</Badge>}
+          {nSent > 0 && <Badge kind="sent">↗ {nSent} sent</Badge>}
           <button
             type="button"
             onClick={copyPath}
@@ -224,30 +321,80 @@ export default function ReviewFileCard({ runId, file, pair, view, collapsed, onT
               No content changes
             </div>
           ) : (
-            <DiffView
+            <DiffView<ReviewEntry>
               data={data}
+              extendData={extendData}
               diffViewMode={view === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified}
               diffViewTheme="dark"
               diffViewFontSize={11}
               diffViewHighlight={false}
               diffViewWrap={false}
               diffViewAddWidget
-              renderWidgetLine={({ onClose }) => (
-                <div
-                  className="flex items-center gap-2 border-y border-line bg-bg-3 px-3 py-1.5 text-fg-3"
-                  style={{ fontSize: "10.5px" }}
-                  data-testid="review-comment-placeholder"
-                >
-                  Review comments arrive with the next ticket (#750).
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="ml-auto cursor-pointer rounded border border-line-strong px-1.5 text-fg-3 hover:text-fg"
-                  >
-                    Close
-                  </button>
-                </div>
-              )}
+              renderWidgetLine={({ side, lineNumber, onClose }) => {
+                if (!comments) return null;
+                const anchor: Anchor = { path, side: sideOf(side), line: lineNumber };
+                const existing = entryAt(entries, anchor);
+                if (existing) {
+                  return (
+                    <WidgetRedirect
+                      onMount={() => {
+                        if (existing.kind === "draft") comments.editDraft(existing.draft.key);
+                        else comments.sentLineClicked();
+                        onClose();
+                      }}
+                    />
+                  );
+                }
+                return (
+                  <CommentEditor
+                    anchor={anchor}
+                    wipKey={wipKey(runId, anchor, pair)}
+                    sendDisabledReason={comments.sendDisabledReason}
+                    onSave={(text) => {
+                      comments.saveNew(anchor, text);
+                      onClose();
+                    }}
+                    onSend={(text) => {
+                      comments.sendNew(anchor, text);
+                      onClose();
+                    }}
+                    onCancel={onClose}
+                  />
+                );
+              }}
+              renderExtendLine={({ data: entry }) => {
+                // The library probes both sides of a line; only the anchored one carries data.
+                if (!comments || !entry) return null;
+                if (entry.kind === "draft" && comments.editingKey === entry.draft.key) {
+                  return (
+                    <CommentEditor
+                      anchor={entry.anchor}
+                      initial={entry.draft.text}
+                      wipKey={wipKey(runId, entry.anchor, pair)}
+                      sendDisabledReason={comments.sendDisabledReason}
+                      onSave={(text) => comments.updateDraft(entry.draft.key, text)}
+                      onSend={(text) => {
+                        comments.updateDraft(entry.draft.key, text);
+                        comments.sendDraft(entry.draft.key);
+                      }}
+                      onCancel={comments.cancelEdit}
+                    />
+                  );
+                }
+                const key = entry.kind === "draft" ? entry.draft.key : null;
+                return (
+                  <CommentCard
+                    entry={entry}
+                    sending={key !== null && comments.sendingKeys.has(key)}
+                    startingManager={comments.startingManager}
+                    pairLabel={comments.pairLabel}
+                    sendDisabledReason={comments.sendDisabledReason}
+                    onEdit={() => key && comments.editDraft(key)}
+                    onDelete={() => key && comments.deleteDraft(key)}
+                    onSend={() => key && comments.sendDraft(key)}
+                  />
+                );
+              }}
             />
           )}
           {contents.kind === "failed" && hasBody && (
@@ -259,4 +406,19 @@ export default function ReviewFileCard({ runId, file, pair, view, collapsed, onT
       )}
     </div>
   );
+}
+
+/**
+ * The `+` landed on a line that already carries a comment: the widget row must
+ * close itself and hand over (edit the draft / explain the sent one). Done in an
+ * effect — never during render — because closing is the library's state.
+ */
+function WidgetRedirect({ onMount }: { onMount: () => void }) {
+  const ran = useRef(false);
+  useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+    onMount();
+  }, [onMount]);
+  return null;
 }

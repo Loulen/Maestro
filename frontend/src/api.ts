@@ -1,4 +1,8 @@
-import type { PipelineListEntry, PipelineDetail, PipelineDef, RunListEntry, RunState, PortDef, PortSide, PortType, FrontmatterFieldDecl, FrontmatterViolation, Trigger, TriggerFire, DaemonStatus, InstanceSettings, UpdateSettingsRequest, StatsOverview, StatsCost, StatsPerformance, SandboxProfile, SandboxProfileImage, SandboxProfileReferents, SyncCostPricesReport, UpdateStatus, UpdateChangelog, UpdateApplyResponse, Project, BranchRef, AgentChoice, AgentProfile, AgentProfileReferents, ProvisioningPlan, ProvisioningRules, Skill, SkillBank, SkillDetail, SkillFile, SkillFileContent, SkillFilesUpload, SkillFolder, SkillReferents, SkillRef, SkillScanResult, SkillImportItem, SkillImportReport, SkillRescanReport, RecentSkillSource, StructuredDiff, RunRefs } from "./types";
+import type { PipelineListEntry, PipelineDetail, PipelineDef, RunListEntry, RunState, PortDef, PortSide, PortType, FrontmatterFieldDecl, FrontmatterViolation, Trigger, TriggerFire, DaemonStatus, InstanceSettings, UpdateSettingsRequest, StatsOverview, StatsCost, StatsPerformance, SandboxProfile, SandboxProfileImage, SandboxProfileReferents, SyncCostPricesReport, UpdateStatus, UpdateChangelog, UpdateApplyResponse, Project, BranchRef, AgentChoice, AgentProfile, AgentProfileReferents, ProvisioningPlan, ProvisioningRules, Skill, SkillBank, SkillDetail, SkillFile, SkillFileContent, SkillFilesUpload, SkillFolder, SkillReferents, SkillRef, SkillScanResult, SkillImportItem, SkillImportReport, SkillRescanReport, RecentSkillSource, StructuredDiff, RunRefs,
+  ReviewComment,
+  SendReviewCommentInput,
+  SendReviewCommentsResponse,
+} from "./types";
 import { foldHarnessOntoNode } from "./lib/harness";
 
 const BASE = "";
@@ -382,6 +386,26 @@ export function fetchRun(runId: string): Promise<RunState> {
 
 export function fetchRunEvents(runId: string): Promise<unknown[]> {
   return request<unknown[]>("GET", `/runs/${encodeURIComponent(runId)}/events`);
+}
+
+/** #750: the Run's sent review comments, on their own endpoint. */
+export function fetchReviewComments(runId: string): Promise<{ comments: ReviewComment[] }> {
+  return request<{ comments: ReviewComment[] }>("GET", `/runs/${encodeURIComponent(runId)}/review/comments`);
+}
+
+/**
+ * #750: send a batch of drafts to the manager — one message for the batch, the
+ * manager started on demand. A `409 run_branch_gone` (branch deleted / archived
+ * Run) surfaces as an `ApiError` whose message is the daemon's reason.
+ */
+export function sendReviewComments(
+  runId: string,
+  comments: SendReviewCommentInput[],
+): Promise<SendReviewCommentsResponse> {
+  return request<SendReviewCommentsResponse>("POST", `/runs/${encodeURIComponent(runId)}/review/comments/send`, {
+    body: { comments },
+    label: "Send review comments",
+  });
 }
 
 /** Refusal slugs this client knows how to phrase (#490, ADR-0035 §3). */

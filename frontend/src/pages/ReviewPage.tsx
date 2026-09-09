@@ -11,12 +11,28 @@ import {
   SquareArrowOutUpRight,
 } from "lucide-react";
 import "@git-diff-view/react/styles/diff-view.css";
-import { fetchRun, fetchRunRefs, fetchRunStructuredDiff } from "../api";
+import { fetchRun, fetchRunRefs, fetchRunStructuredDiff, sendReviewComments } from "../api";
 import { useDaemonSocket } from "../hooks/useDaemonSocket";
 import type { RunRefs, RunState, StructuredDiff } from "../types";
 import RefPicker from "../components/review/RefPicker";
 import ReviewFileList from "../components/review/ReviewFileList";
 import ReviewFileCard from "../components/review/ReviewFileCard";
+import type { ReviewCommentsApi } from "../components/review/ReviewFileCard";
+import ReviewSendBar from "../components/review/ReviewSendBar";
+import {
+  addDraft,
+  countsByPath,
+  draftsForPair,
+  mergeEntries,
+  plural,
+  readDrafts,
+  removeDrafts,
+  sendDisabledReason as sendReasonOf,
+  toSendInputs,
+  updateDraft,
+  writeDrafts,
+} from "../lib/reviewComments";
+import type { Anchor, ReviewDraft, ReviewEntry } from "../lib/reviewComments";
 import {
   DEFAULT_FROM,
   DEFAULT_TO,
@@ -45,8 +61,16 @@ import type { RefPair, ViewMode } from "../lib/runRefs";
  * node delivery's before/after, a running node's live branch).
  *
  * Mounted full-window by `main.tsx` when the path matches; the app has no
- * router. The URL carries stable ref ids, never SHAs. Comments (#750) are not
- * here yet: the gutter and the "Send to manager" pill are reserved for them.
+ * router. The URL carries stable ref ids, never SHAs.
+ *
+ * Review comments (#750, ADR-0067 §2): the `+` on a line number opens an inline
+ * editor; a saved **draft** lives in this browser (localStorage per Run) until
+ * it is **sent** — per card, from the editor, or all at once from the sticky
+ * footer bar / the toolbar pill. Sending posts the batch to the daemon, which
+ * starts the manager on demand and hands it **one message**; the comments come
+ * back as immutable Run events (`review_comments` in the projected state,
+ * refreshed over the WebSocket). A Run whose branch is gone shows why sending
+ * is disabled instead of a dead button.
  */
 
 interface Props {
@@ -80,6 +104,14 @@ export default function ReviewPage({ runId }: Props) {
   const [reloadTick, setReloadTick] = useState(0);
   const [tipMoved, setTipMoved] = useState(false);
   const [nodeDelivered, setNodeDelivered] = useState<{ nodeId: string; iter: number } | null>(null);
+  // --- Review comments (#750) --------------------------------------------------
+  const [drafts, setDrafts] = useState<ReviewDraft[]>(() => readDrafts(runId));
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [sendingKeys, setSendingKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [startingManager, setStartingManager] = useState(false);
+  const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
+  const [commentCursor, setCommentCursor] = useState(-1);
+  const toastTimer = useRef<number | undefined>(undefined);
 
   const mainRef = useRef<HTMLDivElement | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
@@ -288,6 +320,173 @@ export default function ReviewPage({ runId }: Props) {
     if (target) el.scrollBy?.({ top: target.getBoundingClientRect().top - base, behavior: "smooth" });
   }, []);
 
+  // --- Review comments (#750) --------------------------------------------------
+  const showToast = useCallback((text: string, error = false) => {
+    setToast({ text, error });
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), error ? 6000 : 3600);
+  }, []);
+  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+
+  const persistDrafts = useCallback(
+    (next: ReviewDraft[]) => {
+      setDrafts(next);
+      writeDrafts(runId, next);
+    },
+    [runId],
+  );
+
+  const pathOrder = useMemo(() => files.map(filePath), [files]);
+  const entries = useMemo<ReviewEntry[]>(
+    () => mergeEntries(drafts, run?.review_comments, pair, pathOrder),
+    [drafts, run?.review_comments, pair, pathOrder],
+  );
+  const entriesByPath = useMemo(() => {
+    const m = new Map<string, ReviewEntry[]>();
+    for (const e of entries) {
+      const list = m.get(e.anchor.path) ?? [];
+      list.push(e);
+      m.set(e.anchor.path, list);
+    }
+    return m;
+  }, [entries]);
+  const counts = useMemo(() => countsByPath(entries), [entries]);
+  const pairDrafts = useMemo(() => draftsForPair(drafts, pair), [drafts, pair]);
+  const sentCount = entries.length - pairDrafts.length;
+  /** Comments written against another pair: listed greyed, never lost. */
+  const otherEntries = useMemo(() => {
+    const label = (from: string, to: string) => {
+      const name = (id: string) => refs?.refs.find((r) => r.id === id)?.label ?? id;
+      return `${name(from)} → ${name(to)}`;
+    };
+    const out: { entry: ReviewEntry; pair: string; refPair: RefPair }[] = [];
+    for (const d of drafts) {
+      if (d.from === pair.from && d.to === pair.to) continue;
+      out.push({ entry: { kind: "draft", anchor: d, draft: d }, pair: label(d.from, d.to), refPair: { from: d.from, to: d.to } });
+    }
+    for (const c of run?.review_comments ?? []) {
+      if (c.from_ref === pair.from && c.to_ref === pair.to) continue;
+      out.push({
+        entry: { kind: "sent", anchor: { path: c.path, side: c.side, line: c.line }, comment: c },
+        pair: label(c.from_ref, c.to_ref),
+        refPair: { from: c.from_ref, to: c.to_ref },
+      });
+    }
+    return out;
+  }, [drafts, run?.review_comments, pair, refs]);
+
+  const sendDisabledReason = sendReasonOf(run, refs);
+  const pairLabel = useMemo(() => {
+    const name = (id: string) => refs?.refs.find((r) => r.id === id)?.label ?? id;
+    return `${name(pair.from)} → ${name(pair.to)}`;
+  }, [refs, pair]);
+
+  /** Scroll the anchored line of an entry into view, expanding its file first. */
+  const jumpTo = useCallback(
+    (anchor: Anchor) => {
+      if (collapsedSet.has(anchor.path)) {
+        const next = new Set(collapsedSet);
+        next.delete(anchor.path);
+        setCollapsed(next);
+      }
+      const attempt = (left: number) => {
+        const card = cardEls.current.get(anchor.path);
+        const el =
+          card?.querySelector<HTMLElement>(`td.diff-line-${anchor.side}-num > span[data-line-num="${anchor.line}"]`) ??
+          card?.querySelector<HTMLElement>(`span[data-line-${anchor.side}-num="${anchor.line}"]`);
+        if (el) el.closest("tr")?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+        else if (card && left > 0) window.setTimeout(() => attempt(left - 1), 60);
+        else if (card) {
+          const main = mainRef.current;
+          if (main) main.scrollTo?.({ top: Math.max(0, card.offsetTop - 8), behavior: "smooth" });
+        }
+      };
+      attempt(5);
+    },
+    [collapsedSet],
+  );
+  const jumpComment = useCallback(
+    (dir: 1 | -1) => {
+      if (entries.length === 0) return;
+      const next = (commentCursor + dir + entries.length) % entries.length;
+      setCommentCursor(next);
+      jumpTo(entries[next].anchor);
+    },
+    [entries, commentCursor, jumpTo],
+  );
+
+  /** Send `keys` out of `source` (defaults to the current drafts; `sendNew` passes the list it just grew). */
+  const send = useCallback(
+    async (keys: string[], source: ReviewDraft[] = drafts) => {
+      if (sendDisabledReason) {
+        showToast(sendDisabledReason, true);
+        return;
+      }
+      const targets = source.filter((d) => keys.includes(d.key));
+      if (targets.length === 0) return;
+      setSendingKeys(new Set(keys));
+      const mustStart = !(runRef.current?.has_manager ?? false);
+      setStartingManager(mustStart);
+      if (mustStart) showToast("Manager not running — starting it before sending…");
+      try {
+        const res = await sendReviewComments(runId, toSendInputs(targets));
+        persistDrafts(removeDrafts(source, keys));
+        setEditingKey((k) => (k && keys.includes(k) ? null : k));
+        try {
+          const r = await fetchRun(runId);
+          runRef.current = r;
+          setRun(r);
+        } catch {
+          // The WebSocket refresh lands anyway.
+        }
+        showToast(
+          `${plural(res.sent.length, "comment")} sent as one message${res.manager_started ? " — manager started" : ""}. Open the Manager tab to see it; replies show up inline.`,
+        );
+      } catch (e: unknown) {
+        // Nothing is lost: the drafts stay drafts, the operator retries.
+        showToast(`Send failed — ${e instanceof Error ? e.message : String(e)}. Your drafts are kept.`, true);
+      } finally {
+        setSendingKeys(new Set());
+        setStartingManager(false);
+      }
+    },
+    [drafts, runId, sendDisabledReason, showToast, persistDrafts],
+  );
+
+  const commentsApi = useMemo<ReviewCommentsApi>(
+    () => ({
+      editingKey,
+      sendingKeys,
+      startingManager,
+      pairLabel,
+      sendDisabledReason,
+      saveNew: (anchor, text) => {
+        persistDrafts(addDraft(drafts, anchor, pair, text));
+        showToast("Draft saved — kept in this browser until you send it.");
+      },
+      sendNew: (anchor, text) => {
+        const next = addDraft(drafts, anchor, pair, text);
+        persistDrafts(next);
+        const created = next[next.length - 1];
+        void send([created.key], next);
+      },
+      editDraft: (key) => setEditingKey(key),
+      updateDraft: (key, text) => {
+        persistDrafts(updateDraft(drafts, key, text));
+        setEditingKey(null);
+      },
+      cancelEdit: () => setEditingKey(null),
+      deleteDraft: (key) => {
+        persistDrafts(removeDrafts(drafts, [key]));
+        setEditingKey((k) => (k === key ? null : k));
+        showToast("Draft deleted.");
+      },
+      sendDraft: (key) => void send([key]),
+      sentLineClicked: () => showToast("This line already has a sent comment. Replies arrive with the next ticket.", true),
+    }),
+    [editingKey, sendingKeys, startingManager, pairLabel, sendDisabledReason, drafts, pair, persistDrafts, showToast, send],
+  );
+
   // --- Keyboard ---------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -298,6 +497,12 @@ export default function ReviewPage({ runId }: Props) {
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       switch (e.key) {
+        case "c":
+          jumpComment(1);
+          break;
+        case "C":
+          jumpComment(-1);
+          break;
         case "j":
           goFile(Math.min(files.length - 1, currentIdx + 1));
           break;
@@ -327,7 +532,7 @@ export default function ReviewPage({ runId }: Props) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [files.length, currentIdx, view, listOpen, goFile, goHunk]);
+  }, [files.length, currentIdx, view, listOpen, goFile, goHunk, jumpComment]);
 
   // --- Exit -------------------------------------------------------------------
   const goBack = () => {
@@ -479,16 +684,44 @@ export default function ReviewPage({ runId }: Props) {
         >
           <ListMinus size={11} /> Collapse all
         </button>
-        {/* Reserved for #750: comments and their send gesture. Visible, sober, disabled. */}
-        <span
-          className="flex items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 opacity-50"
-          title="Comments arrive in the next ticket (#750)."
-          aria-disabled
-          data-testid="review-send-placeholder"
-          style={{ fontSize: "10.5px" }}
-        >
-          <MessageSquare size={11} /> 0 · Send to manager
-        </span>
+        {/* #750: pending drafts → the send-all gesture (also in the footer bar); otherwise a counter + navigator. */}
+        {pairDrafts.length > 0 ? (
+          <>
+            <button
+              type="button"
+              onClick={() => void send(pairDrafts.map((d) => d.key))}
+              disabled={!!sendDisabledReason || sendingKeys.size > 0}
+              title={sendDisabledReason ?? "Send every draft to the manager as one message"}
+              data-testid="review-send-pill"
+              className="flex cursor-pointer items-center gap-1 rounded border border-acc-border bg-acc-bg px-2 py-0.5 text-acc hover:bg-acc/20 disabled:cursor-not-allowed disabled:opacity-45"
+              style={{ fontSize: "10.5px" }}
+            >
+              ↗ Send {plural(pairDrafts.length, "draft")} to manager
+            </button>
+            {sentCount > 0 && (
+              <span
+                className="flex items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-st-running"
+                title={`${sentCount} sent, awaiting reply`}
+                data-testid="review-sent-pill"
+                style={{ fontSize: "10.5px" }}
+              >
+                ↗ {sentCount} sent
+              </span>
+            )}
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => jumpComment(1)}
+            disabled={entries.length === 0}
+            title="Jump to the next comment  ( c / C )"
+            data-testid="review-comments-pill"
+            className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
+            style={{ fontSize: "10.5px" }}
+          >
+            <MessageSquare size={11} /> {sentCount > 0 ? `${sentCount} sent` : "0 comments"}
+          </button>
+        )}
         <a
           href={reviewUrl(runId, pair)}
           target="_blank"
@@ -512,6 +745,15 @@ export default function ReviewPage({ runId }: Props) {
             currentIndex={currentIdx}
             onSelect={goFile}
             onClose={toggleList}
+            counts={counts}
+            comments={{ current: entries, other: otherEntries.map(({ entry, pair: p }) => ({ entry, pair: p })) }}
+            onJumpEntry={(e) => jumpTo(e.anchor)}
+            onJumpOther={(e) => {
+              const o = otherEntries.find((x) => x.entry === e);
+              if (!o) return;
+              setPair(o.refPair);
+              window.setTimeout(() => jumpTo(e.anchor), 400);
+            }}
           />
         ) : (
           <div />
@@ -567,6 +809,16 @@ export default function ReviewPage({ runId }: Props) {
               >
                 Switch to its after ref
               </button>
+            </div>
+          )}
+
+          {sendDisabledReason && !isArchived && (
+            <div
+              className="mx-3 mt-2.5 flex items-center gap-2 rounded-md border border-st-await/35 bg-st-await-bg px-2.5 py-1.5 text-fg-2"
+              style={{ fontSize: "11px" }}
+              data-testid="review-branch-gone"
+            >
+              ⚠ <span>{sendDisabledReason}</span>
             </div>
           )}
 
@@ -667,14 +919,41 @@ export default function ReviewPage({ runId }: Props) {
                     collapsed={collapsedSet.has(p)}
                     onToggle={() => toggleFile(p)}
                     registerEl={registerEl}
+                    entries={entriesByPath.get(p)}
+                    comments={commentsApi}
                   />
                 );
               })}
+              <ReviewSendBar
+                drafts={pairDrafts}
+                sentCount={sentCount}
+                sending={sendingKeys.size > 0}
+                managerRunning={run?.has_manager ?? false}
+                sendDisabledReason={sendDisabledReason}
+                onJump={(d) => jumpTo(d)}
+                onSendAll={() => void send(pairDrafts.map((d) => d.key))}
+              />
               <div className="h-[40vh]" />
             </>
           )}
         </div>
       </div>
+
+      {toast && (
+        <div
+          role="status"
+          data-testid="review-toast"
+          data-error={toast.error ? "true" : undefined}
+          className={`fixed right-3.5 z-[60] max-w-[420px] rounded-md border border-line-strong bg-bg-3 px-2.5 py-[7px] text-fg-2 shadow-[0_8px_30px_rgba(0,0,0,.5)] ${
+            pairDrafts.length > 0 ? "bottom-[52px]" : "bottom-3.5"
+          } ${
+            toast.error ? "border-l-[3px] border-l-st-failed" : "border-l-[3px] border-l-acc"
+          }`}
+          style={{ fontSize: "11px" }}
+        >
+          {toast.text}
+        </div>
+      )}
     </div>
   );
 }
