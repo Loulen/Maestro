@@ -2352,7 +2352,12 @@ mod tests {
         let node = claude_node_contribution(
             "n",
             Some(5.0),
-            vec![model_slice("claude-opus-4-8", true, Some("high"), Some(5.0))],
+            vec![model_slice(
+                "claude-opus-4-8",
+                true,
+                Some("high"),
+                Some(5.0),
+            )],
         );
         let infra = crate::run_cost::CostContribution {
             harness: "claude".to_string(),
@@ -2366,7 +2371,12 @@ mod tests {
             partial: false,
             unpriced_models: Vec::new(),
             unavailable_reasons: Vec::new(),
-            model_slices: vec![model_slice("claude-opus-4-8", true, Some("high"), Some(2.0))],
+            model_slices: vec![model_slice(
+                "claude-opus-4-8",
+                true,
+                Some("high"),
+                Some(2.0),
+            )],
         };
         let unassigned = crate::run_cost::CostContribution {
             usd: Some(1.0),
@@ -2392,7 +2402,11 @@ mod tests {
             .collect();
         assert_eq!(
             rows,
-            vec![("n", Some(5.0)), ("p:infrastructure", Some(2.0)), ("p:unassigned", Some(1.0))],
+            vec![
+                ("n", Some(5.0)),
+                ("p:infrastructure", Some(2.0)),
+                ("p:unassigned", Some(1.0))
+            ],
             "infrastructure/unassigned stay visible as node rows"
         );
 
