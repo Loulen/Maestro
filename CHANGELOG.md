@@ -22,6 +22,13 @@ il vit jusqu'au démontage et va dans l'`audit_log`. Fichier manquant sous `/pag
 (jamais le shell SPA) ; chemins canonisés et confinés au répertoire monté ; `.pdo/artifacts/` non
 montable. Le stockage vit dans un nouveau fichier `page_mount.rs` du crate daemon (module autonome :
 table + requêtes), d'où le ratchet de layout.
+## 1.73.2
+
+**Le bandeau de démarrage du daemon annonce une URL navigable** (#541). `pdo daemon` écoute toujours
+sur `0.0.0.0:<port>` (#260), mais un navigateur ouvert sur `http://0.0.0.0:<port>` envoie une
+`Origin` que le garde WebSocket (#564) refuse : UI à moitié chargée, pied de page « reconnecting… ».
+La ligne de log garde l'adresse de bind pour l'opérateur et ajoute `— open http://localhost:<port>`
+(bind non spécifié `0.0.0.0`/`::` → `localhost` ; bind concret annoncé tel quel).
 
 ## 1.73.1
 
