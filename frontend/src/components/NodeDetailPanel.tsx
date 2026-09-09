@@ -8,6 +8,7 @@ import {
   RotateCcw,
   Play,
   Maximize2,
+  GitCompareArrows,
 } from "lucide-react";
 import type {
   IterationInfo,
@@ -36,6 +37,7 @@ import type { ArtifactSource } from "./MarkdownArtifactModal";
 import ImageLightbox from "./ImageLightbox";
 import TmuxTerminal from "./TmuxTerminal";
 import { formatCostAmount, nodeCostTitle } from "../lib/costLabel";
+import { nodeReviewTarget, reviewUrl } from "../lib/runRefs";
 import ProvisioningRulesEditor from "./ProvisioningRulesEditor";
 import {
   EMPTY_PROVISIONING_RULES,
@@ -259,6 +261,8 @@ export default function NodeDetailPanel({
   const childrenData = useRunChildren(runId, isOrchestratorNode);
   const nodeChildren = childrenOfNode(childrenData, runId, node.node_id);
   const childCounts = countChildren(nodeChildren);
+  // #749: what the Review shortcut opens, if anything.
+  const reviewTarget = nodeReviewTarget(node);
   // Seed at mount only (no reactive effect on status): the issue trigger is
   // "clicking the node" (= selection / mount), not a live transition. A node
   // is `key`-ed by node_id at both mount sites, so selecting another terminated
@@ -760,6 +764,23 @@ export default function NodeDetailPanel({
           >
             {/* Actions */}
             <div className="flex flex-col gap-1.5 px-3 py-2">
+              {/* #749: the shortcut to the Review page with this node's delivery
+                  preselected (`before → after`, or `tip → live` while it runs
+                  isolated). There is no "node diff" surface (ADR-0067 §1): the
+                  panel only preselects a pair. Absent for a node that has
+                  nothing to review yet (pending, skipped, failed before
+                  delivering). */}
+              {reviewTarget && !isArchived && (
+                <a
+                  href={reviewUrl(runId, reviewTarget.pair)}
+                  data-testid="node-review-shortcut"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-md border border-line-strong bg-bg-3 px-3 py-1.5 text-fg-2 transition-colors hover:border-fg-4 hover:text-fg"
+                  style={{ fontSize: "11.5px", fontWeight: 500 }}
+                >
+                  <GitCompareArrows size={12} />
+                  {reviewTarget.label}
+                </a>
+              )}
               {/* `interrupted` is included (#598 / ADR-0049): an interrupted
                   interactive node parks the run `awaiting_user`, so the "take the
                   artifacts as they are" escape must stay reachable — the daemon

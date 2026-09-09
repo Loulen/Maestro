@@ -64,6 +64,7 @@ pub(crate) mod retry_verdict;
 mod run_advance;
 mod run_command;
 mod run_cost;
+mod run_refs;
 mod sandbox_container;
 mod sandbox_image;
 mod sandbox_profile;
@@ -4470,6 +4471,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/diff", get(run_diff))
         .route("/runs/{run_id}/diff/structured", get(run_diff_structured))
         .route("/runs/{run_id}/file", get(run_file_at_ref))
+        .route("/runs/{run_id}/refs", get(run_refs))
         .route("/runs/{run_id}/nodes/{node_id}/diff", get(node_diff))
         .route("/runs/{run_id}/artifact", get(artifact))
         .route("/runs/{run_id}/pipeline", get(get_run_pipeline))
@@ -13605,23 +13607,25 @@ async fn run_diff_structured(
     AxumPath(run_id): AxumPath<String>,
     Query(q): Query<StructuredDiffQuery>,
 ) -> Response {
-    let (_, run_state) = match load_projected(&state, &run_id).await {
+    let (events, run_state) = match load_projected(&state, &run_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
-    for r in [&q.from, &q.to].into_iter().flatten() {
-        if !structured_diff::is_safe_ref(r) {
-            return (StatusCode::BAD_REQUEST, format!("invalid ref: {r:?}")).into_response();
-        }
-    }
-    let explicit = q.from.is_some() || q.to.is_some();
-    let from = q
-        .from
-        .clone()
-        .unwrap_or_else(|| run_diff_base(&run_state).to_string());
-    let to = q.to.clone().unwrap_or_else(|| format!("pdo/run-{run_id}"));
+    // #749: a side is a stable Run ref id (`fork`, `tip`, `node:<id>:<iter>:before`,
+    // `live:<id>`) resolved against the log, or — compatibility — a raw git ref.
+    let from = match resolve_ref_param(&run_id, &run_state, &events, q.from.as_deref(), run_refs::FORK_ID) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let to = match resolve_ref_param(&run_id, &run_state, &events, q.to.as_deref(), run_refs::TIP_ID) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    // Three-dot only for the fork → tip default (the LOC bounds); any other pair
+    // is two arbitrary Run refs compared two-dot.
+    let three_dot = run_refs::is_default_pair(q.from.as_deref(), q.to.as_deref());
     let repo = effective_repo_root(&state, &run_state);
-    match structured_diff::compute(&repo, &from, &to, !explicit) {
+    match structured_diff::compute(&repo, &from, &to, three_dot) {
         Ok(d) => Json(d).into_response(),
         Err(e) if e.is_unknown_revision() => {
             (StatusCode::NOT_FOUND, "run branch not found").into_response()
@@ -13647,7 +13651,7 @@ async fn run_file_at_ref(
     AxumPath(run_id): AxumPath<String>,
     Query(q): Query<FileAtRefQuery>,
 ) -> Response {
-    let (_, run_state) = match load_projected(&state, &run_id).await {
+    let (events, run_state) = match load_projected(&state, &run_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
@@ -13658,10 +13662,11 @@ async fn run_file_at_ref(
         )
             .into_response();
     }
-    let git_ref = q.git_ref.unwrap_or_else(|| format!("pdo/run-{run_id}"));
-    if !structured_diff::is_safe_ref(&git_ref) {
-        return (StatusCode::BAD_REQUEST, format!("invalid ref: {git_ref:?}")).into_response();
-    }
+    // #749: stable Run ref ids resolve like on the structured diff endpoint.
+    let git_ref = match resolve_ref_param(&run_id, &run_state, &events, q.git_ref.as_deref(), run_refs::TIP_ID) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
     let repo = effective_repo_root(&state, &run_state);
     match structured_diff::file_at_ref(&repo, &git_ref, &q.path) {
         Ok(bytes) => match String::from_utf8(bytes) {
@@ -13690,6 +13695,55 @@ async fn run_file_at_ref(
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Resolve one `from`/`to`/`ref` query value (#749): absent ⇒ `default_id`; a
+/// stable Run ref id ⇒ its git ref (404 when the Run knows no such ref); anything
+/// else ⇒ a raw git ref, kept for compatibility once it passes the injection guard.
+fn resolve_ref_param(
+    run_id: &str,
+    run_state: &event_log::RunState,
+    events: &[event_log::Event],
+    value: Option<&str>,
+    default_id: &str,
+) -> Result<String, Box<Response>> {
+    let value = value.unwrap_or(default_id);
+    match run_refs::resolve_id(run_id, run_state, events, value) {
+        run_refs::Resolved::Git(r) => Ok(r),
+        run_refs::Resolved::Unknown => Err(Box::new(
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("unknown run ref: {value}") })),
+            )
+                .into_response(),
+        )),
+        run_refs::Resolved::NotAnId => {
+            if !structured_diff::is_safe_ref(value) {
+                return Err(Box::new(
+                    (StatusCode::BAD_REQUEST, format!("invalid ref: {value:?}")).into_response(),
+                ));
+            }
+            Ok(value.to_string())
+        }
+    }
+}
+
+/// `GET /runs/<id>/refs` (#749, ADR-0067 §1): the Run's refs — fork point, Run
+/// tip, every node delivery's `before`/`after` from the event log (labelled by
+/// node name and `iter`), and the live sub-worktree branch of a running isolated
+/// node — plus the ready-made delivery pairs. Labels are built here so the UI
+/// and the CLI agree. SHAs are resolved in the Run's effective repository.
+async fn run_refs(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let (events, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    let repo = effective_repo_root(&state, &run_state);
+    let sha_of = |r: &str| structured_diff::rev_parse(&repo, r);
+    Json(run_refs::collect(&run_id, &run_state, &events, &sha_of)).into_response()
 }
 
 async fn node_diff(
@@ -19380,11 +19434,7 @@ fn parse_numstat(stdout: &str) -> event_log::LocStat {
 /// wandering-HEAD defect. NB: this is the Run's fork point, NOT the per-node
 /// `NodeStarted.base_sha` (ADR-0036).
 fn run_diff_base(run_state: &event_log::RunState) -> &str {
-    run_state
-        .fork_sha
-        .as_deref()
-        .or(run_state.source_branch.as_deref())
-        .unwrap_or("HEAD")
+    run_refs::fork_base(run_state)
 }
 
 /// Lines changed for a Run, with `.pdo/` excluded. `None` when the diff is
@@ -35276,6 +35326,188 @@ edges: []
         assert_eq!(bin["binary"], serde_json::json!(true));
         assert_eq!(bin["status"], serde_json::json!("added"));
         assert_eq!(bin["hunks"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_refs_lists_deliveries_and_stable_ids_resolve_on_diff_and_file() {
+        // #749 AC1/AC5: the refs endpoint reads deliveries from the event log,
+        // labels them by node and iter, and the stable ids resolve on the
+        // structured diff and file-at-ref endpoints (URLs never carry SHAs).
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path();
+        let run_id = "refs-run";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        let wt_dir = seed_run_in_other_repo(&state, target, run_id).await;
+        let fork = git_in(target, &["rev-parse", "HEAD"]);
+        let c0 = git_in(&wt_dir, &["rev-parse", "HEAD"]);
+        std::fs::write(wt_dir.join("one.rs"), "1\n").unwrap();
+        git_in(&wt_dir, &["add", "-A"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "one"]);
+        let c1 = git_in(&wt_dir, &["rev-parse", "HEAD"]);
+        std::fs::write(wt_dir.join("two.rs"), "2\n").unwrap();
+        git_in(&wt_dir, &["add", "-A"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "two"]);
+        let c2 = git_in(&wt_dir, &["rev-parse", "HEAD"]);
+        // impl-1 delivered c0 → c1 at iter 1; a second node delivered c1 → c2.
+        for (node, before, after) in [("impl-1", &c0, &c1), ("worker-2", &c1, &c2)] {
+            append_event(
+                &state,
+                &event_log::Event {
+                    id: None,
+                    run_id: run_id.into(),
+                    ts: event_log::now_iso(),
+                    kind: event_log::EventKind::NodeDelivered,
+                    node_id: Some(node.into()),
+                    iter: Some(1),
+                    payload: Some(serde_json::json!({ "before": before, "after": after })),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // impl-1 is still running and isolated: give it a live sub-worktree branch.
+        let live_branch = worktree_ops::sub_worktree_branch(run_id, "impl-1", 1);
+        git_in(target, &["branch", &live_branch, &c2]);
+
+        let app = build_router(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/refs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        let ids: Vec<&str> = json["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "fork",
+                "node:impl-1:1:before",
+                "node:impl-1:1:after",
+                "node:worker-2:1:before",
+                "node:worker-2:1:after",
+                "live:impl-1",
+                "tip",
+            ]
+        );
+        let refs = json["refs"].as_array().unwrap();
+        assert_eq!(refs[0]["sha"], serde_json::json!(fork));
+        assert_eq!(refs[2]["sha"], serde_json::json!(c1));
+        assert_eq!(refs[2]["label"], serde_json::json!("impl-1 · iter 1 · after"));
+        assert_eq!(refs[5]["sha"], serde_json::json!(c2));
+        assert_eq!(refs[6]["sha"], serde_json::json!(c2));
+        assert_eq!(json["default_from"], serde_json::json!("fork"));
+        assert_eq!(json["default_to"], serde_json::json!("tip"));
+        let deliveries = json["deliveries"].as_array().unwrap();
+        assert_eq!(deliveries.len(), 3);
+        assert_eq!(deliveries[0]["status"], serde_json::json!("delivered"));
+        assert_eq!(deliveries[2]["status"], serde_json::json!("running"));
+        assert_eq!(deliveries[2]["live"], serde_json::json!("live:impl-1"));
+
+        // The delivery pair, by id: only impl-1's file, two-dot.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/runs/{run_id}/diff/structured?from=node:impl-1:1:before&to=node:impl-1:1:after"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["three_dot"], serde_json::json!(false));
+        assert_eq!(json["from_sha"], serde_json::json!(c0));
+        assert_eq!(json["to_sha"], serde_json::json!(c1));
+        let paths: Vec<&str> = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["new_path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["one.rs"]);
+
+        // `fork` → `tip` spelled out is the three-dot default.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured?from=fork&to=tip"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["three_dot"], serde_json::json!(true));
+        assert_eq!(json["files_changed"], serde_json::json!(2));
+
+        // tip → live branch resolves too.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured?from=tip&to=live:impl-1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // An id the Run does not know is a 404, never handed to git.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured?from=node:impl-1:2:before"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(body_string(resp).await.contains("unknown run ref"));
+
+        // The file endpoint resolves ids as well.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/file?path=one.rs&ref=node:impl-1:1:after"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_string(resp).await, "1\n");
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/file?path=one.rs&ref=node:impl-1:1:before"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "one.rs did not exist before");
     }
 
     #[tokio::test]

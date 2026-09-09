@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { fetchRunStructuredDiff } from "../api";
 import { wordDiff } from "../lib/wordDiff";
+import { reviewUrl } from "../lib/runRefs";
 import {
   LARGE_DIFF_FILES,
   TRUNCATE_LINES,
@@ -260,18 +261,17 @@ export default function DiffTab({ run, collapsed, onCollapsedChange }: Props) {
               Files
             </button>
           )}
-          {/* The Review page is the next ticket: visible, sober, disabled. */}
-          <button
-            disabled
-            aria-disabled
-            title="Review page coming"
-            className="flex items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 opacity-50"
+          {/* #749: the way to the Review page (fork → tip, same tab). */}
+          <a
+            href={reviewUrl(run.run_id)}
+            title="Open the Review page (fork → tip)"
+            className="flex items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 transition-colors hover:text-fg-2"
             style={{ fontSize: "10.5px" }}
             data-testid="diff-review-button"
           >
             <SquareArrowOutUpRight size={11} />
-            Review
-          </button>
+            Expand and comment
+          </a>
         </span>
       </div>
 
@@ -363,6 +363,7 @@ export default function DiffTab({ run, collapsed, onCollapsedChange }: Props) {
             {!isCollapsed && !f.binary && (
               <FileBody
                 file={f}
+                reviewHref={reviewUrl(run.run_id)}
                 full={fullFiles.has(key)}
                 onShowAll={() => setFullFiles((prev) => new Set(prev).add(key))}
               />
@@ -580,10 +581,13 @@ function buildRows(file: DiffFile): Row[] {
 
 function FileBody({
   file,
+  reviewHref,
   full,
   onShowAll,
 }: {
   file: DiffFile;
+  /** The Review page, where context expansion lives (#749). */
+  reviewHref: string;
   full: boolean;
   onShowAll: () => void;
 }) {
@@ -628,10 +632,15 @@ function FileBody({
                           {r.text}
                           {r.header && <span className="text-fg-4"> {r.header}</span>}
                         </span>
-                        {/* Ghost: context expansion lands with the Review page. */}
-                        <span className="ml-auto pl-4 text-fg-5" aria-hidden>
+                        {/* Context expansion lives on the Review page (#749). */}
+                        <a
+                          href={reviewHref}
+                          className="ml-auto pl-4 text-fg-5 hover:text-fg-3"
+                          title="Expand context on the Review page"
+                          tabIndex={-1}
+                        >
                           ↕ expand
-                        </span>
+                        </a>
                       </span>
                     </td>
                   </tr>

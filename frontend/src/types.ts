@@ -1967,6 +1967,53 @@ export interface DiffFile {
   hunks: DiffHunk[];
 }
 
+// ---------------------------------------------------------------------------
+// Refs of the Run (#749, ADR-0067 §1) — `GET /runs/<id>/refs`. Stable ids
+// (`fork`, `tip`, `node:<id>:<iter>:before|after`, `live:<id>`) are what the
+// Review page's URL carries; labels are built by the daemon.
+// ---------------------------------------------------------------------------
+
+export type RunRefKind = "fork" | "tip" | "before" | "after" | "live";
+
+export interface RunRef {
+  id: string;
+  kind: RunRefKind;
+  /** e.g. `implement · iter 1 · after`. */
+  label: string;
+  /** The git ref the id resolves to (SHA, branch, fork SHA). */
+  git_ref: string;
+  /** Resolved commit SHA; null when it no longer resolves (archived, merged back). */
+  sha: string | null;
+  node_id?: string;
+  node_name?: string;
+  iter?: number;
+}
+
+export type RunDeliveryStatus = "delivered" | "running";
+
+/** One node delivery (or one running node's live branch) as a one-click pair. */
+export interface RunDelivery {
+  node_id: string;
+  node_name: string;
+  iter: number;
+  status: RunDeliveryStatus;
+  /** Ref id of the pair's source. */
+  before: string;
+  /** Ref id of the pair's destination when delivered. */
+  after?: string;
+  /** Ref id of the live sub-worktree branch when running. */
+  live?: string;
+  delivered_at?: string;
+}
+
+export interface RunRefs {
+  /** Order: fork, deliveries in delivery order, live branches, tip. */
+  refs: RunRef[];
+  deliveries: RunDelivery[];
+  default_from: string;
+  default_to: string;
+}
+
 export interface StructuredDiff {
   from_ref: string;
   to_ref: string;
