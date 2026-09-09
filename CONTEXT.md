@@ -464,6 +464,8 @@ Surface **Stats** superposée en pleine fenêtre, avec navigation latérale et p
 
 **Réponse de review** *(terme)* : réponse d'un agent — manager **ou** nœud du Run, auteur enregistré — à un commentaire, via `pdo review reply`, lue et affichée inline en temps réel ; l'onglet Diff porte une pastille des réponses non lues. Une réponse peut porter une **résolution proposée** : par défaut **l'humain résout** et l'agent propose (« Resolution proposed », boutons Resolve / Reopen) ; le réglage d'instance **`review_agent_can_resolve`** (défaut `false`, résolu stocké → env → défaut comme `default_auto_name`) autorise l'agent à résoudre directement, l'humain gardant le `reopen`. _Éviter_ : « l'agent ferme le commentaire » (il ne le peut que sous réglage explicite).
 
+**Accès rapide Review** *(terme)* : bouton de la toolbar du canvas qui ouvre la page de Review du Run et porte une pastille du nombre de commentaires **en attente** (`sent` non résolus, réponses non lues incluses) — pour que la relecture se voie depuis le canvas. Il prend la place du bouton « Run repositories », et la vue **Repositories** devient un onglet du panneau info du Run (`Info | Diff | Repositories | Manager | YAML`), comme le demandait déjà #566. _Éviter_ : « sidebar Repositories » (elle n'existe plus comme surface propre).
+
 ### Contrôles de Run (niveau Run)
 
 Trois commandes agissent sur le **Run entier** — `pause_run`, `resume_run`, `retry_all` — à ne pas confondre avec le niveau **nœud** (boutons Start/Stop/Retry du canvas, et commandes du manager).
