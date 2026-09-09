@@ -142,6 +142,9 @@ mod retry_loop_member;
 #[path = "run_diff_range.rs"]
 mod run_diff_range;
 
+#[path = "review_comments.rs"]
+mod review_comments;
+
 #[path = "run_naming.rs"]
 mod run_naming;
 

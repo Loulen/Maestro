@@ -1107,6 +1107,8 @@ export interface RunState {
    * derived flag). Absent on older payloads, read as `false`.
    */
   has_manager?: boolean;
+  /** #750: sent review comments, in send order. Absent when nobody reviewed. */
+  review_comments?: ReviewComment[];
   /**
    * Lines changed for the run (`git diff --numstat` of the run branch, `.pdo/`
    * excluded), or null/absent once the branch is gone (archived/cleaned) — the
@@ -2012,6 +2014,62 @@ export interface RunRefs {
   deliveries: RunDelivery[];
   default_from: string;
   default_to: string;
+}
+
+// ---------------------------------------------------------------------------
+// Review comments (#750, ADR-0067 §2) — `sent` comments are Run events, folded
+// into `RunState.review_comments`; drafts never leave the browser (see
+// `lib/reviewComments.ts`).
+// ---------------------------------------------------------------------------
+
+/** `old` = the source ref's line (left), `new` = the destination ref's (right). */
+export type ReviewSide = "old" | "new";
+export type ReviewCommentStatus = "sent" | "resolved";
+
+/** An agent's reply (#751 emits them; the shape is fixed here). */
+export interface ReviewReply {
+  author: string;
+  text: string;
+  at: string;
+  proposes_resolution?: boolean;
+}
+
+export interface ReviewComment {
+  /** `rc-001`, … — what the manager echoes in `pdo review reply`. */
+  id: string;
+  path: string;
+  side: ReviewSide;
+  line: number;
+  /** Stable Run ref ids of the pair the comment was written against. */
+  from_ref: string;
+  to_ref: string;
+  from_sha?: string;
+  to_sha?: string;
+  text: string;
+  /** Hunk excerpt at send time, the anchored line marked `>`. */
+  excerpt?: string;
+  author: string;
+  sent_at: string;
+  batch_id?: string;
+  status: ReviewCommentStatus;
+  replies?: ReviewReply[];
+}
+
+/** One draft as posted to `POST /runs/<id>/review/comments/send`. */
+export interface SendReviewCommentInput {
+  path: string;
+  side: ReviewSide;
+  line: number;
+  from: string;
+  to: string;
+  text: string;
+}
+
+export interface SendReviewCommentsResponse {
+  sent: ReviewComment[];
+  batch_id: string;
+  /** True when this send started the manager on demand. */
+  manager_started: boolean;
 }
 
 export interface StructuredDiff {

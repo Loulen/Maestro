@@ -2,12 +2,20 @@ import { PanelLeftClose } from "lucide-react";
 import type { RefObject } from "react";
 import type { DiffFile } from "../../types";
 import { baseName, filePath, groupByDir, miniBar, statusLetter } from "../../lib/runRefs";
+import type { ReviewEntry } from "../../lib/reviewComments";
+import { anchorLabel, plural } from "../../lib/reviewComments";
+import { Badge } from "./CommentCard";
 
 /**
  * The Review page's left column (#749, design option "flat list grouped by
  * directory"): filter box, directory headers, one row per file with its status
  * letter, `+a −d` and a 5-block mini bar. The current file follows the scroll;
  * clicking a row scrolls to it.
+ *
+ * #750: each row carries its comment badges (drafts amber, sent blue), and a
+ * **Comments** section lists every comment of the Run — badge, anchor, first
+ * words — click to jump. Comments written against another ref pair are greyed
+ * with their pair; clicking one restores that pair first.
  */
 
 interface Props {
@@ -18,6 +26,12 @@ interface Props {
   currentIndex: number;
   onSelect: (index: number) => void;
   onClose: () => void;
+  /** #750: per-path comment counts for the row badges. */
+  counts?: Map<string, { drafts: number; sent: number }>;
+  /** #750: the Comments section — current pair first, other pairs greyed. */
+  comments?: { current: ReviewEntry[]; other: { entry: ReviewEntry; pair: string }[] };
+  onJumpEntry?: (entry: ReviewEntry) => void;
+  onJumpOther?: (entry: ReviewEntry) => void;
 }
 
 const LETTER_CLASS: Record<"A" | "M" | "D" | "R", string> = {
@@ -35,6 +49,10 @@ export default function ReviewFileList({
   currentIndex,
   onSelect,
   onClose,
+  counts,
+  comments,
+  onJumpEntry,
+  onJumpOther,
 }: Props) {
   const q = filter.trim().toLowerCase();
   const shown = files
@@ -118,6 +136,8 @@ export default function ReviewFileList({
                     {baseName(p)}
                   </span>
                   <span className="flex items-center gap-1 font-mono" style={{ fontSize: "10px" }}>
+                    {(counts?.get(p)?.drafts ?? 0) > 0 && <Badge kind="draft">{counts!.get(p)!.drafts}</Badge>}
+                    {(counts?.get(p)?.sent ?? 0) > 0 && <Badge kind="sent">{counts!.get(p)!.sent}</Badge>}
                     {file.binary ? (
                       <span className="text-fg-4">bin</span>
                     ) : pureRename ? (
@@ -144,6 +164,37 @@ export default function ReviewFileList({
             })}
           </div>
         ))}
+
+        {comments && (
+          <div className="mt-3" data-testid="review-comments-section">
+            <div
+              className="flex items-center justify-between px-1.5 pb-1 pt-1.5 uppercase text-fg-4"
+              style={{ fontSize: "10px", letterSpacing: ".04em" }}
+            >
+              <span>Comments</span>
+              {comments.current.length + comments.other.length > 0 && (
+                <span className="normal-case tracking-normal" data-testid="review-comments-count">
+                  {plural(comments.current.filter((e) => e.kind === "draft").length, "draft")} ·{" "}
+                  {comments.current.filter((e) => e.kind === "sent").length} sent
+                </span>
+              )}
+            </div>
+            {comments.current.length + comments.other.length === 0 ? (
+              <div className="px-1.5 py-1 text-fg-4" style={{ fontSize: "10px" }}>
+                None yet. Hover a line number and press +.
+              </div>
+            ) : (
+              <>
+                {comments.current.map((e) => (
+                  <CommentRow key={entryKey(e)} entry={e} onClick={() => onJumpEntry?.(e)} />
+                ))}
+                {comments.other.map(({ entry, pair }) => (
+                  <CommentRow key={entryKey(entry)} entry={entry} pair={pair} onClick={() => onJumpOther?.(entry)} />
+                ))}
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <div
@@ -162,6 +213,9 @@ export default function ReviewFileList({
         <span>
           <Kbd>[</Kbd> list
         </span>
+        <span>
+          <Kbd>c</Kbd>/<Kbd>C</Kbd> comment
+        </span>
       </div>
     </aside>
   );
@@ -175,5 +229,34 @@ function Kbd({ children }: { children: string }) {
     >
       {children}
     </kbd>
+  );
+}
+
+function entryKey(e: ReviewEntry): string {
+  return e.kind === "draft" ? `d:${e.draft.key}` : `s:${e.comment.id}`;
+}
+
+function CommentRow({ entry, pair, onClick }: { entry: ReviewEntry; pair?: string; onClick: () => void }) {
+  const text = entry.kind === "draft" ? entry.draft.text : entry.comment.text;
+  const first = text.split("\n")[0].slice(0, 28);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={pair ? `${text.slice(0, 120)}\n(at ${pair})` : text.slice(0, 120)}
+      data-testid="review-comment-row"
+      data-kind={entry.kind}
+      data-other-pair={pair ? "true" : undefined}
+      className={`grid w-full cursor-pointer grid-cols-[auto_auto_1fr] items-center gap-1.5 rounded px-1.5 py-[3px] text-left hover:bg-bg-3 ${
+        pair ? "opacity-55" : ""
+      }`}
+      style={{ fontSize: "10.5px" }}
+    >
+      <Badge kind={entry.kind}>{entry.kind === "draft" ? "✎" : "↗"}</Badge>
+      <span className="font-mono text-fg-3" style={{ fontSize: "10px" }}>
+        {anchorLabel(entry.anchor)}
+      </span>
+      <span className="truncate text-fg-4">{pair ? `at ${pair}` : first}</span>
+    </button>
   );
 }

@@ -61,6 +61,7 @@ pub(crate) mod recovery;
 pub(crate) mod repo_edit_refusal;
 pub(crate) mod restart_verdict;
 pub(crate) mod retry_verdict;
+mod review_comments;
 mod run_advance;
 mod run_command;
 mod run_cost;
@@ -4472,6 +4473,11 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/diff/structured", get(run_diff_structured))
         .route("/runs/{run_id}/file", get(run_file_at_ref))
         .route("/runs/{run_id}/refs", get(run_refs))
+        .route("/runs/{run_id}/review/comments", get(list_review_comments))
+        .route(
+            "/runs/{run_id}/review/comments/send",
+            post(send_review_comments),
+        )
         .route("/runs/{run_id}/nodes/{node_id}/diff", get(node_diff))
         .route("/runs/{run_id}/artifact", get(artifact))
         .route("/runs/{run_id}/pipeline", get(get_run_pipeline))
@@ -13613,11 +13619,23 @@ async fn run_diff_structured(
     };
     // #749: a side is a stable Run ref id (`fork`, `tip`, `node:<id>:<iter>:before`,
     // `live:<id>`) resolved against the log, or — compatibility — a raw git ref.
-    let from = match resolve_ref_param(&run_id, &run_state, &events, q.from.as_deref(), run_refs::FORK_ID) {
+    let from = match resolve_ref_param(
+        &run_id,
+        &run_state,
+        &events,
+        q.from.as_deref(),
+        run_refs::FORK_ID,
+    ) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
-    let to = match resolve_ref_param(&run_id, &run_state, &events, q.to.as_deref(), run_refs::TIP_ID) {
+    let to = match resolve_ref_param(
+        &run_id,
+        &run_state,
+        &events,
+        q.to.as_deref(),
+        run_refs::TIP_ID,
+    ) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
@@ -13663,7 +13681,13 @@ async fn run_file_at_ref(
             .into_response();
     }
     // #749: stable Run ref ids resolve like on the structured diff endpoint.
-    let git_ref = match resolve_ref_param(&run_id, &run_state, &events, q.git_ref.as_deref(), run_refs::TIP_ID) {
+    let git_ref = match resolve_ref_param(
+        &run_id,
+        &run_state,
+        &events,
+        q.git_ref.as_deref(),
+        run_refs::TIP_ID,
+    ) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
@@ -13744,6 +13768,245 @@ async fn run_refs(
     let repo = effective_repo_root(&state, &run_state);
     let sha_of = |r: &str| structured_diff::rev_parse(&repo, r);
     Json(run_refs::collect(&run_id, &run_state, &events, &sha_of)).into_response()
+}
+
+/// `GET /runs/<id>/review/comments` (#750): the Run's **sent** review comments as
+/// projected from the event log — the same list `GET /runs/<id>` carries under
+/// `review_comments`, exposed on its own for the CLI (#751) and the tests.
+async fn list_review_comments(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let (_, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    Json(serde_json::json!({ "comments": run_state.review_comments })).into_response()
+}
+
+/// One draft the browser hands over for sending (#750). `from`/`to` are stable
+/// Run ref ids (default `fork` → `tip`), never SHAs.
+#[derive(Deserialize)]
+struct SendReviewCommentInput {
+    path: String,
+    side: String,
+    line: i64,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct SendReviewCommentsRequest {
+    comments: Vec<SendReviewCommentInput>,
+}
+
+/// Context lines kept on each side of the anchored line in the excerpt.
+const REVIEW_EXCERPT_CONTEXT: usize = 2;
+/// How long a manager spawned by the send waits before the batch is pasted —
+/// the harness has to be reading its input, or the paste lands in a shell.
+const REVIEW_PASTE_DELAY_AFTER_SPAWN: Duration = Duration::from_secs(8);
+
+/// `POST /runs/<id>/review/comments/send` (#750, ADR-0067 §2–3; CONTEXT.md
+/// « Envoi au manager »): turn a batch of browser drafts into `sent` comments.
+///
+/// Order of operations, each step a reason the drafts **stay drafts**:
+/// 1. the Run branch must still exist — an archived Run, or a `pdo/run-<id>`
+///    branch that is gone, answers `409 run_branch_gone` with the reason the UI
+///    shows on its disabled buttons (nothing for the manager to act on);
+/// 2. every anchor is validated (safe path, `old|new`, line ≥ 1, non-empty
+///    text, known ref ids) — `400` names the offending index;
+/// 3. the Pipeline Manager is started **on demand** if it is not running
+///    (`ensure_run_manager`; its refusals pass through);
+/// 4. one `review_comment_sent` event per comment lands in the log (ids
+///    `rc-NNN` continue the Run's sequence; the batch shares a `batch_id`);
+/// 5. **one** message for the whole batch is pasted into the manager's tmux
+///    session, detached — after a short grace when this call spawned it.
+///
+/// The response carries the sent comments so the browser can drop its drafts
+/// without waiting for the WebSocket round-trip (which also arrives: every
+/// append broadcasts).
+async fn send_review_comments(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+    Json(req): Json<SendReviewCommentsRequest>,
+) -> Response {
+    let (events, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    if req.comments.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "no comments to send" })),
+        )
+            .into_response();
+    }
+
+    // 1. Branch gone ⇒ sending is disabled, with the reason.
+    let tip = run_refs::tip_branch(&run_id);
+    let repo = effective_repo_root(&state, &run_state);
+    let branch_gone = run_state.status == event_log::RunStatus::Archived
+        || structured_diff::rev_parse(&repo, &tip).is_none();
+    if branch_gone {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "run_branch_gone",
+                "recoverable": false,
+                "message": format!(
+                    "Run branch {tip} no longer exists — nothing for the manager to act on. Comments stay readable; sending is disabled."
+                ),
+            })),
+        )
+            .into_response();
+    }
+
+    // 2. Validate + resolve every anchor before touching anything.
+    let sha_of = |r: &str| structured_diff::rev_parse(&repo, r);
+    let refs = run_refs::collect(&run_id, &run_state, &events, &sha_of);
+    let label_of = |id: &str| -> String {
+        refs.refs
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let bad = |i: usize, why: &str| -> Response {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("comment #{}: {why}", i + 1) })),
+        )
+            .into_response()
+    };
+    let now = event_log::now_iso();
+    let batch_id = uuid::Uuid::new_v4().to_string();
+    let mut prepared: Vec<review_comments::ReviewComment> = Vec::with_capacity(req.comments.len());
+    for (i, c) in req.comments.iter().enumerate() {
+        if !structured_diff::is_safe_path(&c.path) {
+            return bad(i, &format!("invalid path {:?}", c.path));
+        }
+        let Some(side) = review_comments::ReviewSide::parse(&c.side) else {
+            return bad(i, &format!("side must be `old` or `new`, got {:?}", c.side));
+        };
+        if c.line < 1 {
+            return bad(i, "line must be ≥ 1");
+        }
+        if c.text.trim().is_empty() {
+            return bad(i, "empty text");
+        }
+        let from_id = c.from.as_deref().unwrap_or(run_refs::FORK_ID);
+        let to_id = c.to.as_deref().unwrap_or(run_refs::TIP_ID);
+        let resolve = |id: &str| -> Option<String> {
+            match run_refs::resolve_id(&run_id, &run_state, &events, id) {
+                run_refs::Resolved::Git(r) => Some(r),
+                _ => None,
+            }
+        };
+        let Some(from_git) = resolve(from_id) else {
+            return bad(i, &format!("unknown run ref {from_id:?}"));
+        };
+        let Some(to_git) = resolve(to_id) else {
+            return bad(i, &format!("unknown run ref {to_id:?}"));
+        };
+        // The excerpt reads the anchored side's file at its ref. Best-effort: a
+        // path that no longer resolves sends with an empty excerpt.
+        let anchored_ref = match side {
+            review_comments::ReviewSide::Old => &from_git,
+            review_comments::ReviewSide::New => &to_git,
+        };
+        let excerpt = structured_diff::file_at_ref(&repo, anchored_ref, &c.path)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|content| review_comments::excerpt(&content, c.line, REVIEW_EXCERPT_CONTEXT))
+            .unwrap_or_default();
+        prepared.push(review_comments::ReviewComment {
+            id: String::new(), // assigned below, once the manager is up
+            path: c.path.clone(),
+            side,
+            line: c.line,
+            from_ref: from_id.to_string(),
+            to_ref: to_id.to_string(),
+            from_sha: sha_of(&from_git),
+            to_sha: sha_of(&to_git),
+            text: c.text.trim_end().to_string(),
+            excerpt,
+            author: "user".to_string(),
+            sent_at: now.clone(),
+            batch_id: Some(batch_id.clone()),
+            status: review_comments::ReviewCommentStatus::Sent,
+            replies: Vec::new(),
+        });
+    }
+
+    // 3. Manager on demand — before any event, so a refusal leaves drafts intact.
+    let created = match ensure_run_manager(&state, &run_id, &run_state).await {
+        Ok(created) => created,
+        Err((status, body)) => return (status, Json(body)).into_response(),
+    };
+
+    // 4. Durable first: one event per comment, ids continuing the Run's sequence.
+    let base = run_state.review_comments.len();
+    for (i, c) in prepared.iter_mut().enumerate() {
+        c.id = review_comments::comment_id(base + i + 1);
+        let event = event_log::Event {
+            id: None,
+            run_id: run_id.clone(),
+            ts: now.clone(),
+            kind: event_log::EventKind::ReviewCommentSent,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::to_value(&*c).expect("ReviewComment serializes")),
+        };
+        if let Err(e) = append_event(&state, &event).await {
+            error!(
+                "run {run_id}: failed to append review_comment_sent {}: {e}",
+                c.id
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to record comment {} ({} of the batch recorded): {e}", c.id, i)
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // 5. One message for the batch, handed over off the request.
+    let (from_label, to_label) = {
+        let first = &prepared[0];
+        (label_of(&first.from_ref), label_of(&first.to_ref))
+    };
+    let message = review_comments::batch_message(&run_id, &from_label, &to_label, &prepared);
+    let socket = state.tmux_socket();
+    let session = tmux_session_manager::manager_session_name(&run_id);
+    let delay = if created {
+        REVIEW_PASTE_DELAY_AFTER_SPAWN
+    } else {
+        Duration::from_millis(300)
+    };
+    tokio::spawn(async move {
+        time::sleep(delay).await;
+        tmux_session_manager::paste_text(&socket, &session, &message);
+    });
+    info!(
+        "run {run_id}: {} review comment(s) sent to the manager as one message (batch {batch_id}{})",
+        prepared.len(),
+        if created { ", manager started" } else { "" }
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "sent": prepared,
+            "batch_id": batch_id,
+            "manager_started": created,
+        })),
+    )
+        .into_response()
 }
 
 async fn node_diff(
@@ -17466,33 +17729,54 @@ async fn start_run_manager(
         Ok(t) => t,
         Err(resp) => return *resp,
     };
-
-    let session_name = tmux_session_manager::manager_session_name(&run_id);
-    let socket = state.tmux_socket();
-    if tmux_session_manager::session_exists(&socket, &session_name) {
-        return (
+    match ensure_run_manager(&state, &run_id, &run_state).await {
+        Ok(created) => (
             StatusCode::OK,
             Json(ManagerStartResponse {
                 ok: true,
-                session: session_name,
-                created: false,
+                session: tmux_session_manager::manager_session_name(&run_id),
+                created,
             }),
         )
-            .into_response();
+            .into_response(),
+        Err((status, body)) => (status, Json(body)).into_response(),
+    }
+}
+
+/// Make sure the Run's Pipeline Manager session is up, spawning it on demand
+/// (manager on demand; #750 reuses it for "send to manager"). `Ok(true)` when
+/// THIS call spawned it, `Ok(false)` when it already existed; `Err` carries the
+/// status + JSON body the HTTP surfaces answer with (`409` no worktree, `500`
+/// the session did not come up).
+///
+/// Idempotency and the racing discipline are the run shell's create-then-verify
+/// rule: `session_exists` first (a benign re-answer), spawn, then verify again —
+/// a concurrent start may have won the `new-session`, and a spawn failure after
+/// our own reservation event must read as an error, not a silent success (the
+/// projection ignores `ManagerStarted`; the wire's `has_manager` stays the
+/// observed tmux fact).
+async fn ensure_run_manager(
+    state: &Arc<AppState>,
+    run_id: &str,
+    run_state: &event_log::RunState,
+) -> Result<bool, (StatusCode, serde_json::Value)> {
+    let session_name = tmux_session_manager::manager_session_name(run_id);
+    let socket = state.tmux_socket();
+    if tmux_session_manager::session_exists(&socket, &session_name) {
+        return Ok(false);
     }
 
     // The manager works in the Run's worktree; an archived/cleaned Run has none
     // left, and a session spawned into a dead cwd would only fail at tmux.
-    let repo_root = effective_repo_root(&state, &run_state);
-    let worktree_dir = crate::worktree_ops::worktree_dir_for_run(&repo_root, &run_id);
+    let repo_root = effective_repo_root(state, run_state);
+    let worktree_dir = crate::worktree_ops::worktree_dir_for_run(&repo_root, run_id);
     if !worktree_dir.exists() {
-        return (
+        return Err((
             StatusCode::CONFLICT,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "this run's worktree no longer exists (archived or cleaned) — there is nothing for a manager to work in"
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
 
     // The create path's name_hint discipline, reconstructed from the projected
@@ -17513,8 +17797,8 @@ async fn start_run_manager(
     };
 
     spawn_manager_session(
-        &state,
-        &run_id,
+        state,
+        run_id,
         &worktree_dir,
         name_hint,
         !run_state.sandbox.is_off(),
@@ -17523,23 +17807,14 @@ async fn start_run_manager(
 
     // Create-then-verify (the run shell's benign-race rule).
     if !tmux_session_manager::session_exists(&socket, &session_name) {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "the manager tmux session did not come up (see the daemon logs)"
-            })),
-        )
-            .into_response();
+            }),
+        ));
     }
-    (
-        StatusCode::OK,
-        Json(ManagerStartResponse {
-            ok: true,
-            session: session_name,
-            created: true,
-        }),
-    )
-        .into_response()
+    Ok(true)
 }
 
 /// Stop the Run's Pipeline Manager (manager on demand). Cost control is the
@@ -24523,6 +24798,119 @@ mod tests {
                 .contains("worktree no longer exists"),
             "got {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn send_review_comments_refuses_when_the_run_branch_is_gone() {
+        // #750: the seeded run never had a `pdo/run-<id>` branch in this
+        // checkout (nor an archived Run has one) — sending answers 409
+        // `run_branch_gone` with the reason the UI prints on its disabled
+        // buttons, and NO event is appended: drafts stay drafts.
+        let state = test_state().await;
+        let run_id = "review-send-branch-gone";
+        seed_completed_run(&state, run_id).await;
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/review/comments/send"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "comments": [{ "path": "src/a.rs", "side": "new", "line": 3, "text": "why?" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "run_branch_gone");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("pdo/run-{run_id} no longer exists")),
+            "got {body}"
+        );
+        let events = load_events(&state.db, run_id).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.kind == event_log::EventKind::ReviewCommentSent),
+            "no comment recorded on a refused send"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_review_comments_validates_the_batch_and_lists_nothing_by_default() {
+        // #750: an empty batch and an unknown run are refused before any git or
+        // tmux work; the list endpoint of a never-reviewed Run is `[]`.
+        let state = test_state().await;
+        let run_id = "review-send-validation";
+        seed_completed_run(&state, run_id).await;
+
+        let app = build_router(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/runs/{run_id}/review/comments/send"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "comments": [] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/no-such-run/review/comments/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "comments": [{ "path": "a", "side": "new", "line": 1, "text": "t" }] })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/runs/{run_id}/review/comments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["comments"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -35405,7 +35793,10 @@ edges: []
         let refs = json["refs"].as_array().unwrap();
         assert_eq!(refs[0]["sha"], serde_json::json!(fork));
         assert_eq!(refs[2]["sha"], serde_json::json!(c1));
-        assert_eq!(refs[2]["label"], serde_json::json!("impl-1 · iter 1 · after"));
+        assert_eq!(
+            refs[2]["label"],
+            serde_json::json!("impl-1 · iter 1 · after")
+        );
         assert_eq!(refs[5]["sha"], serde_json::json!(c2));
         assert_eq!(refs[6]["sha"], serde_json::json!(c2));
         assert_eq!(json["default_from"], serde_json::json!("fork"));
@@ -35463,7 +35854,9 @@ edges: []
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/runs/{run_id}/diff/structured?from=tip&to=live:impl-1"))
+                    .uri(format!(
+                        "/runs/{run_id}/diff/structured?from=tip&to=live:impl-1"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -35476,7 +35869,9 @@ edges: []
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/runs/{run_id}/diff/structured?from=node:impl-1:2:before"))
+                    .uri(format!(
+                        "/runs/{run_id}/diff/structured?from=node:impl-1:2:before"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -35490,7 +35885,9 @@ edges: []
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/runs/{run_id}/file?path=one.rs&ref=node:impl-1:1:after"))
+                    .uri(format!(
+                        "/runs/{run_id}/file?path=one.rs&ref=node:impl-1:1:after"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -35501,13 +35898,19 @@ edges: []
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/runs/{run_id}/file?path=one.rs&ref=node:impl-1:1:before"))
+                    .uri(format!(
+                        "/runs/{run_id}/file?path=one.rs&ref=node:impl-1:1:before"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "one.rs did not exist before");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "one.rs did not exist before"
+        );
     }
 
     #[tokio::test]
