@@ -1,4 +1,4 @@
-import type { PipelineListEntry, PipelineDetail, PipelineDef, RunListEntry, RunState, PortDef, PortSide, PortType, FrontmatterFieldDecl, FrontmatterViolation, Trigger, TriggerFire, DaemonStatus, InstanceSettings, UpdateSettingsRequest, StatsOverview, StatsCost, StatsPerformance, SandboxProfile, SandboxProfileImage, SandboxProfileReferents, SyncCostPricesReport, UpdateStatus, UpdateChangelog, UpdateApplyResponse, Project, BranchRef, AgentChoice, AgentProfile, AgentProfileReferents, ProvisioningPlan, ProvisioningRules, Skill, SkillBank, SkillDetail, SkillFile, SkillFileContent, SkillFilesUpload, SkillFolder, SkillReferents, SkillRef, SkillScanResult, SkillImportItem, SkillImportReport, SkillRescanReport, RecentSkillSource } from "./types";
+import type { PipelineListEntry, PipelineDetail, PipelineDef, RunListEntry, RunState, PortDef, PortSide, PortType, FrontmatterFieldDecl, FrontmatterViolation, Trigger, TriggerFire, DaemonStatus, InstanceSettings, UpdateSettingsRequest, StatsOverview, StatsCost, StatsPerformance, SandboxProfile, SandboxProfileImage, SandboxProfileReferents, SyncCostPricesReport, UpdateStatus, UpdateChangelog, UpdateApplyResponse, Project, BranchRef, AgentChoice, AgentProfile, AgentProfileReferents, ProvisioningPlan, ProvisioningRules, Skill, SkillBank, SkillDetail, SkillFile, SkillFileContent, SkillFilesUpload, SkillFolder, SkillReferents, SkillRef, SkillScanResult, SkillImportItem, SkillImportReport, SkillRescanReport, RecentSkillSource, StructuredDiff } from "./types";
 import { foldHarnessOntoNode } from "./lib/harness";
 
 const BASE = "";
@@ -1797,6 +1797,41 @@ export function fetchRunDiff(runId: string): Promise<string> {
     "GET",
     `/runs/${encodeURIComponent(runId)}/diff`,
     { responseMode: "text", label: `GET /runs/${runId}/diff` },
+  );
+}
+
+/**
+ * Structured Run diff (#748): files → hunks → lines, computed by the daemon in
+ * the Run's effective repository. No `from`/`to` = fork point → Run tip, the
+ * exact bounds of `run.loc`. An explicit pair compares two Run refs.
+ */
+export function fetchRunStructuredDiff(
+  runId: string,
+  refs?: { from?: string; to?: string },
+): Promise<StructuredDiff> {
+  const params = new URLSearchParams();
+  if (refs?.from) params.set("from", refs.from);
+  if (refs?.to) params.set("to", refs.to);
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
+  return request<StructuredDiff>(
+    "GET",
+    `/runs/${encodeURIComponent(runId)}/diff/structured${qs}`,
+    { label: `GET /runs/${runId}/diff/structured` },
+  );
+}
+
+/** Full content of one file at a Run ref (#748); defaults to the Run tip. */
+export function fetchRunFileAtRef(
+  runId: string,
+  path: string,
+  ref?: string,
+): Promise<string> {
+  const params = new URLSearchParams({ path });
+  if (ref) params.set("ref", ref);
+  return request<string>(
+    "GET",
+    `/runs/${encodeURIComponent(runId)}/file?${params.toString()}`,
+    { responseMode: "text", label: `GET /runs/${runId}/file` },
   );
 }
 
