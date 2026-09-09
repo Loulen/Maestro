@@ -2618,6 +2618,22 @@ impl DaemonConfig {
     }
 }
 
+/// The URL to advertise for a listener bound at `bound_addr` (#541).
+///
+/// An unspecified bind (`0.0.0.0` / `::`) is a *listen* address, not a
+/// *connect* address: browsers do reach it, but they then send
+/// `Origin: http://0.0.0.0:<port>`, which the WS guard refuses. Map it to
+/// `localhost`, the one host every default allowlist entry accepts. A concrete
+/// bind (`127.0.0.1`, a LAN IP) is advertised as-is.
+pub fn advertised_url(bound_addr: std::net::SocketAddr) -> String {
+    let ip = bound_addr.ip();
+    if ip.is_unspecified() {
+        format!("http://localhost:{}", bound_addr.port())
+    } else {
+        format!("http://{bound_addr}")
+    }
+}
+
 pub async fn serve(addr: SocketAddr, repo_root: PathBuf) -> Result<DaemonHandle> {
     serve_with_config(addr, repo_root, DaemonConfig::from_env()).await
 }
@@ -2794,7 +2810,14 @@ pub async fn serve_with_config(
 
     let app = build_router(state.clone());
 
-    info!("PDO daemon listening on http://{bound_addr}");
+    // #541: the bind address (`0.0.0.0`) is deliberate (#260) but is NOT a URL a
+    // browser can use — the WS Origin guard (#564) only knows `localhost` and
+    // `127.0.0.1`, so `http://0.0.0.0:<port>` half-loads the UI and 403s every
+    // socket. Advertise the URL that actually works, keep the bind for operators.
+    info!(
+        "PDO daemon listening on {bound_addr} — open {}",
+        advertised_url(bound_addr)
+    );
 
     // Only speak up when the operator configured extras — silence is the
     // localhost-only default. A malformed entry is KEPT, never fail-fast: a
@@ -19575,6 +19598,25 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::util::ServiceExt;
+
+    /// #541 — the startup banner must hand the user a URL the WS Origin guard
+    /// accepts. `0.0.0.0` (and `::`) are listen-only and map to `localhost`;
+    /// a concrete bind is advertised verbatim.
+    #[test]
+    fn advertised_url_maps_unspecified_bind_to_localhost() {
+        let v4: SocketAddr = "0.0.0.0:5172".parse().unwrap();
+        assert_eq!(advertised_url(v4), "http://localhost:5172");
+        let v6: SocketAddr = "[::]:5172".parse().unwrap();
+        assert_eq!(advertised_url(v6), "http://localhost:5172");
+    }
+
+    #[test]
+    fn advertised_url_keeps_concrete_bind() {
+        let lo: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert_eq!(advertised_url(lo), "http://127.0.0.1:0");
+        let lan: SocketAddr = "192.168.1.20:5172".parse().unwrap();
+        assert_eq!(advertised_url(lan), "http://192.168.1.20:5172");
+    }
 
     /// A unique fake daemon port per test state, so the derived tmux socket
     /// (`tmux_socket_name(port)` = `pdo-<port>`) is distinct per test. Tests spawn

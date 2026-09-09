@@ -10,6 +10,14 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.73.2
+
+**Le bandeau de démarrage du daemon annonce une URL navigable** (#541). `pdo daemon` écoute toujours
+sur `0.0.0.0:<port>` (#260), mais un navigateur ouvert sur `http://0.0.0.0:<port>` envoie une
+`Origin` que le garde WebSocket (#564) refuse : UI à moitié chargée, pied de page « reconnecting… ».
+La ligne de log garde l'adresse de bind pour l'opérateur et ajoute `— open http://localhost:<port>`
+(bind non spécifié `0.0.0.0`/`::` → `localhost` ; bind concret annoncé tel quel).
+
 ## 1.73.1
 
 **Stats › Cost — le headline d'un pipeline n'agrège plus le coût Infrastructure/Unassigned** (#742).
