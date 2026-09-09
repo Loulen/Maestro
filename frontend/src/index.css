@@ -884,3 +884,39 @@ body {
   outline-offset: 12px;
   animation: pdo-section-land 2.2s ease-out both;
 }
+
+/* ---------------------------------------------------------------------------
+ * Review page (#749): map @git-diff-view/react's dark theme onto PDO tokens so
+ * the third-party body reads like the rest of the app (added = st-done,
+ * deleted = st-failed, plain = bg-2). Scoped to the page so nothing else moves.
+ * ------------------------------------------------------------------------- */
+.pdo-review .diff-tailwindcss-wrapper[data-theme="dark"] {
+  --diff-border--: #1f242c;
+  --diff-plain-content--: #14171d;
+  --diff-plain-lineNumber--: #14171d;
+  --diff-plain-lineNumber-color--: #525a68;
+  --diff-expand-content--: #14171d;
+  --diff-expand-lineNumber--: #14171d;
+  --diff-expand-lineNumber-color--: #525a68;
+  --diff-add-content--: rgba(16, 185, 129, 0.1);
+  --diff-add-content-highlight--: rgba(16, 185, 129, 0.28);
+  --diff-add-lineNumber--: rgba(16, 185, 129, 0.16);
+  --diff-del-content--: rgba(239, 68, 68, 0.1);
+  --diff-del-content-highlight--: rgba(239, 68, 68, 0.3);
+  --diff-del-lineNumber--: rgba(239, 68, 68, 0.16);
+  --diff-empty-content--: #1a1e25;
+  --diff-hunk-content--: #1a1e25;
+  --diff-hunk-content-color--: #525a68;
+  --diff-hunk-lineNumber--: #1a1e25;
+  --diff-hunk-lineNumber-hover--: #2c323d;
+  --diff-add-widget--: #10b981;
+  --diff-add-widget-color--: #04140d;
+  color: #e6e8eb;
+}
+.pdo-review .diff-tailwindcss-wrapper .diff-style-root {
+  font-family: var(--font-mono);
+}
+/* The hunk-separator expanders: PDO accent on hover, like the prototype. */
+.pdo-review .diff-line-hunk-action button:hover {
+  color: #10b981;
+}

@@ -420,15 +420,17 @@ describe("DiffTab", () => {
     expect(screen.getAllByTestId("diff-file")[0]).toHaveAttribute("data-collapsed", "true");
   });
 
-  it("shows the Review button, disabled, with its coming-soon tooltip", async () => {
+  it("links « Expand and comment » to the Run's Review page, fork → tip (#749)", async () => {
     mockedFetch.mockResolvedValue(TWO_FILES);
     render(<Host run={makeRun()} />);
     await waitFor(() => {
       expect(screen.getByTestId("diff-review-button")).toBeInTheDocument();
     });
-    const btn = screen.getByTestId("diff-review-button");
-    expect(btn).toBeDisabled();
-    expect(btn).toHaveAttribute("title", "Review page coming");
+    const link = screen.getByTestId("diff-review-button");
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveTextContent("Expand and comment");
+    // The default pair is the short canonical URL: no query.
+    expect(link).toHaveAttribute("href", "/runs/test-run-1/review");
   });
 
   it("shows an error state with Retry when the endpoint fails", async () => {

@@ -10,6 +10,19 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.76.0
+
+**Page de Review — relecture de diff GitHub-like** (#749 ; story #746, ADR-0067). Depuis l'onglet Diff,
+« Expand and comment » ouvre `/runs/<id>/review`, une page à part entière (nouvel onglet, rechargeable,
+paire de refs dans l'URL). Elle liste les fichiers à gauche avec leurs +/−, rend le diff **side-by-side**
+par défaut (bascule unifiée mémorisée en local) via un composant tiers (`@git-diff-view/react`), et
+permet d'**étendre le contexte** caché entre les hunks depuis le contenu du fichier à une ref. Un
+sélecteur **source → destination** propose les refs du Run exposées par le nouveau `GET /runs/{id}/refs` :
+point de fork, tip, et pour chaque nœud livré ses `before`/`after` libellés par nom et itération ;
+défaut fork → tip, ref inconnue → repli sur le défaut avec avis. Le panneau d'un nœud livré ou en cours
+gagne le raccourci « Review this node's delivery ». Aucune surface « diff de nœud » ; les commentaires
+viendront dans un ticket suivant.
+
 ## 1.75.0
 
 **Onglet Diff de niveau Run qui fonctionne** (#748 ; story #746, ADR-0067). Le diff d'un Run est
