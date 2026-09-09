@@ -23,6 +23,40 @@ pub struct TestDaemon {
 }
 
 impl TestDaemon {
+    pub async fn spawn_at(repo_root: &Path) -> Result<Self> {
+        std::fs::create_dir_all(repo_root)?;
+        let handle = serve_with_config(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            repo_root.to_path_buf(),
+            DaemonConfig {
+                tmux_cmd_override: Some("exec sleep 600".to_string()),
+                panic_on_trigger_name: None,
+                panic_on_stale_sweep: false,
+                panic_on_spawn: false,
+                service_health_override: None,
+                docker_cmd_override: None,
+                sandbox_home_override: None,
+                price_source_url: None,
+                price_refresh_at_boot: false,
+                update_source_url: None,
+                run_update_check_loop: false,
+                update_executor_override: None,
+                install_method_override: None,
+                supervision_override: None,
+                relaunch_command: None,
+                allowed_ws_origins: Vec::new(),
+                run_trigger_scheduler_loop: false,
+                nested_daemon: false,
+            },
+        )
+        .await?;
+        Ok(Self {
+            addr: handle.addr,
+            tempdir: tempfile::tempdir()?,
+            handle: Some(handle),
+        })
+    }
+
     /// Spawn a fresh daemon backed by a tempdir. The `setup` callback receives the
     /// tempdir path and may seed it (write yaml, init a git repo, etc.) before the
     /// daemon starts.

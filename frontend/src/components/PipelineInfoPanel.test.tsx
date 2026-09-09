@@ -3,10 +3,10 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { RunState, PipelineDef } from "../types";
 
-// The badge/banner live in the InfoTab header, above DiffSection. Mock the heavy
+// The badge/banner live in the InfoTab header. Mock the heavy
 // children (network-fetching diff, tmux terminal) so the test stays focused on the
 // #410 sandbox surface and never touches the network.
-vi.mock("./DiffSection", () => ({ default: () => null }));
+vi.mock("./DiffTab", () => ({ default: () => null }));
 vi.mock("./TmuxTerminal", () => ({ default: vi.fn(() => null) }));
 
 // #302 / ADR-0048: the Assistant tab drives create-if-absent / reap-on-leave
@@ -529,5 +529,68 @@ describe("PipelineInfoPanel — Assistant tab (#302)", () => {
 
     expect(openLibraryAssistant).toHaveBeenCalledTimes(1);
     expect(closeLibraryAssistant).not.toHaveBeenCalled();
+  });
+});
+
+describe("PipelineInfoPanel — Diff tab (#748)", () => {
+  it("offers a Diff tab for a Run, between Info and Manager", () => {
+    renderPanel(makeRun());
+    const tabs = screen
+      .getAllByTestId(/^info-tab-/)
+      .map((t) => t.getAttribute("data-testid"));
+    expect(tabs).toEqual(["info-tab-info", "info-tab-diff", "info-tab-manager", "info-tab-yaml"]);
+  });
+
+  it("hides the Diff tab for a template (no Run)", () => {
+    renderPanel(null);
+    expect(screen.queryByTestId("info-tab-diff")).toBeNull();
+  });
+
+  it("no longer renders the collapsible Diff section inside Info", () => {
+    renderPanel(makeRun());
+    expect(screen.queryByTestId("diff-section")).toBeNull();
+    expect(screen.queryByTestId("diff-node-select")).toBeNull();
+  });
+
+  it("the Changes stat opens the Diff tab", () => {
+    renderPanel(makeRun({ loc: { insertions: 38, deletions: 11, files_changed: 4 } }));
+    const link = screen.getByTestId("stat-loc-open-diff");
+    expect(link).toHaveTextContent("+38");
+    expect(link).toHaveTextContent("−11");
+    expect(link).toHaveTextContent("4 files");
+    fireEvent.click(link);
+    expect(screen.getByTestId("info-tab-diff").className).toContain("border-acc");
+    // Info's body is gone: the Diff tab owns the panel now.
+    expect(screen.queryByTestId("run-stats")).toBeNull();
+  });
+
+  it("dots the Diff tab when a node delivers while another tab is shown, and clears it on open", () => {
+    const { rerender } = renderPanel(makeRun());
+    expect(screen.queryByTestId("diff-tab-dot")).toBeNull();
+    rerender(
+      <PipelineInfoPanel
+        run={makeRun({
+          nodes: {
+            "impl-1": {
+              node_id: "impl-1",
+              status: "completed",
+              iter: 1,
+              started_at: "2026-07-01T10:00:00.000Z",
+              completed_at: "2026-07-01T10:01:00.000Z",
+              failure_reason: null,
+              iterations: [],
+              delivery: { before: "aaa", after: "bbb" },
+            },
+          },
+        })}
+        pipeline={null}
+        libraryPipelines={[]}
+        onLibraryChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("diff-tab-dot")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("info-tab-diff"));
+    expect(screen.queryByTestId("diff-tab-dot")).toBeNull();
   });
 });

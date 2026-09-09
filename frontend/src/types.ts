@@ -1925,3 +1925,57 @@ export interface SkippedSkill {
   name: string;
   reason: string;
 }
+
+// ---------------------------------------------------------------------------
+// Structured Run diff (#748, ADR-0067) — `GET /runs/<id>/diff/structured`.
+// The daemon parses the patch; the Diff tab renders from data.
+// ---------------------------------------------------------------------------
+
+export type DiffFileStatus = "added" | "deleted" | "modified" | "renamed" | "copied";
+export type DiffLineKind = "context" | "add" | "del";
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  /** Line text without its leading `+`/`-`/space marker. */
+  content: string;
+  /** 1-based line number on the old side; null for an added line. */
+  old_no: number | null;
+  /** 1-based line number on the new side; null for a deleted line. */
+  new_no: number | null;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  /** Function context git prints after the second `@@` (may be empty). */
+  header: string;
+  lines: DiffLine[];
+}
+
+export interface DiffFile {
+  /** Source path; null for a pure addition. */
+  old_path: string | null;
+  /** Destination path; null for a pure deletion. */
+  new_path: string | null;
+  status: DiffFileStatus;
+  binary: boolean;
+  additions: number;
+  deletions: number;
+  /** Empty for a binary file or a pure rename. */
+  hunks: DiffHunk[];
+}
+
+export interface StructuredDiff {
+  from_ref: string;
+  to_ref: string;
+  from_sha: string | null;
+  to_sha: string | null;
+  /** True for the fork → tip default (merge-base range, same bounds as `loc`). */
+  three_dot: boolean;
+  files: DiffFile[];
+  additions: number;
+  deletions: number;
+  files_changed: number;
+}

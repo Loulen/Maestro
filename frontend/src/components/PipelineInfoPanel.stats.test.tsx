@@ -3,11 +3,10 @@ import { render, screen } from "@testing-library/react";
 import { renderHook, act } from "@testing-library/react";
 import type { RunState } from "../types";
 
-// DiffSection (rendered by the panel) fetches lazily on expand, but mock the api
+// The Diff tab (a sibling tab of the panel) fetches on open, but mock the api
 // module anyway so the unit test never touches the network.
 vi.mock("../api", () => ({
-  fetchRunDiff: vi.fn().mockResolvedValue(""),
-  fetchNodeDiff: vi.fn().mockResolvedValue(""),
+  fetchRunStructuredDiff: vi.fn().mockResolvedValue({ files: [], additions: 0, deletions: 0, files_changed: 0 }),
 }));
 
 import PipelineInfoPanel from "./PipelineInfoPanel";

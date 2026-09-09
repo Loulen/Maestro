@@ -10,6 +10,30 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.75.0
+
+**Onglet Diff de niveau Run qui fonctionne** (#748 ; story #746, ADR-0067). Le diff d'un Run est
+désormais calculé dans le **dépôt effectif** du Run (le repo cible du worktree), plus dans
+`state.repo_root` — sur un repo cible distinct du cwd du daemon il rendait « No changes ». Le daemon
+expose `GET /runs/{id}/diff/structured` (fichiers, hunks, compteurs +/−, refs fork → tip) et
+`GET /runs/{id}/file?path=…` (garde-fous : chemin hors dépôt → 400, ref/option → 400, inconnu → 404).
+Côté UI, la section Diff de l'onglet Info devient un **onglet Diff** dédié (`Info | Diff | Manager | YAML`) :
+résumé collant, ledger des fichiers, transcript plat avec repli par fichier persistant entre onglets,
+surlignage intra-ligne. Un Run **archivé** affiche « Diff not preserved for archived runs » (404 côté API).
+Le sélecteur de nœud et la section Diff de l'onglet Info sont retirés ; la stat *Changes* ouvre l'onglet Diff.
+
+## 1.74.0
+
+**Page mounts — `pdo page mount|unmount|list` et service en lecture seule sous `/pages/<name>/`**
+(#743 ; story #674, ADR-0066, amendement de l'ADR-0028). Un agent ou un opérateur lie un nom à un
+répertoire du disque et l'ouvre aussitôt dans le navigateur en vrai HTML (type MIME deviné, scripts
+exécutés) ; le contenu servi est celui du disque à la requête, sans remount ni rebuild. Mêmes trois
+opérations en HTTP (`GET|POST /pages`, `DELETE /pages/{name}`), montages persistants au redémarrage.
+Un montage fait depuis une session de nœud porte l'id du Run et disparaît à son archivage ; hors Run
+il vit jusqu'au démontage et va dans l'`audit_log`. Fichier manquant sous `/pages/` = vrai 404
+(jamais le shell SPA) ; chemins canonisés et confinés au répertoire monté ; `.pdo/artifacts/` non
+montable. Le stockage vit dans un nouveau fichier `page_mount.rs` du crate daemon (module autonome :
+table + requêtes), d'où le ratchet de layout.
 ## 1.73.2
 
 **Le bandeau de démarrage du daemon annonce une URL navigable** (#541). `pdo daemon` écoute toujours

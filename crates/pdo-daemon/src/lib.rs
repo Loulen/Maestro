@@ -43,6 +43,7 @@ mod node_io_resolver;
 mod node_primitives;
 mod node_spawn;
 mod outputs_validator;
+mod page_mount;
 mod pi_session;
 mod pipeline;
 mod pipeline_migrator;
@@ -81,6 +82,7 @@ mod skill_sidecar;
 pub mod stale_detector;
 mod stats;
 mod stats_performance;
+mod structured_diff;
 mod switch_router;
 pub mod tmux_session_manager;
 mod transition_guard;
@@ -107,12 +109,13 @@ use axum::extract::{
     FromRequest, Json, Multipart, Path as AxumPath, Query, State, WebSocketUpgrade,
 };
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 use tokio::time;
 use tracing::{error, info, warn};
@@ -235,6 +238,21 @@ pub enum Commands {
         #[command(subcommand)]
         action: Box<RunAction>,
     },
+    /// Mount directories as live pages through the daemon.
+    Page {
+        #[command(subcommand)]
+        action: PageAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PageAction {
+    /// Bind a name to a directory and serve it under `/pages/<name>/`.
+    Mount { name: String, directory: PathBuf },
+    /// List active page mounts.
+    List,
+    /// Remove a page mount.
+    Unmount { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -348,6 +366,10 @@ struct AppState {
     repo_root: PathBuf,
     port: u16,
     merge_lock: tokio::sync::Mutex<()>,
+    /// Serializes page-mount mutations with Run archival. The guard stays held
+    /// until `RunArchived` lands, so a verified node session cannot insert a
+    /// run-owned mount after cleanup removed that Run's mounts.
+    page_mount_lock: tokio::sync::Mutex<()>,
     /// Serializes admission so the slot check is atomic check-and-reserve. A
     /// spawn holds this from the moment it counts live sessions until it has
     /// appended the reservation event (`NodeStarted` / `NodeWaiting`). Without
@@ -1217,6 +1239,7 @@ pub fn run_run_create(action: RunAction) -> Result<()> {
     if let Some(v) = variables {
         body.insert("variables".into(), parse_json_arg("variables", &v)?);
     }
+
     if let Some(v) = skills {
         body.insert("skills".into(), parse_skills_arg(&v)?);
     }
@@ -1292,6 +1315,78 @@ pub fn run_run_create(action: RunAction) -> Result<()> {
         None => println!("Run {run_id} created (root run)."),
     }
     Ok(())
+}
+
+pub fn run_page(action: PageAction) -> Result<()> {
+    let url = cli_daemon_url();
+    let client = reqwest::blocking::Client::new();
+    let session = session_env_claim();
+    let with_identity = |request: reqwest::blocking::RequestBuilder| {
+        let mut request = request.header("X-PDO-Actor", "cli");
+        if let Some((run_id, node_id)) = &session {
+            request = request
+                .header(SESSION_RUN_HEADER, run_id)
+                .header(SESSION_NODE_HEADER, node_id);
+        }
+        request
+    };
+
+    match action {
+        PageAction::Mount { name, directory } => {
+            let directory = directory
+                .canonicalize()
+                .with_context(|| format!("cannot resolve {}", directory.display()))?;
+            let response = with_identity(client.post(format!("{url}/pages")))
+                .json(&serde_json::json!({ "name": name, "directory": directory }))
+                .send()
+                .context("failed to reach daemon")?;
+            let mount: page_mount::PageMount = page_cli_response(response, "mount page")?;
+            println!(
+                "Mounted {} at /pages/{}/ from {}.",
+                mount.name, mount.name, mount.directory
+            );
+        }
+        PageAction::List => {
+            let response = with_identity(client.get(format!("{url}/pages")))
+                .send()
+                .context("failed to reach daemon")?;
+            let mounts: Vec<page_mount::PageMount> = page_cli_response(response, "list pages")?;
+            for mount in mounts {
+                let run = mount.run_id.as_deref().unwrap_or("-");
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    mount.name, mount.directory, run, mount.created_at
+                );
+            }
+        }
+        PageAction::Unmount { name } => {
+            let response = with_identity(client.delete(format!("{url}/pages/{name}")))
+                .send()
+                .context("failed to reach daemon")?;
+            let _: page_mount::PageMount = page_cli_response(response, "unmount page")?;
+            println!("Unmounted {name}.");
+        }
+    }
+    Ok(())
+}
+
+fn page_cli_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    operation: &str,
+) -> Result<T> {
+    let status = response.status();
+    let raw = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let detail = parsed
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or(raw.as_str());
+        anyhow::bail!("daemon refused to {operation} ({status}): {detail}");
+    }
+    serde_json::from_str(&raw)
+        .with_context(|| format!("unreadable success body from daemon: {raw}"))
 }
 
 /// One-shot `pdo docs`: render the documentation PDO generates from its own code,
@@ -2749,6 +2844,7 @@ pub async fn serve_with_config(
         repo_root,
         port: bound_addr.port(),
         merge_lock: tokio::sync::Mutex::new(()),
+        page_mount_lock: tokio::sync::Mutex::new(()),
         admission_lock: tokio::sync::Mutex::new(()),
         trigger_tick_lock: tokio::sync::Mutex::new(()),
         recent_writes,
@@ -4351,6 +4447,14 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines", post(create_pipeline))
         .route("/runs", post(create_run))
         .route("/runs", get(list_runs))
+        .route("/pages", get(list_page_mounts).post(create_page_mount))
+        .route("/pages/", get(list_page_mounts))
+        .route(
+            "/pages/{name}",
+            get(redirect_page_mount).delete(delete_page_mount),
+        )
+        .route("/pages/{name}/", get(serve_page_mount_root))
+        .route("/pages/{name}/{*path}", get(serve_page_mount_file))
         // Static path — must stay declared before `/runs/{run_id}`.
         .route("/runs/reapable", get(list_reapable_runs))
         .route("/sessions", get(sessions))
@@ -4364,6 +4468,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/nodes/{node_id}/prompt", get(node_prompt))
         .route("/runs/{run_id}/nodes/{node_id}/io", get(node_io))
         .route("/runs/{run_id}/diff", get(run_diff))
+        .route("/runs/{run_id}/diff/structured", get(run_diff_structured))
+        .route("/runs/{run_id}/file", get(run_file_at_ref))
         .route("/runs/{run_id}/nodes/{node_id}/diff", get(node_diff))
         .route("/runs/{run_id}/artifact", get(artifact))
         .route("/runs/{run_id}/pipeline", get(get_run_pipeline))
@@ -4607,6 +4713,271 @@ struct ProvisioningPreviewRequest {
 
 fn default_provisioning_git_ref() -> String {
     "HEAD".to_string()
+}
+
+#[derive(Deserialize)]
+struct CreatePageMountRequest {
+    name: String,
+    directory: PathBuf,
+}
+
+async fn list_page_mounts(State(state): State<Arc<AppState>>) -> Response {
+    match page_mount::list(&state.db).await {
+        Ok(mounts) => Json(mounts).into_response(),
+        Err(error) => {
+            error!("failed to list page mounts: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "page mount storage error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn create_page_mount(
+    State(state): State<Arc<AppState>>,
+    actor: audit_log::Actor,
+    headers: HeaderMap,
+    Json(request): Json<CreatePageMountRequest>,
+) -> Response {
+    let _guard = state.page_mount_lock.lock().await;
+    let session = session_claim_from_headers(&headers);
+    if let Some(claim) = &session {
+        if let Err((status, body)) = verify_session_claim(&state, claim).await {
+            return (status, Json(body)).into_response();
+        }
+    }
+
+    let mount = match page_mount::create(
+        &state.db,
+        &request.name,
+        &request.directory,
+        session.as_ref().map(|claim| claim.run_id.as_str()),
+    )
+    .await
+    {
+        Ok(mount) => mount,
+        Err(page_mount::MountError::Invalid(message)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response()
+        }
+        Err(page_mount::MountError::Duplicate(name)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("page mount `{name}` is already mounted")
+                })),
+            )
+                .into_response()
+        }
+        Err(page_mount::MountError::Database(error)) => {
+            error!("failed to create page mount: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "page mount storage error" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(error) = record_page_mount_mutation(
+        &state,
+        actor,
+        session.as_ref(),
+        "page_mount.mounted",
+        None,
+        Some(serde_json::json!(mount)),
+    )
+    .await
+    {
+        if let Err(rollback_error) = page_mount::remove(&state.db, &mount.name).await {
+            error!(
+                "failed to roll back page mount {} after event error: {rollback_error}",
+                mount.name
+            );
+        }
+        error!("failed to record page mount event: {error:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "page mount event log error" })),
+        )
+            .into_response();
+    }
+    (StatusCode::CREATED, Json(mount)).into_response()
+}
+
+async fn delete_page_mount(
+    State(state): State<Arc<AppState>>,
+    actor: audit_log::Actor,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    let _guard = state.page_mount_lock.lock().await;
+    let session = session_claim_from_headers(&headers);
+    if let Some(claim) = &session {
+        if let Err((status, body)) = verify_session_claim(&state, claim).await {
+            return (status, Json(body)).into_response();
+        }
+    }
+
+    let mount = match page_mount::remove(&state.db, &name).await {
+        Ok(Some(mount)) => mount,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("page mount `{name}` not found") })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            error!("failed to remove page mount: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "page mount storage error" })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(error) = record_page_mount_mutation(
+        &state,
+        actor,
+        session.as_ref(),
+        "page_mount.unmounted",
+        Some(serde_json::json!(mount)),
+        None,
+    )
+    .await
+    {
+        if let Err(rollback_error) = page_mount::restore(&state.db, &mount).await {
+            error!(
+                "failed to restore page mount {} after event error: {rollback_error}",
+                mount.name
+            );
+        }
+        error!("failed to record page unmount event: {error:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "page mount event log error" })),
+        )
+            .into_response();
+    }
+    Json(mount).into_response()
+}
+
+async fn record_page_mount_mutation(
+    state: &AppState,
+    actor: audit_log::Actor,
+    session: Option<&SessionClaim>,
+    action: &str,
+    before: Option<serde_json::Value>,
+    after: Option<serde_json::Value>,
+) -> Result<()> {
+    let mount = before.as_ref().or(after.as_ref());
+    let name = mount
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if let Some(claim) = session {
+        append_event(
+            state,
+            &event_log::Event {
+                id: None,
+                run_id: claim.run_id.clone(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::CommandIssued,
+                node_id: Some(claim.node_id.clone()),
+                iter: None,
+                payload: Some(serde_json::json!({
+                    "command": action,
+                    "page_mount": mount,
+                })),
+            },
+        )
+        .await?;
+    } else {
+        audit_log::record_best_effort(
+            &state.db,
+            audit_log::NewAuditEntry {
+                actor_hint: actor.as_hint().to_string(),
+                action: action.to_string(),
+                target_kind: Some("page_mount".to_string()),
+                target_id: Some(name.to_string()),
+                before,
+                after,
+            },
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn redirect_page_mount(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    match page_mount::get(&state.db, &name).await {
+        Ok(Some(_)) => Redirect::permanent(&format!("/pages/{name}/")).into_response(),
+        Ok(None) => page_not_found(),
+        Err(error) => {
+            error!("failed to resolve page mount: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn serve_page_mount_root(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    serve_page_mount(&state, &name, "").await
+}
+
+async fn serve_page_mount_file(
+    State(state): State<Arc<AppState>>,
+    AxumPath((name, path)): AxumPath<(String, String)>,
+) -> Response {
+    serve_page_mount(&state, &name, &path).await
+}
+
+async fn serve_page_mount(state: &AppState, name: &str, path: &str) -> Response {
+    let mount = match page_mount::get(&state.db, name).await {
+        Ok(Some(mount)) => mount,
+        Ok(None) => return page_not_found(),
+        Err(error) => {
+            error!("failed to resolve page mount: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let Some(opened) = page_mount::open_file(&mount, path) else {
+        return page_not_found();
+    };
+    let mime = mime_guess::from_path(&opened.mime_path).first_or_octet_stream();
+    let mut file = tokio::fs::File::from_std(opened.file);
+    let mut content = Vec::new();
+    if let Err(error) = file.read_to_end(&mut content).await {
+        error!("failed to read mounted page: {error}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, mime.as_ref())],
+        content,
+    )
+        .into_response()
+}
+
+fn page_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "page not found",
+    )
+        .into_response()
 }
 
 fn provisioning_rules_through_scope(
@@ -5108,6 +5479,10 @@ async fn init_db(db: &sqlx::SqlitePool) -> Result<()> {
     audit_log::init(db)
         .await
         .context("failed to create audit_log table")?;
+
+    page_mount::init(db)
+        .await
+        .context("failed to create page_mounts table")?;
 
     // Materialised on demand — nothing seeded.
     project_store::init(db)
@@ -8128,6 +8503,12 @@ async fn verify_session_claim(
             claim.run_id
         )));
     };
+    if !parent.status.is_live() {
+        return Err(refuse(format!(
+            "session claim refused: run `{}` is not live (status: {:?})",
+            claim.run_id, parent.status
+        )));
+    }
     let Some(node) = parent.nodes.get(&claim.node_id) else {
         return Err(refuse(format!(
             "session claim refused: run `{}` has no node `{}`",
@@ -13168,9 +13549,13 @@ async fn run_diff(
     // `compute_run_loc`.
     let base = run_diff_base(&run_state);
     let range = format!("{base}...{pipeline_branch}");
+    // #748: the Run's branch lives in its EFFECTIVE repository (ADR-0033), never in
+    // the daemon's cwd — computing here in `state.repo_root` is why the diff never
+    // rendered for a Run targeting another repo.
+    let repo = effective_repo_root(&state, &run_state);
     let output = match std::process::Command::new("git")
         .args(["diff", &range, "--", ".", ":(exclude).pdo/"])
-        .current_dir(&state.repo_root)
+        .current_dir(&repo)
         .output()
     {
         Ok(o) => o,
@@ -13197,6 +13582,114 @@ async fn run_diff(
 
     let diff = String::from_utf8_lossy(&output.stdout);
     (StatusCode::OK, diff.into_owned()).into_response()
+}
+
+#[derive(Deserialize)]
+struct StructuredDiffQuery {
+    /// Source ref. Defaults to the Run's fork point (`run_diff_base`).
+    from: Option<String>,
+    /// Destination ref. Defaults to the Run's tip (`pdo/run-<id>`).
+    to: Option<String>,
+}
+
+/// `GET /runs/<id>/diff/structured[?from=<ref>&to=<ref>]` (#748, ADR-0067).
+///
+/// Files → hunks → lines for a pair of Run refs, computed in the Run's
+/// **effective** repository. With no query the pair is fork → tip and the range
+/// is three-dot with `.pdo/` excluded — byte-for-byte the bounds of the LOC
+/// stat, so "counted" and "shown" agree. An explicit pair is compared two-dot
+/// (two arbitrary Run refs: a node's `before`/`after`, …). The raw-patch
+/// endpoints stay as they are.
+async fn run_diff_structured(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(q): Query<StructuredDiffQuery>,
+) -> Response {
+    let (_, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    for r in [&q.from, &q.to].into_iter().flatten() {
+        if !structured_diff::is_safe_ref(r) {
+            return (StatusCode::BAD_REQUEST, format!("invalid ref: {r:?}")).into_response();
+        }
+    }
+    let explicit = q.from.is_some() || q.to.is_some();
+    let from = q
+        .from
+        .clone()
+        .unwrap_or_else(|| run_diff_base(&run_state).to_string());
+    let to = q.to.clone().unwrap_or_else(|| format!("pdo/run-{run_id}"));
+    let repo = effective_repo_root(&state, &run_state);
+    match structured_diff::compute(&repo, &from, &to, !explicit) {
+        Ok(d) => Json(d).into_response(),
+        Err(e) if e.is_unknown_revision() => {
+            (StatusCode::NOT_FOUND, "run branch not found").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct FileAtRefQuery {
+    path: String,
+    /// Defaults to the Run's tip (`pdo/run-<id>`).
+    #[serde(rename = "ref")]
+    git_ref: Option<String>,
+}
+
+/// `GET /runs/<id>/file?path=<repo-relative>&ref=<ref>` (#748): the full content
+/// of one file at one Run ref, for the Review page's context expansion. Text is
+/// served as `text/plain`, anything else as `application/octet-stream`; a path
+/// missing at that ref is a 404.
+async fn run_file_at_ref(
+    State(state): State<Arc<AppState>>,
+    AxumPath(run_id): AxumPath<String>,
+    Query(q): Query<FileAtRefQuery>,
+) -> Response {
+    let (_, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    if !structured_diff::is_safe_path(&q.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("invalid path: {:?}", q.path),
+        )
+            .into_response();
+    }
+    let git_ref = q.git_ref.unwrap_or_else(|| format!("pdo/run-{run_id}"));
+    if !structured_diff::is_safe_ref(&git_ref) {
+        return (StatusCode::BAD_REQUEST, format!("invalid ref: {git_ref:?}")).into_response();
+    }
+    let repo = effective_repo_root(&state, &run_state);
+    match structured_diff::file_at_ref(&repo, &git_ref, &q.path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                text,
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                e.into_bytes(),
+            )
+                .into_response(),
+        },
+        Err(structured_diff::GitError::Failed { stderr })
+            if stderr.contains("does not exist")
+                || stderr.contains("exists on disk, but not in")
+                || stderr.contains("unknown revision")
+                || stderr.contains("not a git repository")
+                || stderr.contains("bad revision")
+                || stderr.contains("nvalid object name") =>
+        {
+            (StatusCode::NOT_FOUND, "file not found at ref").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn node_diff(
@@ -13235,9 +13728,11 @@ async fn node_diff(
     // anything else the repo does not ignore (#654 — `.gitignore` is the target
     // repo's policy, and PDO must not pretend otherwise at commit time; this is
     // the *reading* surface).
+    // #748: same repository as `run_diff` — the Run's effective repo, not the cwd.
+    let repo = effective_repo_root(&state, &run_state);
     let output = match std::process::Command::new("git")
         .args(["diff", &left, &right, "--", ".", ":(exclude).pdo/"])
-        .current_dir(&state.repo_root)
+        .current_dir(&repo)
         .output()
     {
         Ok(o) => o,
@@ -17738,6 +18233,7 @@ fn spawn_terminal_attach(terminal: &str, socket: &str, session_name: &str) -> Re
 }
 
 async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
+    let _page_mount_guard = state.page_mount_lock.lock().await;
     let (_, run_state) = match load_projected(state, run_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
@@ -17747,6 +18243,15 @@ async fn cleanup_run(state: &AppState, run_id: &str) -> Response {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "run is already archived" })),
+        )
+            .into_response();
+    }
+
+    if let Err(error) = page_mount::remove_for_run(&state.db, run_id).await {
+        error!("cleanup_run: failed to remove page mounts for run {run_id}: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "page mount cleanup failed" })),
         )
             .into_response();
     }
@@ -20225,6 +20730,7 @@ mod tests {
             repo_root: std::env::current_dir().unwrap(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -22547,6 +23053,7 @@ mod tests {
             repo_root: std::env::current_dir().unwrap(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -27127,6 +27634,7 @@ mod tests {
             repo_root: dir.to_path_buf(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -33379,6 +33887,7 @@ edges: []
             repo_root: repo.clone(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -33587,6 +34096,7 @@ edges: []
             repo_root: repo.clone(),
             port: next_test_daemon_port(),
             merge_lock: tokio::sync::Mutex::new(()),
+            page_mount_lock: tokio::sync::Mutex::new(()),
             admission_lock: tokio::sync::Mutex::new(()),
             trigger_tick_lock: tokio::sync::Mutex::new(()),
             recent_writes: Arc::new(Mutex::new(HashMap::new())),
@@ -34505,6 +35015,455 @@ edges: []
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// #748 fixture: a Run whose `target_repo` is a DIFFERENT git repo than the
+    /// daemon's `repo_root`. The daemon root is a bare-ish repo with no run
+    /// branch at all, so anything computed in the cwd answers 404 / empty —
+    /// the exact pre-#748 symptom. Returns `(target_repo, worktree_dir)`.
+    async fn seed_run_in_other_repo(
+        state: &Arc<AppState>,
+        target: &std::path::Path,
+        run_id: &str,
+    ) -> PathBuf {
+        init_test_repo(target);
+        let fork_sha = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(target)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        let run_started = event_log::Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::RunStarted,
+            node_id: None,
+            iter: None,
+            payload: Some(serde_json::json!({
+                "pipeline_name": "test-pipe",
+                "input": "test",
+                "target_repo": target.to_string_lossy(),
+                "fork_sha": fork_sha,
+                "node_defs": [
+                    { "id": "impl-1", "node_type": "agent", "isolated_worktree": true, "inputs": [], "outputs": [] }
+                ],
+                "edges": []
+            })),
+        };
+        append_event(state, &run_started).await.unwrap();
+        let node_started = event_log::Event {
+            id: None,
+            run_id: run_id.into(),
+            ts: event_log::now_iso(),
+            kind: event_log::EventKind::NodeStarted,
+            node_id: Some("impl-1".into()),
+            iter: Some(1),
+            payload: Some(serde_json::json!({ "node_type": "agent", "isolated_worktree": true })),
+        };
+        append_event(state, &node_started).await.unwrap();
+
+        let wt_dir = target.join(".pdo/runs").join(run_id).join("worktree");
+        create_worktree(target, &wt_dir, &format!("pdo/run-{run_id}"), "HEAD").unwrap();
+        wt_dir
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    async fn body_string(resp: Response) -> String {
+        String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_diff_computes_in_effective_repo_not_daemon_cwd() {
+        // #748 AC1: the daemon's cwd has NO run branch; the Run's target repo has.
+        // RED under `.current_dir(&state.repo_root)`: git answers "unknown
+        // revision" → 404.
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let run_id = "diff-other-repo";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        let wt_dir = seed_run_in_other_repo(&state, target_dir.path(), run_id).await;
+
+        std::fs::write(wt_dir.join("elsewhere.rs"), "fn elsewhere() {}\n").unwrap();
+        git_in(&wt_dir, &["add", "elsewhere.rs"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "work in target repo"]);
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("elsewhere.rs") && body.contains("fn elsewhere()"),
+            "raw diff must come from the target repo: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_diff_computes_in_effective_repo_not_daemon_cwd() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path();
+        let run_id = "node-diff-other-repo";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        seed_run_in_other_repo(&state, target, run_id).await;
+
+        // The node's live sub-worktree branch, in the TARGET repo.
+        let pipeline_branch = format!("pdo/run-{run_id}");
+        let sub_wt_dir = sub_worktree_path(target, run_id, "impl-1", 1);
+        let sub_branch = sub_worktree_branch(run_id, "impl-1", 1);
+        create_sub_worktree(target, &sub_wt_dir, &sub_branch, &pipeline_branch).unwrap();
+        std::fs::write(sub_wt_dir.join("node_file.rs"), "fn node_work() {}\n").unwrap();
+        git_in(&sub_wt_dir, &["add", "node_file.rs"]);
+        git_in(&sub_wt_dir, &["commit", "-q", "-m", "node impl"]);
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/nodes/impl-1/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("node_file.rs") && body.contains("fn node_work()"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_diff_lists_files_hunks_and_matches_loc_bounds() {
+        // #748 AC2: files + hunks, three-dot fork → tip, `.pdo/` excluded, and the
+        // totals equal the LOC stat computed over the same bounds.
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path();
+        let run_id = "sdiff";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        let wt_dir = seed_run_in_other_repo(&state, target, run_id).await;
+
+        // Modify README (1 del / 2 add), add a file (3 add), add a blackboard
+        // artefact (excluded), add a binary (counted as a file, 0/0).
+        std::fs::write(wt_dir.join("README.md"), "# test\n\nmore\n").unwrap();
+        std::fs::write(wt_dir.join("src.rs"), "a\nb\nc\n").unwrap();
+        std::fs::create_dir_all(wt_dir.join(".pdo")).unwrap();
+        std::fs::write(wt_dir.join(".pdo/artifact.txt"), "blackboard\n").unwrap();
+        std::fs::write(wt_dir.join("blob.bin"), [0u8, 159, 146, 150, 0, 1]).unwrap();
+        git_in(&wt_dir, &["add", "-A"]);
+        git_in(&wt_dir, &["add", "-f", ".pdo/artifact.txt"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "run work"]);
+        // Advance the target's main after the fork: three-dot must ignore it.
+        std::fs::write(target.join("main_only.rs"), "fn main_only() {}\n").unwrap();
+        git_in(target, &["add", "main_only.rs"]);
+        git_in(target, &["commit", "-q", "-m", "main advance"]);
+
+        // The events are what `load_projected` reads; compute LOC over the same
+        // repo/bounds the endpoint must use.
+        let events = load_events(&state.db, run_id).await.unwrap();
+        let run_state = event_log::project(&events).unwrap();
+        let loc = compute_run_loc(target, run_id, run_diff_base(&run_state)).expect("loc");
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+
+        assert_eq!(json["three_dot"], serde_json::json!(true));
+        assert_eq!(
+            json["to_ref"],
+            serde_json::json!(format!("pdo/run-{run_id}"))
+        );
+        assert_eq!(
+            json["from_sha"],
+            serde_json::json!(run_state.fork_sha.clone().unwrap())
+        );
+        assert_eq!(
+            json["to_sha"].as_str().unwrap(),
+            git_in(&wt_dir, &["rev-parse", "HEAD"])
+        );
+
+        assert_eq!(
+            json["files_changed"].as_u64().unwrap(),
+            loc.files_changed,
+            "{json}"
+        );
+        assert_eq!(json["additions"].as_u64().unwrap(), loc.insertions);
+        assert_eq!(json["deletions"].as_u64().unwrap(), loc.deletions);
+
+        let files = json["files"].as_array().unwrap();
+        let by_path = |p: &str| {
+            files
+                .iter()
+                .find(|f| f["new_path"] == serde_json::json!(p))
+                .unwrap_or_else(|| panic!("{p} missing in {json}"))
+                .clone()
+        };
+        assert!(files
+            .iter()
+            .all(|f| f["new_path"] != serde_json::json!("main_only.rs")));
+        assert!(files
+            .iter()
+            .all(|f| f["new_path"] != serde_json::json!(".pdo/artifact.txt")));
+
+        let readme = by_path("README.md");
+        assert_eq!(readme["status"], serde_json::json!("modified"));
+        assert_eq!(readme["additions"], serde_json::json!(2));
+        assert_eq!(readme["deletions"], serde_json::json!(0));
+        let hunk = &readme["hunks"][0];
+        assert_eq!(hunk["old_start"], serde_json::json!(1));
+        let kinds: Vec<&str> = hunk["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["context", "add", "add"]);
+        assert_eq!(hunk["lines"][2]["content"], serde_json::json!("more"));
+        assert_eq!(hunk["lines"][2]["new_no"], serde_json::json!(3));
+        assert!(hunk["lines"][2]["old_no"].is_null());
+
+        let src = by_path("src.rs");
+        assert_eq!(src["status"], serde_json::json!("added"));
+        assert!(src["old_path"].is_null());
+        assert_eq!(src["additions"], serde_json::json!(3));
+
+        let bin = by_path("blob.bin");
+        assert_eq!(bin["binary"], serde_json::json!(true));
+        assert_eq!(bin["status"], serde_json::json!("added"));
+        assert_eq!(bin["hunks"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn structured_diff_explicit_pair_is_two_dot_and_unsafe_ref_is_400() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path();
+        let run_id = "sdiff-pair";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        let wt_dir = seed_run_in_other_repo(&state, target, run_id).await;
+        let c0 = git_in(&wt_dir, &["rev-parse", "HEAD"]);
+        std::fs::write(wt_dir.join("one.rs"), "1\n").unwrap();
+        git_in(&wt_dir, &["add", "-A"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "one"]);
+        let c1 = git_in(&wt_dir, &["rev-parse", "HEAD"]);
+        std::fs::write(wt_dir.join("two.rs"), "2\n").unwrap();
+        git_in(&wt_dir, &["add", "-A"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "two"]);
+
+        let app = build_router(state);
+        // A delivery-like pair (c0 → c1) shows only `one.rs`.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured?from={c0}&to={c1}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["three_dot"], serde_json::json!(false));
+        assert_eq!(json["files_changed"], serde_json::json!(1));
+        assert_eq!(json["files"][0]["new_path"], serde_json::json!("one.rs"));
+
+        // Option injection is refused before git ever runs.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/runs/{run_id}/diff/structured?from=--output%3D%2Ftmp%2Fx"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // An unknown ref is a 404, like the raw endpoint.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured?to=no-such-branch"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn structured_diff_is_empty_when_no_changes_and_404_when_branch_gone() {
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path();
+        let run_id = "sdiff-empty";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        let wt_dir = seed_run_in_other_repo(&state, target, run_id).await;
+
+        let app = build_router(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["files_changed"], serde_json::json!(0));
+        assert_eq!(json["files"].as_array().unwrap().len(), 0);
+
+        // Cleanup deletes the run branch (ADR-0020): nothing left to diff.
+        git_in(
+            target,
+            &["worktree", "remove", "--force", wt_dir.to_str().unwrap()],
+        );
+        git_in(target, &["branch", "-D", &format!("pdo/run-{run_id}")]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/diff/structured"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn file_at_ref_returns_content_defaults_to_tip_and_404s_missing() {
+        // #748 AC3: the content endpoint the next ticket's context expansion uses.
+        let daemon_dir = tempfile::tempdir().unwrap();
+        init_test_repo(daemon_dir.path());
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path();
+        let run_id = "file-at-ref";
+        let state = test_state_with_dir(daemon_dir.path()).await;
+        let wt_dir = seed_run_in_other_repo(&state, target, run_id).await;
+        std::fs::create_dir_all(wt_dir.join("src")).unwrap();
+        std::fs::write(wt_dir.join("src/new file.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        git_in(&wt_dir, &["add", "-A"]);
+        git_in(&wt_dir, &["commit", "-q", "-m", "add"]);
+
+        let app = build_router(state);
+        // Default ref = the Run tip.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/file?path=src%2Fnew%20file.rs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
+        assert_eq!(body_string(resp).await, "fn a() {}\nfn b() {}\n");
+
+        // At the fork point the file does not exist yet → 404.
+        let fork = git_in(target, &["rev-parse", "HEAD"]);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/runs/{run_id}/file?path=src%2Fnew%20file.rs&ref={fork}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // README exists at the fork point.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/file?path=README.md&ref={fork}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_string(resp).await, "# test\n");
+
+        // Parent-escaping paths are refused.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/runs/{run_id}/file?path=..%2Fetc%2Fpasswd"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

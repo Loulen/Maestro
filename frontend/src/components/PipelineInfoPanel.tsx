@@ -1,8 +1,10 @@
-import { useState, useMemo, useRef, useEffect } from "react";
-import { Info, Terminal, X, FileText, Code, Box, Loader, Bot, Copy, Download, ChevronDown, ChevronRight, Play, PowerOff } from "lucide-react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { Info, Terminal, X, FileText, Code, Box, Loader, Bot, Copy, Download, ChevronDown, ChevronRight, Play, PowerOff, FileDiff } from "lucide-react";
 import { SectionHead } from "./InspectorPrimitives";
 import TmuxTerminal from "./TmuxTerminal";
-import DiffSection from "./DiffSection";
+import DiffTab from "./DiffTab";
+import { deliverySignature } from "../lib/diffTab";
+import type { CollapsedFiles } from "../lib/diffTab";
 import type { LibraryPipelineEntry } from "../api";
 import { fetchPipelineDocument, fetchPipelineSkillsSidecar, fetchRunPipelineDocument, fetchRunPipelineSkillsSidecar, openLibraryAssistant, startRunManager, stopRunManager } from "../api";
 import type { RunState, PipelineDef } from "../types";
@@ -12,7 +14,7 @@ import { formatEstCost } from "../lib/costLabel";
 import { serializePipeline } from "../lib/serializePipeline";
 import { highlightYaml } from "./yamlHighlight";
 
-export type TabId = "info" | "manager" | "yaml" | "assistant";
+export type TabId = "info" | "diff" | "manager" | "yaml" | "assistant";
 
 function StatRow({
   label,
@@ -100,13 +102,39 @@ export default function PipelineInfoPanel({
   const hasAssistant = !run && !!assistantId;
   const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "info");
   const resolvedTab =
-    (activeTab === "manager" && !run) ||
+    ((activeTab === "manager" || activeTab === "diff") && !run) ||
     (activeTab === "assistant" && !hasAssistant)
       ? "info"
       : activeTab;
 
+  // #748: the Diff tab's expand/collapse state, keyed by file path, lives here so
+  // it survives `Info ↔ Diff` and a "Diff changed · Reload". Reset per Run.
+  // Keyed by Run id, so a Run switch under a mounted panel starts fresh.
+  const [diffCollapsedByRun, setDiffCollapsedByRun] = useState<Record<string, Set<string>>>({});
+  const runId = run?.run_id ?? null;
+  const diffCollapsed: CollapsedFiles = runId ? (diffCollapsedByRun[runId] ?? null) : null;
+  const onDiffCollapsedChange = useCallback(
+    (next: Set<string>) => {
+      if (!runId) return;
+      setDiffCollapsedByRun((prev) => ({ ...prev, [runId]: next }));
+    },
+    [runId],
+  );
+
+  // The blue dot on the Diff tab: the tip moved (a node delivered) since the
+  // tab was last looked at. Recorded on entering and on leaving the tab.
+  const deliverySig = run ? deliverySignature(run) : "";
+  const [seenDeliverySig, setSeenDeliverySig] = useState(deliverySig);
+  const selectTab = (id: TabId) => {
+    if (id === "diff" || resolvedTab === "diff") setSeenDeliverySig(deliverySig);
+    setActiveTab(id);
+  };
+  const nudgeDiff =
+    run != null && resolvedTab !== "diff" && seenDeliverySig !== deliverySig && deliverySig !== "";
+
   const tabs: { id: TabId; label: string; icon: typeof Info; show: boolean }[] = [
     { id: "info", label: "Info", icon: FileText, show: true },
+    { id: "diff", label: "Diff", icon: FileDiff, show: run != null },
     { id: "manager", label: "Manager", icon: Terminal, show: run != null },
     { id: "assistant", label: "Assistant", icon: Bot, show: hasAssistant },
     { id: "yaml", label: "YAML", icon: Code, show: true },
@@ -149,7 +177,7 @@ export default function PipelineInfoPanel({
             <button
               key={t.id}
               data-testid={`info-tab-${t.id}`}
-              onClick={() => setActiveTab(t.id)}
+              onClick={() => selectTab(t.id)}
               className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors cursor-pointer ${
                 resolvedTab === t.id
                   ? "border-b-2 border-acc text-fg font-medium"
@@ -165,6 +193,13 @@ export default function PipelineInfoPanel({
                   data-testid="manager-tab-dot"
                 />
               )}
+              {t.id === "diff" && nudgeDiff && (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-st-running"
+                  aria-hidden
+                  data-testid="diff-tab-dot"
+                />
+              )}
             </button>
           ))}
       </div>
@@ -176,6 +211,16 @@ export default function PipelineInfoPanel({
           pipelineName={pipelineName}
           variables={variableEntries}
           hasAssistant={hasAssistant}
+          onOpenDiff={() => selectTab("diff")}
+        />
+      )}
+
+      {resolvedTab === "diff" && run && (
+        <DiffTab
+          key={run.run_id}
+          run={run}
+          collapsed={diffCollapsed}
+          onCollapsedChange={onDiffCollapsedChange}
         />
       )}
 
@@ -505,12 +550,15 @@ function InfoTab({
   pipelineName,
   variables,
   hasAssistant,
+  onOpenDiff,
 }: {
   run: RunState | null;
   pipeline: PipelineDef | null;
   pipelineName: string;
   variables: [string, { default: unknown }][];
   hasAssistant: boolean;
+  /** #748: the Changes stat is the link to what it counts — the Diff tab. */
+  onOpenDiff: () => void;
 }) {
   const durationMs = useRunDuration(run?.started_at, run?.completed_at, run?.status);
   const durationLabel = formatDuration(durationMs);
@@ -610,9 +658,16 @@ function InfoTab({
             <StatRow label="Node sessions started" testid="stat-sessions">
               {(run.sessions_spawned ?? 0).toLocaleString()}
             </StatRow>
-            <StatRow label="Lines changed" testid="stat-loc">
+            <StatRow label="Changes" testid="stat-loc">
               {run.loc ? (
-                <span className="flex items-center gap-1.5">
+                // #748: the LOC stat opens the Diff tab — the count IS what the
+                // tab shows (same endpoint bounds), so the number links to it.
+                <button
+                  onClick={onOpenDiff}
+                  className="flex items-center gap-1.5 rounded px-1 -mx-1 transition-colors hover:bg-bg-4 hover:text-fg-2 cursor-pointer"
+                  data-testid="stat-loc-open-diff"
+                  title="Open the Diff tab"
+                >
                   <span className="text-st-done">
                     +{run.loc.insertions.toLocaleString()}
                   </span>
@@ -620,10 +675,11 @@ function InfoTab({
                     −{run.loc.deletions.toLocaleString()}
                   </span>
                   <span className="text-fg-4">
-                    {run.loc.files_changed.toLocaleString()}{" "}
+                    · {run.loc.files_changed.toLocaleString()}{" "}
                     {run.loc.files_changed === 1 ? "file" : "files"}
                   </span>
-                </span>
+                  <span className="text-fg-4" aria-hidden>↗</span>
+                </button>
               ) : (
                 "—"
               )}
@@ -672,8 +728,6 @@ function InfoTab({
           </div>
         </div>
       )}
-
-      <DiffSection run={run} />
 
       <div className="px-3 py-3" style={{ fontSize: "11.5px" }}>
         <SectionHead title="Description" />

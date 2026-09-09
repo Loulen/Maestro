@@ -255,3 +255,141 @@ async fn run_diff_ignores_parked_checkout_over_real_daemon() {
         "parked divergent HEAD must not sweep in main's pre-fork files: {body}"
     );
 }
+
+/// #748 — the whole bug, end-to-end: a Run whose `target_repo` is NOT the daemon's
+/// working directory. The daemon root has no such run branch, so the pre-#748
+/// handlers (`git diff` in `state.repo_root`) answered 404 for every such Run —
+/// which is every Run of an operator who points PDO at another repository. Both
+/// the raw endpoint and the structured one must read the Run's effective repo.
+#[tokio::test]
+async fn run_diff_and_structured_diff_use_the_effective_repo_over_real_daemon() {
+    let daemon = TestDaemon::spawn(seed).await.unwrap();
+
+    // A second, unrelated git repository: the Run's target.
+    let target_tmp = tempfile::tempdir().unwrap();
+    let target = target_tmp.path().to_path_buf();
+    git_init_with_commit(&target).unwrap();
+    let run_id = create_run(daemon.url(), target.to_string_lossy().into_owned())
+        .await
+        .expect("run created");
+
+    // The pipeline worktree is cut in the TARGET repo, not under the daemon root.
+    let wt_dir = target.join(".pdo/runs").join(&run_id).join("worktree");
+    for _ in 0..100 {
+        if wt_dir.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        wt_dir.exists(),
+        "pipeline worktree should exist in the target repo"
+    );
+    assert!(
+        !daemon
+            .repo_root()
+            .join(".pdo/runs")
+            .join(&run_id)
+            .join("worktree")
+            .exists(),
+        "nothing of this Run is cut under the daemon root"
+    );
+
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    std::fs::write(wt_dir.join("feature.rs"), "fn feature() {}\nfn more() {}\n").unwrap();
+    std::fs::write(wt_dir.join(".gitignore"), ".pdo/runs/\n# tweak\n").unwrap();
+    git(&wt_dir, &["add", "-A"]);
+    git(
+        &wt_dir,
+        &["commit", "-q", "-m", "run work in the target repo"],
+    );
+
+    // Raw patch.
+    let body = reqwest::Client::new()
+        .get(format!("{}/runs/{run_id}/diff", daemon.url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        body.status(),
+        200,
+        "raw diff must resolve in the target repo"
+    );
+    let body = body.text().await.unwrap();
+    assert!(
+        body.contains("feature.rs") && body.contains("fn feature()"),
+        "raw diff computed in the target repo: {body}"
+    );
+
+    // Structured diff: files + hunks, totals identical to the LOC stat.
+    let json: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/runs/{run_id}/diff/structured", daemon.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(json["three_dot"], serde_json::json!(true), "{json}");
+    assert_eq!(json["files_changed"], serde_json::json!(2), "{json}");
+    let paths: Vec<&str> = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["new_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec![".gitignore", "feature.rs"]);
+    let feature = &json["files"][1];
+    assert_eq!(feature["status"], serde_json::json!("added"));
+    assert_eq!(feature["additions"], serde_json::json!(2));
+    assert_eq!(
+        feature["hunks"][0]["lines"][0]["kind"],
+        serde_json::json!("add")
+    );
+    assert_eq!(
+        feature["hunks"][0]["lines"][0]["content"],
+        serde_json::json!("fn feature() {}")
+    );
+
+    let run: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/runs/{run_id}", daemon.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        run["loc"]["files_changed"], json["files_changed"],
+        "counted = shown"
+    );
+    assert_eq!(run["loc"]["insertions"], json["additions"]);
+    assert_eq!(run["loc"]["deletions"], json["deletions"]);
+
+    // File content at the Run tip (default ref).
+    let content = reqwest::Client::new()
+        .get(format!(
+            "{}/runs/{run_id}/file?path=feature.rs",
+            daemon.url()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(content.status(), 200);
+    assert_eq!(
+        content.text().await.unwrap(),
+        "fn feature() {}\nfn more() {}\n"
+    );
+}
