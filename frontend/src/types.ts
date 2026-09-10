@@ -317,6 +317,13 @@ export interface InstanceSettings {
    */
   update_check: BoolSettingField;
   /**
+   * #751 (ADR-0067 §4): may an agent's `pdo review reply --resolved` resolve the
+   * review comment directly? **Off by default**: the reply is a *proposal* and the
+   * human clicks Resolve / Reopen. On, the comment resolves on the spot and the
+   * human keeps Reopen. Instance-wide, `stored → env → default` like auto-name.
+   */
+  review_agent_can_resolve: BoolSettingField;
+  /**
    * Manager on demand: does every new Run automatically spawn its Pipeline
    * Manager session? **Off by default** — a Run starts managerless and the user
    * starts one from the Manager tab when they want it. Gates ONLY the automatic
@@ -491,6 +498,9 @@ export interface UpdateSettingsRequest {
   /** Version check switch (#697). Same plain-bool discipline: `false` persists as a
    *  stored `0` that beats a `PDO_UPDATE_CHECK=1`. */
   update_check?: boolean;
+  /** #751: let agents resolve review comments directly. Same plain-bool discipline:
+   *  `false` persists as a stored `0` that beats a `PDO_REVIEW_AGENT_CAN_RESOLVE=1`. */
+  review_agent_can_resolve?: boolean;
   /** Manager on demand: auto-spawn the manager with each Run. Same plain-bool
    *  discipline: `false` persists as a stored `0` that beats a
    *  `PDO_MANAGER_ENABLED=1`. */
@@ -2026,11 +2036,12 @@ export interface RunRefs {
 export type ReviewSide = "old" | "new";
 export type ReviewCommentStatus = "sent" | "resolved";
 
-/** An agent's reply (#751 emits them; the shape is fixed here). */
+/** An agent's reply (#751, `pdo review reply`): `manager` or a node id as author. */
 export interface ReviewReply {
   author: string;
   text: string;
   at: string;
+  /** The reply carried `--resolved`: a proposal, or a direct resolution under the setting. */
   proposes_resolution?: boolean;
 }
 
@@ -2053,6 +2064,23 @@ export interface ReviewComment {
   batch_id?: string;
   status: ReviewCommentStatus;
   replies?: ReviewReply[];
+  /** #751: a `--resolved` reply awaits the human (setting off) — "Resolution proposed". */
+  proposal_pending?: boolean;
+  /** `user`, `manager` or a node id; set while `resolved`. */
+  resolved_by?: string;
+  resolved_at?: string;
+  /** The last reopen (a resolved comment reopened, or a proposal declined). */
+  reopened_by?: string;
+  reopened_at?: string;
+  /** The last reopen declined a pending proposal (the comment stayed `sent`). */
+  proposal_declined?: boolean;
+}
+
+/** `POST …/review/comments/<id>/resolve|reopen` — the human's verbs (#751). */
+export interface ReviewDecisionResponse {
+  comment: ReviewComment;
+  /** False when the comment was already in the requested state (no event). */
+  changed: boolean;
 }
 
 /** One draft as posted to `POST /runs/<id>/review/comments/send`. */

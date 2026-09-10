@@ -112,6 +112,113 @@ pub(crate) struct ReviewComment {
     pub status: ReviewCommentStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<ReviewReply>,
+    /// #751: a `--resolved` reply is waiting for the human's decision (the
+    /// setting `review_agent_can_resolve` was off). Cleared by a resolve or a
+    /// reopen — derived, so the UI never has to scan the thread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proposal_pending: bool,
+    /// Who resolved (`user`, `manager`, or a node id) and when — `None` while
+    /// `sent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    /// The last reopen, kept so the footer can read "Reopened by you · time".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened_at: Option<String>,
+    /// The last reopen landed on a comment that was still `sent`: it declined a
+    /// pending proposal rather than reopening a resolved comment. Cleared by the
+    /// next reply.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proposal_declined: bool,
+}
+
+/// How the agent's `--resolved` is treated (#751, ADR-0067 §4): a proposal the
+/// human decides on, or a direct resolution under the instance setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReplyOutcome {
+    /// Plain reply, no `--resolved`.
+    Replied,
+    /// `--resolved` with the setting off: "Resolution proposed", Resolve / Reopen.
+    Proposed,
+    /// `--resolved` with the setting on: resolved on the spot (the human keeps Reopen).
+    Resolved,
+}
+
+/// Middle tier of `stored → env → default(false)`; resolved by
+/// [`review_agent_can_resolve_with`].
+pub(crate) const REVIEW_AGENT_CAN_RESOLVE_ENV: &str = "PDO_REVIEW_AGENT_CAN_RESOLVE";
+
+/// Built-in default: **off** — the human resolves, the agent proposes (ADR-0067 §4).
+pub(crate) const REVIEW_AGENT_CAN_RESOLVE_DEFAULT: bool = false;
+
+/// The env tier, through the shared boolean parser so a typo falls through to
+/// the default rather than silently meaning `false`.
+pub(crate) fn env_review_agent_can_resolve() -> Option<bool> {
+    std::env::var(REVIEW_AGENT_CAN_RESOLVE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(crate::stale_detector::parse_bool_setting)
+}
+
+/// Resolve `review_agent_can_resolve`: `stored → env → default(false)`. `stored`
+/// is the raw `instance_config.review_agent_can_resolve` column: `Some(0)` is a
+/// stored **off** and wins over the env; only SQL `NULL` falls through — the
+/// same discipline as `default_auto_name`.
+pub(crate) fn review_agent_can_resolve_with(stored: Option<i64>) -> bool {
+    match stored {
+        Some(v) => v != 0,
+        None => env_review_agent_can_resolve().unwrap_or(REVIEW_AGENT_CAN_RESOLVE_DEFAULT),
+    }
+}
+
+/// The `PDO_NODE_ID` the manager's tmux session is wrapped with (see
+/// `spawn_manager_session`): the one session id that is not a node.
+pub(crate) const MANAGER_NODE_ID: &str = "__manager__";
+
+/// The author of a reply, deduced from the session that issued it: the manager
+/// session reads `manager`, a node session reads its node id. Without a session
+/// claim the caller's own `author` field is taken, else the neutral `agent`.
+pub(crate) fn reply_author(session_node_id: Option<&str>, declared: Option<&str>) -> String {
+    match session_node_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(MANAGER_NODE_ID) => "manager".to_string(),
+        Some(node) => node.to_string(),
+        None => declared
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("agent")
+            .to_string(),
+    }
+}
+
+/// `?state=` of the list endpoint / `--state` of `pdo review list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StateFilter {
+    Open,
+    Resolved,
+    All,
+}
+
+impl StateFilter {
+    pub(crate) fn parse(s: &str) -> Option<StateFilter> {
+        match s.trim() {
+            "open" | "sent" => Some(StateFilter::Open),
+            "resolved" => Some(StateFilter::Resolved),
+            "all" | "" => Some(StateFilter::All),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn keeps(self, c: &ReviewComment) -> bool {
+        match self {
+            StateFilter::All => true,
+            StateFilter::Open => c.status == ReviewCommentStatus::Sent,
+            StateFilter::Resolved => c.status == ReviewCommentStatus::Resolved,
+        }
+    }
 }
 
 fn default_status() -> ReviewCommentStatus {
@@ -242,6 +349,10 @@ pub(crate) fn fold(comments: &mut Vec<ReviewComment>, event: &Event) {
                 tracing::warn!("review_comment_replied names unknown comment {id}; skipped");
                 return;
             };
+            let proposes_resolution = payload
+                .get("proposes_resolution")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             c.replies.push(ReviewReply {
                 author: payload
                     .get("author")
@@ -254,11 +365,14 @@ pub(crate) fn fold(comments: &mut Vec<ReviewComment>, event: &Event) {
                     .unwrap_or_default()
                     .to_string(),
                 at: event.ts.clone(),
-                proposes_resolution: payload
-                    .get("proposes_resolution")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                proposes_resolution,
             });
+            // A proposal on an open comment waits for the human; a following
+            // `review_comment_resolved` (setting on) clears it right away.
+            if proposes_resolution && c.status == ReviewCommentStatus::Sent {
+                c.proposal_pending = true;
+            }
+            c.proposal_declined = false;
         }
         EventKind::ReviewCommentResolved | EventKind::ReviewCommentReopened => {
             let Some(id) = payload.get("id").and_then(|v| v.as_str()) else {
@@ -268,11 +382,29 @@ pub(crate) fn fold(comments: &mut Vec<ReviewComment>, event: &Event) {
                 tracing::warn!("{:?} names unknown comment {id}; skipped", event.kind);
                 return;
             };
-            c.status = if event.kind == EventKind::ReviewCommentResolved {
-                ReviewCommentStatus::Resolved
+            let by = payload
+                .get("by")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user")
+                .to_string();
+            if event.kind == EventKind::ReviewCommentResolved {
+                c.status = ReviewCommentStatus::Resolved;
+                c.resolved_by = Some(by);
+                c.resolved_at = Some(event.ts.clone());
+                c.proposal_pending = false;
+                c.proposal_declined = false;
             } else {
-                ReviewCommentStatus::Sent
-            };
+                // Reopen on a `sent` comment declines its pending proposal (the
+                // spec keeps one verb for both: the event is the same).
+                let declined = c.status == ReviewCommentStatus::Sent && c.proposal_pending;
+                c.status = ReviewCommentStatus::Sent;
+                c.resolved_by = None;
+                c.resolved_at = None;
+                c.reopened_by = Some(by);
+                c.reopened_at = Some(event.ts.clone());
+                c.proposal_pending = false;
+                c.proposal_declined = declined;
+            }
         }
         _ => {}
     }
@@ -299,6 +431,12 @@ mod tests {
             batch_id: Some("b1".into()),
             status: ReviewCommentStatus::Sent,
             replies: vec![],
+            proposal_pending: false,
+            resolved_by: None,
+            resolved_at: None,
+            reopened_by: None,
+            reopened_at: None,
+            proposal_declined: false,
         }
     }
 
@@ -408,6 +546,10 @@ mod tests {
         assert_eq!(list[0].replies.len(), 1);
         assert_eq!(list[0].replies[0].author, "manager");
         assert!(list[0].replies[0].proposes_resolution);
+        assert!(
+            list[0].proposal_pending,
+            "a --resolved reply waits for the human"
+        );
         fold(
             &mut list,
             &ev(
@@ -416,14 +558,30 @@ mod tests {
             ),
         );
         assert_eq!(list[0].status, ReviewCommentStatus::Resolved);
+        assert_eq!(
+            list[0].resolved_by.as_deref(),
+            Some("user"),
+            "no `by` ⇒ the human"
+        );
+        assert_eq!(
+            list[0].resolved_at.as_deref(),
+            Some("2026-09-09T10:00:00.000Z")
+        );
+        assert!(!list[0].proposal_pending);
         fold(
             &mut list,
             &ev(
                 EventKind::ReviewCommentReopened,
-                serde_json::json!({ "id": "rc-001" }),
+                serde_json::json!({ "id": "rc-001", "by": "user" }),
             ),
         );
         assert_eq!(list[0].status, ReviewCommentStatus::Sent);
+        assert!(list[0].resolved_by.is_none());
+        assert_eq!(list[0].reopened_by.as_deref(), Some("user"));
+        assert!(
+            !list[0].proposal_declined,
+            "reopening a resolved comment is not a decline"
+        );
         // Unknown id: ignored, never a panic.
         fold(
             &mut list,
@@ -433,6 +591,127 @@ mod tests {
             ),
         );
         assert_eq!(list[0].replies.len(), 1);
+    }
+
+    #[test]
+    fn reopen_on_a_sent_comment_declines_the_pending_proposal_and_a_reply_clears_the_decline() {
+        let mut list = vec![];
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentSent,
+                serde_json::to_value(sent("rc-001", 3)).unwrap(),
+            ),
+        );
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentReplied,
+                serde_json::json!({ "id": "rc-001", "author": "xuTJYLUa", "text": "done", "proposes_resolution": true }),
+            ),
+        );
+        assert!(list[0].proposal_pending);
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentReopened,
+                serde_json::json!({ "id": "rc-001", "by": "user" }),
+            ),
+        );
+        assert_eq!(list[0].status, ReviewCommentStatus::Sent);
+        assert!(!list[0].proposal_pending);
+        assert!(
+            list[0].proposal_declined,
+            "Reopen on a proposal = declined, comment stays open"
+        );
+        assert_eq!(list[0].reopened_by.as_deref(), Some("user"));
+        // The agent answers again: the decline is history, the thread grows.
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentReplied,
+                serde_json::json!({ "id": "rc-001", "author": "xuTJYLUa", "text": "second try" }),
+            ),
+        );
+        assert!(!list[0].proposal_declined);
+        assert!(!list[0].proposal_pending);
+        assert_eq!(list[0].replies.len(), 2);
+    }
+
+    #[test]
+    fn agent_resolving_directly_records_the_agent_as_resolver() {
+        let mut list = vec![];
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentSent,
+                serde_json::to_value(sent("rc-001", 3)).unwrap(),
+            ),
+        );
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentReplied,
+                serde_json::json!({ "id": "rc-001", "author": "manager", "text": "fixed", "proposes_resolution": true }),
+            ),
+        );
+        fold(
+            &mut list,
+            &ev(
+                EventKind::ReviewCommentResolved,
+                serde_json::json!({ "id": "rc-001", "by": "manager" }),
+            ),
+        );
+        assert_eq!(list[0].status, ReviewCommentStatus::Resolved);
+        assert_eq!(list[0].resolved_by.as_deref(), Some("manager"));
+        assert!(
+            !list[0].proposal_pending,
+            "the direct resolution clears the proposal flag"
+        );
+        let wire = serde_json::to_value(&list[0]).unwrap();
+        assert_eq!(wire["resolved_by"], "manager");
+        assert!(
+            wire.get("proposal_pending").is_none(),
+            "false flags stay off the wire"
+        );
+    }
+
+    #[test]
+    fn reply_author_comes_from_the_session_then_the_declared_field() {
+        assert_eq!(reply_author(Some(MANAGER_NODE_ID), None), "manager");
+        assert_eq!(reply_author(Some("xuTJYLUa"), Some("ignored")), "xuTJYLUa");
+        assert_eq!(reply_author(None, Some(" fixer ")), "fixer");
+        assert_eq!(reply_author(Some("  "), None), "agent");
+        assert_eq!(reply_author(None, None), "agent");
+    }
+
+    #[test]
+    fn state_filter_parses_and_keeps_by_status() {
+        let mut resolved = sent("rc-002", 5);
+        resolved.status = ReviewCommentStatus::Resolved;
+        let open = sent("rc-001", 3);
+        assert_eq!(StateFilter::parse("open"), Some(StateFilter::Open));
+        assert_eq!(StateFilter::parse("resolved"), Some(StateFilter::Resolved));
+        assert_eq!(StateFilter::parse("all"), Some(StateFilter::All));
+        assert_eq!(StateFilter::parse("nope"), None);
+        assert!(StateFilter::Open.keeps(&open) && !StateFilter::Open.keeps(&resolved));
+        assert!(!StateFilter::Resolved.keeps(&open) && StateFilter::Resolved.keeps(&resolved));
+        assert!(StateFilter::All.keeps(&open) && StateFilter::All.keeps(&resolved));
+    }
+
+    #[test]
+    fn review_agent_can_resolve_stored_beats_env_and_defaults_off() {
+        // Stored decisions win whatever the env says; NULL falls through to the
+        // built-in default (off). The env tier itself is covered by the settings
+        // view test — process-global env is not toggled here.
+        assert!(review_agent_can_resolve_with(Some(1)));
+        assert!(!review_agent_can_resolve_with(Some(0)));
+        if env_review_agent_can_resolve().is_none() {
+            assert_eq!(
+                review_agent_can_resolve_with(None),
+                REVIEW_AGENT_CAN_RESOLVE_DEFAULT
+            );
+        }
     }
 
     #[test]

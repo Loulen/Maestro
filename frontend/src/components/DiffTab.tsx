@@ -277,7 +277,7 @@ export default function DiffTab({ run, collapsed, onCollapsedChange }: Props) {
               <span
                 className="ml-0.5 inline-flex h-[14px] items-center rounded-[7px] bg-st-running-bg px-[5px] font-medium text-st-running"
                 style={{ fontSize: "9.5px" }}
-                title={`${pendingCount(run.review_comments)} review comment(s) awaiting the manager`}
+                title={`${pendingCount(run.review_comments)} review comment(s) pending — sent, not resolved`}
                 data-testid="diff-review-pending"
               >
                 {pendingCount(run.review_comments)}

@@ -1,8 +1,22 @@
 import { describe, it, expect } from "vitest";
 import {
   addDraft,
+  allSeen,
   anchorLabel,
+  authorKind,
+  authorLabel,
+  commentState,
   countsByPath,
+  firstWords,
+  footerStatus,
+  markSeen,
+  readSeen,
+  sortForSidebar,
+  stateCounts,
+  stateCountsByPath,
+  unreadCommentCount,
+  unreadReplies,
+  writeSeen,
   draftsForPair,
   entryAt,
   mergeEntries,
@@ -120,5 +134,106 @@ describe("reviewComments (#750)", () => {
     expect(relativeTime("2026-09-09T10:05:00Z", now)).toBe("5 min ago");
     expect(relativeTime("garbage", now)).toBe("");
     expect(relativeTime("2026-09-09T08:00:00Z", now)).toMatch(/\d/);
+  });
+});
+
+describe("reviewComments — the conversation (#751)", () => {
+  const replied = (over: Partial<ReviewComment> = {}) =>
+    sent({ id: "rc-002", line: 7, replies: [{ author: "manager", text: "done", at: "2026-09-09T10:05:00Z" }], ...over });
+  const proposed = (over: Partial<ReviewComment> = {}) =>
+    sent({
+      id: "rc-003",
+      line: 9,
+      proposal_pending: true,
+      replies: [{ author: "xuTJYLUa", text: "fixed", at: "2026-09-09T10:06:00Z", proposes_resolution: true }],
+      ...over,
+    });
+  const resolved = (over: Partial<ReviewComment> = {}) =>
+    sent({ id: "rc-004", line: 11, status: "resolved", resolved_by: "user", resolved_at: "2026-09-09T10:07:00Z", ...over });
+
+  it("reads a comment's state: open, proposed, resolved — and counts them", () => {
+    expect(commentState(sent())).toBe("open");
+    expect(commentState(replied())).toBe("open");
+    expect(commentState(proposed())).toBe("proposed");
+    expect(commentState(resolved())).toBe("resolved");
+    expect(stateCounts([sent(), replied(), proposed(), resolved()])).toEqual({ open: 2, proposed: 1, resolved: 1 });
+    const entries = mergeEntries([], [sent(), proposed({ path: "a.ts" }), resolved()], PAIR, ["a.ts", "b.ts"]);
+    expect(stateCountsByPath(entries).get("a.ts")).toEqual({ open: 0, proposed: 1, resolved: 0 });
+    expect(stateCountsByPath(entries).get("b.ts")).toEqual({ open: 1, proposed: 0, resolved: 1 });
+  });
+
+  it("sorts the sidebar drafts → proposed → open → resolved, keeping diff order inside a group", () => {
+    const drafts = addDraft([], { path: "b.ts", side: "new", line: 20 }, PAIR, "d");
+    const entries = mergeEntries(drafts, [resolved(), sent(), proposed(), replied()], PAIR, ["b.ts"]);
+    const order = sortForSidebar(entries).map((e) => (e.kind === "draft" ? "draft" : e.comment.id));
+    expect(order).toEqual(["draft", "rc-003", "rc-001", "rc-002", "rc-004"]);
+  });
+
+  it("names authors by kind and truncates the collapsed summary", () => {
+    expect(authorKind("user")).toBe("user");
+    expect(authorKind("manager")).toBe("manager");
+    expect(authorKind("xuTJYLUa")).toBe("node");
+    expect(authorLabel("user")).toBe("you");
+    expect(authorLabel("xuTJYLUa")).toBe("xuTJYLUa");
+    expect(firstWords("\n  Missing early return on an empty event slice, the loop allocates.\nmore", 44)).toBe(
+      "Missing early return on an empty event slice…",
+    );
+    expect(firstWords("short")).toBe("short");
+  });
+
+  it("describes the footer: awaiting → replied → proposed → resolved → reopened / declined", () => {
+    expect(footerStatus(sent())).toEqual({ kind: "awaiting" });
+    expect(footerStatus(replied())).toEqual({ kind: "replied", author: "manager", at: "2026-09-09T10:05:00Z" });
+    expect(footerStatus(proposed())).toEqual({ kind: "proposed", author: "xuTJYLUa", at: "2026-09-09T10:06:00Z" });
+    expect(footerStatus(resolved())).toEqual({ kind: "resolved", by: "user", at: "2026-09-09T10:07:00Z" });
+    // Reopened after the last reply → reopened; declined proposal → declined.
+    expect(footerStatus(replied({ reopened_by: "user", reopened_at: "2026-09-09T10:08:00Z" }))).toEqual({
+      kind: "reopened",
+      by: "user",
+      at: "2026-09-09T10:08:00Z",
+    });
+    expect(
+      footerStatus(replied({ reopened_by: "user", reopened_at: "2026-09-09T10:08:00Z", proposal_declined: true })),
+    ).toEqual({ kind: "declined", by: "user", at: "2026-09-09T10:08:00Z" });
+    // A reply after the reopen wins.
+    expect(
+      footerStatus(
+        replied({
+          reopened_at: "2026-09-09T10:04:00Z",
+          reopened_by: "user",
+        }),
+      ).kind,
+    ).toBe("replied");
+  });
+
+  it("tracks unread replies per browser and counts the Diff tab badge", () => {
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    expect(readSeen("r1", storage)).toEqual({});
+    const comments = [replied(), proposed(), resolved({ replies: [{ author: "manager", text: "x", at: "t" }] })];
+    // Nothing seen: both open comments with replies count; the resolved one does not.
+    expect(unreadReplies(comments[0], {})).toBe(1);
+    expect(unreadCommentCount(comments, {})).toBe(2);
+    // Opening the Review: everything seen.
+    const seen = allSeen(comments);
+    writeSeen("r1", seen, storage);
+    expect(readSeen("r1", storage)).toEqual({ "rc-002": 1, "rc-003": 1, "rc-004": 1 });
+    expect(unreadCommentCount(comments, seen)).toBe(0);
+    // A second reply lands: one unread again, cleared per card.
+    const grown = replied({ replies: [...replied().replies!, { author: "manager", text: "again", at: "t2" }] });
+    expect(unreadReplies(grown, seen)).toBe(1);
+    expect(unreadCommentCount([grown], seen)).toBe(1);
+    const after = markSeen(seen, grown);
+    expect(unreadReplies(grown, after)).toBe(0);
+    expect(markSeen(after, grown)).toBe(after);
+    // Garbage in storage reads as nothing seen.
+    storage.setItem("pdo.review.seen.r1", "[1,2]");
+    expect(readSeen("r1", storage)).toEqual({});
+    writeSeen("r1", {}, storage);
+    expect(storage.getItem("pdo.review.seen.r1")).toBeNull();
   });
 });

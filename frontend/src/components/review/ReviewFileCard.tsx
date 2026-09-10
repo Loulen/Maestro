@@ -5,10 +5,11 @@ import type { DiffFile, ReviewSide } from "../../types";
 import { fetchRunFileAtRef } from "../../api";
 import { baseName, fileHunks, filePath, langOf, statusLetter } from "../../lib/runRefs";
 import type { RefPair, ViewMode } from "../../lib/runRefs";
-import type { Anchor, ReviewEntry } from "../../lib/reviewComments";
-import { entryAt, plural, wipKey } from "../../lib/reviewComments";
+import type { Anchor, CommentState, ReviewEntry } from "../../lib/reviewComments";
+import { commentState, entryAt, plural, stateCounts, wipKey } from "../../lib/reviewComments";
+import type { ReviewComment } from "../../types";
 import CommentEditor from "./CommentEditor";
-import CommentCard, { Badge } from "./CommentCard";
+import CommentCard, { Badge, StateIcon } from "./CommentCard";
 
 /**
  * One file of the Review page (#749): a sticky header (chevron, status letter,
@@ -29,8 +30,13 @@ import CommentCard, { Badge } from "./CommentCard";
  * `+` widget on a line number opens the editor (widget row) for a line without
  * a comment, re-opens the draft for edit when there is one, and only toasts on
  * a sent (immutable) comment: **one comment per line**. Anchored lines carry a
- * dot on the number and a 2px bar on the content cell, amber for a draft, blue
- * for a sent comment, through a per-card `<style>` scoped to the card's id.
+ * dot on the number and a 2px bar on the content cell, through a per-card
+ * `<style>` scoped to the card's id: amber for a draft; for a sent comment the
+ * colour follows its state (#751) — blue open, amber resolution proposed, green
+ * resolved — so a scan of the file shows what is still open. The header's
+ * badges are icon + count per state (proposed first). Hiding resolved comments
+ * (the page's eye toggle) drops their cards from the extend slots but keeps the
+ * green dot on the line.
  */
 
 /** What the page hands every card to act on comments (#750). */
@@ -53,6 +59,18 @@ export interface ReviewCommentsApi {
   sendDraft: (key: string) => void;
   /** The `+` landed on a sent comment: nothing to open, the page explains. */
   sentLineClicked: () => void;
+  /** #751: the human's decision on a sent comment. */
+  resolve: (comment: ReviewComment) => void;
+  reopen: (comment: ReviewComment) => void;
+  /** Comment ids with a Resolve / Reopen in flight. */
+  deciding: ReadonlySet<string>;
+  /** Unread replies of a comment in this browser (0 = all seen). */
+  unreadOf: (comment: ReviewComment) => number;
+  /** Comment ids whose reply just landed live (outline flash). */
+  flashing: ReadonlySet<string>;
+  markSeen: (comment: ReviewComment) => void;
+  /** Eye toggle: false hides resolved cards (their anchor dot stays). */
+  showResolved: boolean;
 }
 
 interface Props {
@@ -83,6 +101,13 @@ const LETTER_CLASS: Record<"A" | "M" | "D" | "R", string> = {
 };
 
 const NO_ENTRIES: ReviewEntry[] = [];
+
+/** Line dot / bar colour per sent-comment state (#751). */
+const STATE_VAR: Record<CommentState, string> = {
+  open: "var(--color-st-running)",
+  proposed: "var(--color-st-await)",
+  resolved: "var(--color-st-done)",
+};
 
 function sideOf(s: SplitSide): ReviewSide {
   return s === SplitSide.old ? "old" : "new";
@@ -171,26 +196,32 @@ export default function ReviewFileCard({
   }, [file.old_path, file.new_path, hunks, contents]);
 
   // --- Comments (#750) --------------------------------------------------------
+  const showResolved = comments?.showResolved ?? true;
   const extendData = useMemo(() => {
     const oldFile: Record<string, { data: ReviewEntry }> = {};
     const newFile: Record<string, { data: ReviewEntry }> = {};
     for (const e of entries) {
+      if (!showResolved && e.kind === "sent" && e.comment.status === "resolved") continue;
       const slot = e.anchor.side === "old" ? oldFile : newFile;
       // Sent wins over a stale draft on the same line (entries are sorted so).
       if (!slot[String(e.anchor.line)]) slot[String(e.anchor.line)] = { data: e };
     }
     return { oldFile, newFile };
-  }, [entries]);
+  }, [entries, showResolved]);
 
   const nDrafts = entries.filter((e) => e.kind === "draft").length;
   const nSent = entries.length - nDrafts;
+  const sentStates = useMemo(
+    () => stateCounts(entries.flatMap((e) => (e.kind === "sent" ? [e.comment] : []))),
+    [entries],
+  );
 
   /** Per-card CSS: dot + bar on anchored lines, `+` hidden where a comment sits. */
   const anchorCss = useMemo(() => {
     if (entries.length === 0) return "";
     const rules: string[] = [];
     for (const e of entries) {
-      const color = e.kind === "draft" ? "var(--color-st-await)" : "var(--color-st-running)";
+      const color = e.kind === "draft" ? "var(--color-st-await)" : STATE_VAR[commentState(e.comment)];
       const { side, line } = e.anchor;
       // Split: `td.diff-line-<side>-num > span[data-line-num]`, content cell next.
       const num = `#${cssId} td.diff-line-${side}-num:has(> span[data-line-num="${line}"])`;
@@ -233,6 +264,8 @@ export default function ReviewFileCard({
       data-content={contents.kind}
       data-drafts={nDrafts}
       data-sent={nSent}
+      data-proposed={sentStates.proposed}
+      data-resolved={sentStates.resolved}
       className="mx-3 my-2.5 overflow-hidden rounded-md border border-line bg-bg-2"
     >
       {anchorCss && <style>{anchorCss}</style>}
@@ -281,7 +314,21 @@ export default function ReviewFileCard({
         )}
         <span className="ml-auto flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
           {nDrafts > 0 && <Badge kind="draft">✎ {plural(nDrafts, "draft")}</Badge>}
-          {nSent > 0 && <Badge kind="sent">↗ {nSent} sent</Badge>}
+          {sentStates.proposed > 0 && (
+            <span className="inline-flex items-center gap-0.5 text-st-await" style={{ fontSize: "10px" }} title={`${sentStates.proposed} resolution proposed`} data-testid="review-file-proposed">
+              <StateIcon state="proposed" size={10} /> {sentStates.proposed}
+            </span>
+          )}
+          {sentStates.open > 0 && (
+            <span className="inline-flex items-center gap-0.5 text-fg-3" style={{ fontSize: "10px" }} title={`${sentStates.open} open`} data-testid="review-file-open">
+              <StateIcon state="open" size={10} /> {sentStates.open}
+            </span>
+          )}
+          {sentStates.resolved > 0 && (
+            <span className="inline-flex items-center gap-0.5 text-st-done" style={{ fontSize: "10px" }} title={`${sentStates.resolved} resolved`} data-testid="review-file-resolved">
+              <StateIcon state="resolved" size={10} /> {sentStates.resolved}
+            </span>
+          )}
           <button
             type="button"
             onClick={copyPath}
@@ -382,6 +429,7 @@ export default function ReviewFileCard({
                   );
                 }
                 const key = entry.kind === "draft" ? entry.draft.key : null;
+                const sent = entry.kind === "sent" ? entry.comment : null;
                 return (
                   <CommentCard
                     entry={entry}
@@ -392,6 +440,12 @@ export default function ReviewFileCard({
                     onEdit={() => key && comments.editDraft(key)}
                     onDelete={() => key && comments.deleteDraft(key)}
                     onSend={() => key && comments.sendDraft(key)}
+                    unread={sent ? comments.unreadOf(sent) : 0}
+                    flash={sent ? comments.flashing.has(sent.id) : false}
+                    deciding={sent ? comments.deciding.has(sent.id) : false}
+                    onResolve={sent ? () => comments.resolve(sent) : undefined}
+                    onReopen={sent ? () => comments.reopen(sent) : undefined}
+                    onSeen={sent ? () => comments.markSeen(sent) : undefined}
                   />
                 );
               }}

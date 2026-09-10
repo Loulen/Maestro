@@ -4,6 +4,7 @@ import { SectionHead } from "./InspectorPrimitives";
 import TmuxTerminal from "./TmuxTerminal";
 import DiffTab from "./DiffTab";
 import { deliverySignature } from "../lib/diffTab";
+import { useReviewUnread } from "../hooks/useReviewUnread";
 import type { CollapsedFiles } from "../lib/diffTab";
 import type { LibraryPipelineEntry } from "../api";
 import { fetchPipelineDocument, fetchPipelineSkillsSidecar, fetchRunPipelineDocument, fetchRunPipelineSkillsSidecar, openLibraryAssistant, startRunManager, stopRunManager } from "../api";
@@ -131,6 +132,10 @@ export default function PipelineInfoPanel({
   };
   const nudgeDiff =
     run != null && resolvedTab !== "diff" && seenDeliverySig !== deliverySig && deliverySig !== "";
+  // #751: sent review comments with an unread reply — a solid count pill that
+  // replaces the blue dot while > 0 (a number beats a dot; both mean "come look").
+  // Cleared by opening the Review page (per browser, localStorage).
+  const unreadReplies = useReviewUnread(run);
 
   const tabs: { id: TabId; label: string; icon: typeof Info; show: boolean }[] = [
     { id: "info", label: "Info", icon: FileText, show: true },
@@ -193,12 +198,24 @@ export default function PipelineInfoPanel({
                   data-testid="manager-tab-dot"
                 />
               )}
-              {t.id === "diff" && nudgeDiff && (
+              {t.id === "diff" && unreadReplies > 0 ? (
                 <span
-                  className="h-1.5 w-1.5 rounded-full bg-st-running"
-                  aria-hidden
-                  data-testid="diff-tab-dot"
-                />
+                  className="inline-flex h-[14px] min-w-[14px] items-center justify-center rounded-[7px] bg-st-running px-1 font-semibold text-white"
+                  style={{ fontSize: "9.5px" }}
+                  title={`${unreadReplies} review comment${unreadReplies === 1 ? "" : "s"} with an unread reply — open the Review page`}
+                  data-testid="diff-tab-unread"
+                >
+                  {unreadReplies}
+                </span>
+              ) : (
+                t.id === "diff" &&
+                nudgeDiff && (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-st-running"
+                    aria-hidden
+                    data-testid="diff-tab-dot"
+                  />
+                )
               )}
             </button>
           ))}
