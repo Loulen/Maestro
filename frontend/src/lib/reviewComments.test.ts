@@ -29,6 +29,14 @@ import {
   updateDraft,
   wipKey,
   writeDrafts,
+  homeIds,
+  mappingsOf,
+  outdatedCountByPath,
+  parseExcerpt,
+  pendingTone,
+  remapSummary,
+  reviewQuickAccessTitle,
+  sentEntriesForPair,
 } from "./reviewComments";
 import type { ReviewComment, RunRefs } from "../types";
 
@@ -235,5 +243,65 @@ describe("reviewComments — the conversation (#751)", () => {
     expect(readSeen("r1", storage)).toEqual({});
     writeSeen("r1", {}, storage);
     expect(storage.getItem("pdo.review.seen.r1")).toBeNull();
+  });
+});
+
+// #752 (ADR-0067 §5): reported / outdated comments, and the toolbar pill's tone.
+describe("reviewComments — re-mapped comments and the Review quick access (#752)", () => {
+  it("places mapped comments at their reported line, groups outdated ones, and keeps the rest as 'other'", () => {
+    const a = sent({ id: "rc-001", line: 212 });
+    const b = sent({ id: "rc-002", line: 239, path: "c.ts" });
+    const c = sent({ id: "rc-003", line: 7, path: "gone.ts" });
+    const d = sent({ id: "rc-004", line: 9, from_ref: "node:x:1:before", to_ref: "node:x:1:after" });
+    const mappings = mappingsOf([
+      { ...a, outdated: false, mapped_line: 214, moved: true },
+      { ...b, outdated: true },
+      { ...c, outdated: false, mapped_line: 7 },
+      { ...d, outdated: false, mapped_line: 9 },
+    ]);
+    const entries = sentEntriesForPair([a, b, c, d], PAIR, mappings, ["b.ts", "c.ts"]);
+    expect(entries.map((e) => e.kind === "sent" && [e.comment.id, e.anchor.line, e.outdated ?? false, e.movedFrom])).toEqual([
+      ["rc-001", 214, false, 212],
+      ["rc-002", 239, true, undefined],
+      // rc-003: its file is not in the displayed diff → not at home.
+      ["rc-004", 9, false, undefined], // written on another pair, but its line is here
+    ]);
+    expect(homeIds(entries)).toEqual(new Set(["rc-001", "rc-002", "rc-004"]));
+    expect(remapSummary(entries)).toBe("1 comment moved · 1 outdated");
+    expect(outdatedCountByPath(entries)).toEqual(new Map([["c.ts", 1]]));
+    // No mapping yet: exact-pair comments show where written, others wait.
+    const plain = sentEntriesForPair([a, d], PAIR, undefined, ["b.ts"]);
+    expect(plain).toHaveLength(1);
+    expect(plain[0].anchor.line).toBe(212);
+    expect(remapSummary(plain)).toBeNull();
+    // mergeEntries threads the mapping through and sorts by the reported line.
+    const merged = mergeEntries([], [a, b], PAIR, ["b.ts", "c.ts"], mappings);
+    expect(merged.map((e) => e.anchor.line)).toEqual([214, 239]);
+  });
+
+  it("parses the stored excerpt into numbered lines with the commented one marked", () => {
+    expect(parseExcerpt("  1 | a\n> 2 | b\n  3 | ")).toEqual([
+      { no: 1, text: "a", marked: false },
+      { no: 2, text: "b", marked: true },
+      { no: 3, text: "", marked: false },
+    ]);
+    expect(parseExcerpt(undefined)).toEqual([]);
+    expect(parseExcerpt("garbage")).toEqual([]);
+  });
+
+  it("colours the toolbar pill: pending → unread (blue) → proposed (amber wins), and titles it", () => {
+    const open = sent({ id: "rc-001" });
+    const replied = sent({ id: "rc-002", replies: [{ author: "manager", text: "ok", at: "t" }] });
+    const proposed = sent({ id: "rc-003", proposal_pending: true, replies: [{ author: "manager", text: "done", at: "t", proposes_resolution: true }] });
+    const resolved = sent({ id: "rc-004", status: "resolved" });
+    expect(pendingTone([open, resolved], {})).toBe("pending");
+    expect(reviewQuickAccessTitle([open, resolved], {})).toBe("Review · 1 pending");
+    expect(pendingTone([open, replied], {})).toBe("unread");
+    expect(reviewQuickAccessTitle([open, replied], {})).toBe("Review · 2 pending, 1 unread reply");
+    expect(pendingTone([open, replied], { "rc-002": 1 })).toBe("pending");
+    expect(pendingTone([open, replied, proposed], {})).toBe("proposed");
+    expect(reviewQuickAccessTitle([open, replied, proposed], {})).toBe("Review · 3 pending, 2 unread replies, 1 resolution proposed");
+    expect(reviewQuickAccessTitle([resolved], {})).toBe("Review");
+    expect(reviewQuickAccessTitle(undefined, {})).toBe("Review");
   });
 });

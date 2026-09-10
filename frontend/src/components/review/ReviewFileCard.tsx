@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, SquareArrowOutUpRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, History, SquareArrowOutUpRight } from "lucide-react";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import type { DiffFile, ReviewSide } from "../../types";
 import { fetchRunFileAtRef } from "../../api";
@@ -37,6 +37,15 @@ import CommentCard, { Badge, StateIcon } from "./CommentCard";
  * badges are icon + count per state (proposed first). Hiding resolved comments
  * (the page's eye toggle) drops their cards from the extend slots but keeps the
  * green dot on the line.
+ *
+ * #752 (ADR-0067 §5): a sent entry the daemon re-mapped sits at its **reported**
+ * line like any other. An **outdated** entry (its line changed on the displayed
+ * destination) is not inline — guessing a nearby line would lie — but in an
+ * "N outdated comments" group at the top of the card, collapsed, with its
+ * original hunk inside; the header gets a history glyph. `showOutdated` hides
+ * those cards, never the counts. Drafts are never re-mapped: a draft whose line
+ * no longer exists in the displayed hunks is listed above the body with a small
+ * amber "line changed" hint, still editable, sendable, deletable.
  */
 
 /** What the page hands every card to act on comments (#750). */
@@ -71,6 +80,10 @@ export interface ReviewCommentsApi {
   markSeen: (comment: ReviewComment) => void;
   /** Eye toggle: false hides resolved cards (their anchor dot stays). */
   showResolved: boolean;
+  /** #752: false hides the outdated cards (counts stay). */
+  showOutdated: boolean;
+  /** #752: the label of the ref a sent comment was written against (its anchored side). */
+  writtenOnLabel: (comment: ReviewComment) => string;
 }
 
 interface Props {
@@ -197,30 +210,77 @@ export default function ReviewFileCard({
 
   // --- Comments (#750) --------------------------------------------------------
   const showResolved = comments?.showResolved ?? true;
+  const showOutdated = comments?.showOutdated ?? true;
+  /** #752: outdated entries live in the group at the top, never in the extend slots. */
+  const outdatedEntries = useMemo(() => entries.filter((e) => e.kind === "sent" && e.outdated), [entries]);
+  /** #752: drafts anchored on a line the displayed hunks no longer show — listed above the body. */
+  const orphanDrafts = useMemo<ReviewEntry[]>(() => {
+    const drafts = entries.filter((e) => e.kind === "draft");
+    if (drafts.length === 0) return [];
+    const present = new Set<string>();
+    for (const h of file.hunks) {
+      for (const l of h.lines) {
+        if (l.old_no != null) present.add(`old:${l.old_no}`);
+        if (l.new_no != null) present.add(`new:${l.new_no}`);
+      }
+    }
+    return drafts.filter((e) => !present.has(`${e.anchor.side}:${e.anchor.line}`));
+  }, [entries, file.hunks]);
+  const inlineEntries = useMemo(
+    () => entries.filter((e) => !(e.kind === "sent" && e.outdated) && !orphanDrafts.includes(e)),
+    [entries, orphanDrafts],
+  );
   const extendData = useMemo(() => {
     const oldFile: Record<string, { data: ReviewEntry }> = {};
     const newFile: Record<string, { data: ReviewEntry }> = {};
-    for (const e of entries) {
+    for (const e of inlineEntries) {
       if (!showResolved && e.kind === "sent" && e.comment.status === "resolved") continue;
       const slot = e.anchor.side === "old" ? oldFile : newFile;
       // Sent wins over a stale draft on the same line (entries are sorted so).
       if (!slot[String(e.anchor.line)]) slot[String(e.anchor.line)] = { data: e };
     }
     return { oldFile, newFile };
-  }, [entries, showResolved]);
+  }, [inlineEntries, showResolved]);
 
   const nDrafts = entries.filter((e) => e.kind === "draft").length;
   const nSent = entries.length - nDrafts;
+  const nOutdated = outdatedEntries.length;
   const sentStates = useMemo(
     () => stateCounts(entries.flatMap((e) => (e.kind === "sent" ? [e.comment] : []))),
     [entries],
   );
 
+  const renderCard = (entry: ReviewEntry) => {
+    if (!comments) return null;
+    const key = entry.kind === "draft" ? entry.draft.key : null;
+    const sent = entry.kind === "sent" ? entry.comment : null;
+    return (
+      <CommentCard
+        entry={entry}
+        sending={key !== null && comments.sendingKeys.has(key)}
+        startingManager={comments.startingManager}
+        pairLabel={comments.pairLabel}
+        sendDisabledReason={comments.sendDisabledReason}
+        onEdit={() => key && comments.editDraft(key)}
+        onDelete={() => key && comments.deleteDraft(key)}
+        onSend={() => key && comments.sendDraft(key)}
+        unread={sent ? comments.unreadOf(sent) : 0}
+        flash={sent ? comments.flashing.has(sent.id) : false}
+        deciding={sent ? comments.deciding.has(sent.id) : false}
+        onResolve={sent ? () => comments.resolve(sent) : undefined}
+        onReopen={sent ? () => comments.reopen(sent) : undefined}
+        onSeen={sent ? () => comments.markSeen(sent) : undefined}
+        outdated={entry.kind === "sent" && entry.outdated && sent ? { writtenOn: comments.writtenOnLabel(sent) } : undefined}
+        movedFrom={entry.kind === "sent" ? entry.movedFrom : undefined}
+      />
+    );
+  };
+
   /** Per-card CSS: dot + bar on anchored lines, `+` hidden where a comment sits. */
   const anchorCss = useMemo(() => {
-    if (entries.length === 0) return "";
+    if (inlineEntries.length === 0) return "";
     const rules: string[] = [];
-    for (const e of entries) {
+    for (const e of inlineEntries) {
       const color = e.kind === "draft" ? "var(--color-st-await)" : STATE_VAR[commentState(e.comment)];
       const { side, line } = e.anchor;
       // Split: `td.diff-line-<side>-num > span[data-line-num]`, content cell next.
@@ -236,7 +296,7 @@ export default function ReviewFileCard({
       rules.push(`${row} [data-add-widget]{display:none}`);
     }
     return rules.join("\n");
-  }, [entries, cssId]);
+  }, [inlineEntries, cssId]);
 
   const copyPath = () => {
     navigator.clipboard?.writeText(path).then(
@@ -266,6 +326,7 @@ export default function ReviewFileCard({
       data-sent={nSent}
       data-proposed={sentStates.proposed}
       data-resolved={sentStates.resolved}
+      data-outdated={nOutdated}
       className="mx-3 my-2.5 overflow-hidden rounded-md border border-line bg-bg-2"
     >
       {anchorCss && <style>{anchorCss}</style>}
@@ -314,6 +375,16 @@ export default function ReviewFileCard({
         )}
         <span className="ml-auto flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
           {nDrafts > 0 && <Badge kind="draft">✎ {plural(nDrafts, "draft")}</Badge>}
+          {nOutdated > 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 text-st-stale"
+              style={{ fontSize: "10px" }}
+              title={`${plural(nOutdated, "outdated comment")} — the line changed on this destination`}
+              data-testid="review-file-outdated"
+            >
+              <History size={10} /> {nOutdated}
+            </span>
+          )}
           {sentStates.proposed > 0 && (
             <span className="inline-flex items-center gap-0.5 text-st-await" style={{ fontSize: "10px" }} title={`${sentStates.proposed} resolution proposed`} data-testid="review-file-proposed">
               <StateIcon state="proposed" size={10} /> {sentStates.proposed}
@@ -355,6 +426,54 @@ export default function ReviewFileCard({
 
       {!collapsed && (
         <div data-testid="review-file-body" className="overflow-x-auto">
+          {nOutdated > 0 && comments && (
+            <div data-testid="review-outdated-group" data-hidden={showOutdated ? undefined : "true"} className="border-b border-line pb-1">
+              <div className="mx-3 mt-2 flex items-center gap-2 text-fg-3" style={{ fontSize: "10.5px" }}>
+                <span className="inline-flex items-center gap-1 text-st-stale">
+                  <History size={10} /> {plural(nOutdated, "outdated comment")}
+                </span>
+                <span className="h-px flex-1 bg-line" />
+                <span
+                  className="cursor-help"
+                  title="Its line changed between the destination it was written on and this one. Still answerable, still resolvable."
+                >
+                  what is this?
+                </span>
+              </div>
+              {showOutdated && outdatedEntries.map((e) => <div key={e.kind === "sent" ? e.comment.id : e.anchor.line}>{renderCard(e)}</div>)}
+            </div>
+          )}
+          {orphanDrafts.length > 0 && comments && (
+            <div data-testid="review-orphan-drafts" className="border-b border-line pb-1">
+              <div className="mx-3 mt-2 flex items-center gap-2 text-st-await" style={{ fontSize: "10.5px" }}>
+                ✎ {plural(orphanDrafts.length, "draft")} on a line that changed
+                <span className="h-px flex-1 bg-line" />
+                <span className="cursor-help text-fg-4" title="Drafts are never re-mapped: the line this draft was written under is no longer in the diff. Edit, send or delete it.">
+                  line changed
+                </span>
+              </div>
+              {orphanDrafts.map((e) =>
+                e.kind === "draft" && comments.editingKey === e.draft.key ? (
+                  <div key={e.draft.key} className="mx-3 my-2">
+                    <CommentEditor
+                      anchor={e.anchor}
+                      initial={e.draft.text}
+                      wipKey={wipKey(runId, e.anchor, pair)}
+                      sendDisabledReason={comments.sendDisabledReason}
+                      onSave={(text) => comments.updateDraft(e.draft.key, text)}
+                      onSend={(text) => {
+                        comments.updateDraft(e.draft.key, text);
+                        comments.sendDraft(e.draft.key);
+                      }}
+                      onCancel={comments.cancelEdit}
+                    />
+                  </div>
+                ) : (
+                  <div key={e.kind === "draft" ? e.draft.key : e.anchor.line}>{renderCard(e)}</div>
+                ),
+              )}
+            </div>
+          )}
           {file.binary ? (
             <div className="px-4 py-[18px] text-center text-fg-4" style={{ fontSize: "11px" }}>
               Binary file, not shown
@@ -380,7 +499,7 @@ export default function ReviewFileCard({
               renderWidgetLine={({ side, lineNumber, onClose }) => {
                 if (!comments) return null;
                 const anchor: Anchor = { path, side: sideOf(side), line: lineNumber };
-                const existing = entryAt(entries, anchor);
+                const existing = entryAt(inlineEntries, anchor);
                 if (existing) {
                   return (
                     <WidgetRedirect
@@ -428,26 +547,7 @@ export default function ReviewFileCard({
                     />
                   );
                 }
-                const key = entry.kind === "draft" ? entry.draft.key : null;
-                const sent = entry.kind === "sent" ? entry.comment : null;
-                return (
-                  <CommentCard
-                    entry={entry}
-                    sending={key !== null && comments.sendingKeys.has(key)}
-                    startingManager={comments.startingManager}
-                    pairLabel={comments.pairLabel}
-                    sendDisabledReason={comments.sendDisabledReason}
-                    onEdit={() => key && comments.editDraft(key)}
-                    onDelete={() => key && comments.deleteDraft(key)}
-                    onSend={() => key && comments.sendDraft(key)}
-                    unread={sent ? comments.unreadOf(sent) : 0}
-                    flash={sent ? comments.flashing.has(sent.id) : false}
-                    deciding={sent ? comments.deciding.has(sent.id) : false}
-                    onResolve={sent ? () => comments.resolve(sent) : undefined}
-                    onReopen={sent ? () => comments.reopen(sent) : undefined}
-                    onSeen={sent ? () => comments.markSeen(sent) : undefined}
-                  />
-                );
+                return renderCard(entry);
               }}
             />
           )}

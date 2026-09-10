@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Check, CheckCircle2, ChevronRight, Cpu, Hourglass, Lock, MessageSquare, Pencil, Trash2, Undo2, User } from "lucide-react";
+import { Bot, Check, CheckCircle2, ChevronRight, CornerDownRight, Cpu, History, Hourglass, Lock, MessageSquare, Pencil, Trash2, Undo2, User } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AuthorKind, CommentState, ReviewEntry } from "../../lib/reviewComments";
-import { anchorLabel, authorKind, authorLabel, commentState, firstWords, footerStatus, plural, relativeTime } from "../../lib/reviewComments";
+import { anchorLabel, authorKind, authorLabel, commentState, firstWords, footerStatus, parseExcerpt, plural, relativeTime } from "../../lib/reviewComments";
 import type { ReviewComment } from "../../types";
 
 /**
@@ -25,6 +25,16 @@ import type { ReviewComment } from "../../types";
  * **collapses** to one line (icon · anchor · time · first words · reply count ·
  * resolved-by); its header click expands it. A reply that lands live flashes
  * the card's outline for two seconds.
+ *
+ * #752 — re-mapped comments (ADR-0067 §5). A **reported** card is identical to a
+ * plain one; only when the line *number* differs does a discreet `↳ from R212`
+ * chip sit in the header. An **outdated** card (its line changed on the displayed
+ * destination) is collapsed by default — history glyph in the stale amber, state
+ * icon, author, `R239 on <ref>`, time, first words, reply count, lock — and
+ * expands to the **original hunk** first (the excerpt stored at send time, the
+ * commented line in the stale tint, captioned with the ref it was written on),
+ * then body, replies and the usual footer: outdated is a display property, not a
+ * state, so Resolve / Reopen work as on any sent card.
  */
 
 interface Props {
@@ -49,6 +59,10 @@ interface Props {
   onReopen?: () => void;
   /** The card was looked at (hovered, or in view for a moment): clear its unread dots. */
   onSeen?: () => void;
+  /** #752 — sent cards only: the line changed on the displayed destination. `writtenOn` labels the ref it was written against. */
+  outdated?: { writtenOn: string };
+  /** #752 — sent cards only: the written line, when the reported number differs. */
+  movedFrom?: number;
 }
 
 const REMARK_PLUGINS = [remarkGfm];
@@ -68,6 +82,8 @@ export default function CommentCard({
   onResolve,
   onReopen,
   onSeen,
+  outdated,
+  movedFrom,
 }: Props) {
   const label = anchorLabel(entry.anchor);
   const body = (text: string) => (
@@ -93,6 +109,8 @@ export default function CommentCard({
         onResolve={onResolve}
         onReopen={onReopen}
         onSeen={onSeen}
+        outdated={outdated}
+        movedFrom={movedFrom}
       />
     );
   }
@@ -199,6 +217,8 @@ function SentCard({
   onResolve,
   onReopen,
   onSeen,
+  outdated,
+  movedFrom,
 }: {
   comment: ReviewComment;
   label: string;
@@ -210,18 +230,23 @@ function SentCard({
   onResolve?: () => void;
   onReopen?: () => void;
   onSeen?: () => void;
+  outdated?: { writtenOn: string };
+  movedFrom?: number;
 }) {
   const state = commentState(c);
   const replies = c.replies ?? [];
   const footer = footerStatus(c);
   // Resolved ⇒ collapsed (GitHub-like), until the header is clicked. The
   // expansion is keyed on the resolution it was opened for, so a comment
-  // resolved again later collapses again without an effect.
+  // resolved again later collapses again without an effect. #752: an outdated
+  // card collapses the same way (keyed on "outdated" while it stays so).
   const [expandedFor, setExpandedFor] = useState<string | null>(null);
-  const resolutionKey = c.resolved_at ?? "resolved";
-  const collapsed = state === "resolved" && expandedFor !== resolutionKey;
+  const collapsible = state === "resolved" || !!outdated;
+  const resolutionKey = outdated ? `outdated:${c.resolved_at ?? ""}` : (c.resolved_at ?? "resolved");
+  const collapsed = collapsible && expandedFor !== resolutionKey;
   const setExpanded = (fn: (open: boolean) => boolean) =>
     setExpandedFor((prev) => (fn(prev === resolutionKey) ? resolutionKey : null));
+  const originalHunk = outdated ? parseExcerpt(c.excerpt) : [];
 
   // Seen: hover, or in view for a moment. Only while something is unread.
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -266,14 +291,16 @@ function SentCard({
       data-unread={unread > 0 ? unread : undefined}
       data-anchor={label}
       data-comment-id={c.id}
+      data-outdated={outdated ? "true" : undefined}
+      data-moved-from={movedFrom}
     >
       <div
-        role={state === "resolved" ? "button" : undefined}
-        tabIndex={state === "resolved" ? 0 : undefined}
-        aria-expanded={state === "resolved" ? !collapsed : undefined}
-        onClick={state === "resolved" ? () => setExpanded((e) => !e) : undefined}
+        role={collapsible ? "button" : undefined}
+        tabIndex={collapsible ? 0 : undefined}
+        aria-expanded={collapsible ? !collapsed : undefined}
+        onClick={collapsible ? () => setExpanded((e) => !e) : undefined}
         onKeyDown={
-          state === "resolved"
+          collapsible
             ? (e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
@@ -284,15 +311,43 @@ function SentCard({
         }
         data-testid="review-comment-header"
         className={`flex items-center gap-2 bg-bg-3 px-2.5 py-[5px] text-fg-3 ${collapsed ? "cursor-pointer" : "border-b border-line"}`}
-        style={{ fontSize: "10.5px", borderLeft: `2px solid ${STATE_COLOR[state]}` }}
+        style={{ fontSize: "10.5px", borderLeft: `2px solid ${outdated ? "var(--color-st-stale)" : STATE_COLOR[state]}` }}
       >
+        {outdated && (
+          <span className="inline-flex items-center text-st-stale" title="Outdated — the line changed since this comment was written" data-testid="review-comment-outdated">
+            <History size={11} />
+          </span>
+        )}
         <StateIcon state={state} title={stateTitle} />
         <AuthorIcon author={c.author} />
-        <span className="font-mono text-fg-4" style={{ fontSize: "10px" }}>
-          {label}
-        </span>
+        {outdated ? (
+          <span
+            className="font-mono text-fg-4"
+            style={{ fontSize: "10px" }}
+            title={`Written on ${outdated.writtenOn}, at ${label}`}
+            data-testid="review-comment-written-on"
+          >
+            {c.side === "old" ? "L" : "R"}
+            {c.line} <span className="font-sans text-fg-4">on</span> {outdated.writtenOn}
+          </span>
+        ) : (
+          <span className="font-mono text-fg-4" style={{ fontSize: "10px" }}>
+            {label}
+          </span>
+        )}
+        {movedFrom !== undefined && !outdated && (
+          <span
+            className="inline-flex cursor-help items-center gap-0.5 rounded px-1 font-mono text-fg-4 hover:bg-bg-4 hover:text-fg-2"
+            style={{ fontSize: "10px" }}
+            title={`Written at ${c.side === "old" ? "L" : "R"}${movedFrom} on ${pairLabel.split(" → ")[c.side === "old" ? 0 : 1] ?? pairLabel}; the line is unchanged, so it follows it here.`}
+            data-testid="review-comment-moved-from"
+          >
+            <CornerDownRight size={10} /> from {c.side === "old" ? "L" : "R"}
+            {movedFrom}
+          </span>
+        )}
         <span className="text-fg-4">· {relativeTime(c.sent_at)}</span>
-        {state === "resolved" && (
+        {collapsible && (
           <span className={`text-fg-4 transition-transform ${collapsed ? "" : "rotate-90"}`} aria-hidden>
             <ChevronRight size={10} />
           </span>
@@ -327,6 +382,40 @@ function SentCard({
 
       {!collapsed && (
         <>
+          {outdated && (
+            <div className="border-b border-line bg-bg-1" data-testid="review-comment-original-hunk">
+              <div className="flex items-center gap-1.5 border-b border-line bg-bg-3 px-2.5 py-1 text-fg-4" style={{ fontSize: "10px" }}>
+                <History size={10} />
+                Original hunk ·{" "}
+                <span className="rounded border border-line-strong bg-bg-3 px-1.5 font-mono text-fg-2" style={{ fontSize: "10px" }}>
+                  {outdated.writtenOn}
+                </span>{" "}
+                · this is what the comment was written against
+              </div>
+              {originalHunk.length > 0 ? (
+                <div className="font-mono" style={{ fontSize: "10.5px", lineHeight: "18px" }}>
+                  {originalHunk.map((l) => (
+                    <div
+                      key={l.no}
+                      className="grid grid-cols-[44px_1fr]"
+                      data-testid="review-original-line"
+                      data-marked={l.marked ? "true" : undefined}
+                      style={l.marked ? { background: "var(--color-st-stale-bg)", boxShadow: "inset 3px 0 0 var(--color-st-stale)" } : undefined}
+                    >
+                      <span className="select-none pr-2 text-right text-fg-4" style={{ fontSize: "10px" }}>
+                        {l.no}
+                      </span>
+                      <span className="whitespace-pre pl-2.5 text-fg-2">{l.text}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="px-2.5 py-1.5 text-fg-4" style={{ fontSize: "10px" }}>
+                  No excerpt was stored with this comment.
+                </div>
+              )}
+            </div>
+          )}
           {body(c.text)}
           {replies.length > 0 && (
             <div className="border-t border-line bg-bg-1" data-testid="review-comment-thread">
@@ -380,6 +469,11 @@ function SentCard({
               {c.id}
             </span>
             <span>· {pairLabel}</span>
+            {outdated && (
+              <span className="inline-flex items-center gap-1 text-st-stale" title="The line this comment points at changed on the displayed destination">
+                <History size={10} /> line changed
+              </span>
+            )}
             <span className="ml-auto inline-flex items-center gap-1.5" data-testid="review-comment-status" data-kind={footer.kind}>
               <FooterStatusView status={footer} />
               {state === "proposed" ? (

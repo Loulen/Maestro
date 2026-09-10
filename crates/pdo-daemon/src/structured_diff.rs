@@ -209,6 +209,35 @@ pub(crate) fn compute(
     })
 }
 
+/// The parsed `git diff <from> <to> -- <path>` of **one** path, two-dot, for the
+/// re-map of a review comment's anchor (#752, ADR-0067 §5): the caller walks its
+/// hunks to follow a line from `from` to `to`. Renames are followed so a moved
+/// file still maps. `Ok(vec![])` = identical content at both refs.
+pub(crate) fn compute_path(
+    repo: &Path,
+    from_ref: &str,
+    to_ref: &str,
+    path: &str,
+) -> Result<Vec<FileDiff>, GitError> {
+    let stdout = run_git(
+        repo,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--find-renames",
+            "-U0",
+            from_ref,
+            to_ref,
+            "--",
+            path,
+        ],
+    )?;
+    Ok(parse_patch(&String::from_utf8_lossy(&stdout)))
+}
+
 /// `git show <ref>:<path>` — the full content of one file at one ref, for the
 /// context expansion of the Review page. Returns the raw bytes (a binary file
 /// is a legitimate answer; the handler picks the content type).

@@ -1,4 +1,4 @@
-import type { ReviewComment, ReviewSide, RunRefs, RunState, SendReviewCommentInput } from "../types";
+import type { ReviewAnchorMapping, ReviewComment, ReviewSide, RunRefs, RunState, SendReviewCommentInput } from "../types";
 import type { RefPair } from "./runRefs";
 
 // Review comments of the Review page (#750, ADR-0067 §2; CONTEXT.md
@@ -32,10 +32,28 @@ export interface Anchor {
   line: number;
 }
 
-/** One entry of the merged list the page renders. */
+/**
+ * One entry of the merged list the page renders. A sent entry's `anchor` is
+ * where the card sits **on the displayed pair** (#752): the reported line when
+ * the daemon mapped it, the written line otherwise. `outdated` marks a comment
+ * whose line changed since (card in the file's outdated group, not inline);
+ * `movedFrom` is the written line when the reported number differs.
+ */
 export type ReviewEntry =
   | { kind: "draft"; anchor: Anchor; draft: ReviewDraft }
-  | { kind: "sent"; anchor: Anchor; comment: ReviewComment };
+  | { kind: "sent"; anchor: Anchor; comment: ReviewComment; outdated?: boolean; movedFrom?: number };
+
+/** Comment id → its mapping onto the displayed pair (from `GET …/review/comments?from&to`). */
+export type MappingMap = ReadonlyMap<string, ReviewAnchorMapping>;
+
+export function mappingsOf(comments: (ReviewComment & Partial<ReviewAnchorMapping>)[]): Map<string, ReviewAnchorMapping> {
+  const m = new Map<string, ReviewAnchorMapping>();
+  for (const c of comments) {
+    if (typeof c.outdated !== "boolean") continue;
+    m.set(c.id, { outdated: c.outdated, mapped_line: c.mapped_line, moved: c.moved });
+  }
+  return m;
+}
 
 export const DRAFTS_KEY_PREFIX = "pdo.review.drafts.";
 export const WIP_KEY_PREFIX = "pdo.review.wip.";
@@ -121,10 +139,101 @@ export function draftsForPair(drafts: ReviewDraft[], pair: RefPair): ReviewDraft
   return drafts.filter((d) => d.from === pair.from && d.to === pair.to);
 }
 
-/** The sent comments of this pair. */
+/** The sent comments written against exactly this pair. */
 export function sentForPair(comments: ReviewComment[] | undefined, pair: RefPair): ReviewComment[] {
   return (comments ?? []).filter((c) => c.from_ref === pair.from && c.to_ref === pair.to);
 }
+
+/**
+ * The sent entries **at home** on the displayed pair (#752): a comment the daemon
+ * mapped onto the pair whose file is in the displayed diff — reported at its
+ * mapped line, or outdated at its written line — and, while no mapping is known
+ * (not fetched yet, or the daemon could not map it), a comment written against
+ * exactly this pair, where it was written. A mapped comment whose file is not
+ * in the displayed diff has no card to live in: it is listed under "other".
+ */
+export function sentEntriesForPair(
+  comments: ReviewComment[] | undefined,
+  pair: RefPair,
+  mappings: MappingMap | undefined,
+  pathOrder: string[],
+): ReviewEntry[] {
+  const paths = new Set(pathOrder);
+  const out: ReviewEntry[] = [];
+  for (const c of comments ?? []) {
+    const m = mappings?.get(c.id);
+    const exact = c.from_ref === pair.from && c.to_ref === pair.to;
+    if (!m) {
+      if (exact) out.push({ kind: "sent", anchor: { path: c.path, side: c.side, line: c.line }, comment: c });
+      continue;
+    }
+    // Mapped, but its file is not in this diff: no card can host it — "other".
+    if (!paths.has(c.path)) continue;
+    if (m.outdated) {
+      out.push({ kind: "sent", anchor: { path: c.path, side: c.side, line: c.line }, comment: c, outdated: true });
+      continue;
+    }
+    const line = m.mapped_line ?? c.line;
+    out.push({
+      kind: "sent",
+      anchor: { path: c.path, side: c.side, line },
+      comment: c,
+      movedFrom: line !== c.line ? c.line : undefined,
+    });
+  }
+  return out;
+}
+
+/** The ids of the comments `sentEntriesForPair` places on the pair — the rest are "other". */
+export function homeIds(entries: ReviewEntry[]): Set<string> {
+  return new Set(entries.flatMap((e) => (e.kind === "sent" ? [e.comment.id] : [])));
+}
+
+/** `1 comment moved · 1 outdated` after a re-map; null when nothing moved or went outdated. */
+export function remapSummary(entries: ReviewEntry[]): string | null {
+  let moved = 0;
+  let outdated = 0;
+  for (const e of entries) {
+    if (e.kind !== "sent") continue;
+    if (e.outdated) outdated += 1;
+    else if (e.movedFrom !== undefined) moved += 1;
+  }
+  if (moved === 0 && outdated === 0) return null;
+  const parts: string[] = [];
+  if (moved > 0) parts.push(`${plural(moved, "comment")} moved`);
+  if (outdated > 0) parts.push(`${outdated} outdated`);
+  return parts.join(" · ");
+}
+
+/** Per-path outdated count — the history glyph on file rows and headers (#752). */
+export function outdatedCountByPath(entries: ReviewEntry[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const e of entries) {
+    if (e.kind === "sent" && e.outdated) m.set(e.anchor.path, (m.get(e.anchor.path) ?? 0) + 1);
+  }
+  return m;
+}
+
+/** One line of a stored excerpt (`> 3 | text`): number, text, and whether it is the commented line. */
+export interface ExcerptLine {
+  no: number;
+  text: string;
+  marked: boolean;
+}
+
+/** Parse the hunk excerpt the daemon stored at send time (the outdated card's original hunk). */
+export function parseExcerpt(excerpt: string | undefined): ExcerptLine[] {
+  if (!excerpt) return [];
+  const out: ExcerptLine[] = [];
+  for (const raw of excerpt.split("\n")) {
+    const m = /^([> ]) *(\d+) \| ?(.*)$/.exec(raw);
+    if (!m) continue;
+    out.push({ no: Number(m[2]), text: m[3], marked: m[1] === ">" });
+  }
+  return out;
+}
+
+export const SHOW_OUTDATED_KEY = "pdo.review.showOutdated";
 
 /**
  * The merged list for one pair, in diff order: by path (patch order given), then
@@ -137,15 +246,12 @@ export function mergeEntries(
   comments: ReviewComment[] | undefined,
   pair: RefPair,
   pathOrder: string[],
+  mappings?: MappingMap,
 ): ReviewEntry[] {
   const order = new Map(pathOrder.map((p, i) => [p, i]));
   const rank = (p: string) => order.get(p) ?? Number.MAX_SAFE_INTEGER;
   const entries: ReviewEntry[] = [
-    ...sentForPair(comments, pair).map<ReviewEntry>((c) => ({
-      kind: "sent",
-      anchor: { path: c.path, side: c.side, line: c.line },
-      comment: c,
-    })),
+    ...sentEntriesForPair(comments, pair, mappings, pathOrder),
     ...draftsForPair(drafts, pair).map<ReviewEntry>((d) => ({
       kind: "draft",
       anchor: { path: d.path, side: d.side, line: d.line },
@@ -229,6 +335,34 @@ export function relativeTime(iso: string, now = new Date()): string {
 /** Pending for the Review quick access (CONTEXT.md « Accès rapide Review »): sent, not resolved. */
 export function pendingCount(comments: ReviewComment[] | undefined): number {
   return (comments ?? []).filter((c) => c.status !== "resolved").length;
+}
+
+/**
+ * The colour of the toolbar's Review pill (#752): the number is always
+ * `pendingCount`, the tone carries the nuance — outlined blue while comments
+ * merely wait, solid blue when ≥ 1 reply is unread (the Diff tab's pill colour),
+ * amber when ≥ 1 resolution is proposed (a decision waits on you; wins over blue).
+ */
+export type PendingTone = "pending" | "unread" | "proposed";
+
+export function pendingTone(comments: ReviewComment[] | undefined, seen: SeenMap): PendingTone {
+  const list = comments ?? [];
+  if (list.some((c) => c.status === "sent" && c.proposal_pending)) return "proposed";
+  if (unreadCommentCount(list, seen) > 0) return "unread";
+  return "pending";
+}
+
+/** `Review` / `Review · 2 pending` / `Review · 2 pending, 1 unread reply, 1 resolution proposed`. */
+export function reviewQuickAccessTitle(comments: ReviewComment[] | undefined, seen: SeenMap): string {
+  const list = comments ?? [];
+  const pending = pendingCount(list);
+  if (pending === 0) return "Review";
+  const parts = [`${pending} pending`];
+  const unread = unreadCommentCount(list, seen);
+  if (unread > 0) parts.push(`${unread} unread ${unread === 1 ? "reply" : "replies"}`);
+  const proposed = list.filter((c) => c.status === "sent" && c.proposal_pending).length;
+  if (proposed > 0) parts.push(`${proposed} resolution${proposed === 1 ? "" : "s"} proposed`);
+  return `Review · ${parts.join(", ")}`;
 }
 
 // ---------------------------------------------------------------------------

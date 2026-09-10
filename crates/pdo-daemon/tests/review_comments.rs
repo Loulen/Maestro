@@ -279,6 +279,82 @@ async fn sent_comments_are_events_projected_pushed_and_start_the_manager() {
         "already running: reused, not respawned"
     );
 
+    // #752 (ADR-0067 §5): the Run tip moves — a relivery edits line 4 (rc-001's
+    // line) and inserts a line at the top (rc-003's line 2 shifts to 3). Read
+    // against fork → tip, the daemon re-maps on read: rc-001 is outdated, rc-003
+    // is reported at 3 (moved), rc-002 (old side, on the fork) is untouched.
+    // Nothing in the log changes: the anchors stay as written.
+    std::fs::write(
+        wt_dir.join("lib.rs"),
+        "// header\nfn a() {}\nfn b() {}\nfn c() {}\nfn d() { 1 }\n",
+    )
+    .unwrap();
+    git(&wt_dir, &["add", "lib.rs"]);
+    git(&wt_dir, &["commit", "-q", "-m", "relivery"]);
+    let mapped: serde_json::Value = client
+        .get(format!(
+            "{}/runs/{run_id}/review/comments?from=fork&to=tip",
+            daemon.url()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let by_id = |id: &str| -> serde_json::Value {
+        mapped["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} missing in {mapped}"))
+    };
+    assert_eq!(by_id("rc-001")["outdated"], true, "{mapped}");
+    assert!(by_id("rc-001").get("mapped_line").is_none(), "{mapped}");
+    assert_eq!(
+        by_id("rc-001")["line"],
+        4,
+        "the written anchor is untouched"
+    );
+    assert_eq!(by_id("rc-003")["outdated"], false, "{mapped}");
+    assert_eq!(by_id("rc-003")["mapped_line"], 3, "{mapped}");
+    assert_eq!(by_id("rc-003")["moved"], true, "{mapped}");
+    assert_eq!(by_id("rc-002")["outdated"], false, "{mapped}");
+    assert_eq!(
+        by_id("rc-002")["mapped_line"],
+        1,
+        "old side follows the source ref: {mapped}"
+    );
+    assert!(by_id("rc-002").get("moved").is_none(), "{mapped}");
+    assert_eq!(mapped["to_sha"].as_str().unwrap().len(), 40);
+    // Without a pair: no mapping fields at all.
+    let plain: serde_json::Value = client
+        .get(format!("{}/runs/{run_id}/review/comments", daemon.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(plain["comments"][0].get("outdated").is_none(), "{plain}");
+    // The event log still carries the original anchors.
+    let events: Vec<serde_json::Value> = client
+        .get(format!("{}/runs/{run_id}/events", daemon.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let first_sent = events
+        .iter()
+        .find(|e| e["kind"] == "review_comment_sent")
+        .unwrap();
+    assert_eq!(first_sent["payload"]["line"], 4);
+    assert!(first_sent["payload"].get("outdated").is_none());
+
     // Branch gone ⇒ refused with the reason, nothing appended.
     git(
         &repo,
@@ -315,6 +391,24 @@ async fn sent_comments_are_events_projected_pushed_and_start_the_manager() {
         list["comments"].as_array().unwrap().len(),
         3,
         "the refused one was not recorded"
+    );
+    // Branch gone: the tip no longer resolves, so a mapped read answers without
+    // a verdict (no `outdated` field) rather than pretending.
+    let mapped: serde_json::Value = client
+        .get(format!(
+            "{}/runs/{run_id}/review/comments?from=fork&to=tip",
+            daemon.url()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(mapped["to_sha"].is_null(), "{mapped}");
+    assert!(
+        mapped["comments"][0].get("outdated").is_none(),
+        "no verdict once the destination is gone: {mapped}"
     );
 }
 
@@ -408,6 +502,9 @@ async fn cli_review_list_and_reply_drive_the_conversation_end_to_end() {
         .collect();
     assert_eq!(ids, vec!["rc-001", "rc-002"]);
     assert_eq!(listed["comments"][0]["status"], "sent");
+    // #752: the CLI reads mapped onto fork → tip, so the agent knows whether the
+    // line it is asked about has moved (`outdated: true`) or not.
+    assert_eq!(listed["comments"][0]["outdated"], false, "{listed}");
     assert_eq!(listed["agent_can_resolve"], false);
 
     // Out of a session and without --run: a readable refusal, exit 1.

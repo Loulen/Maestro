@@ -1,5 +1,5 @@
 import type { PipelineListEntry, PipelineDetail, PipelineDef, RunListEntry, RunState, PortDef, PortSide, PortType, FrontmatterFieldDecl, FrontmatterViolation, Trigger, TriggerFire, DaemonStatus, InstanceSettings, UpdateSettingsRequest, StatsOverview, StatsCost, StatsPerformance, SandboxProfile, SandboxProfileImage, SandboxProfileReferents, SyncCostPricesReport, UpdateStatus, UpdateChangelog, UpdateApplyResponse, Project, BranchRef, AgentChoice, AgentProfile, AgentProfileReferents, ProvisioningPlan, ProvisioningRules, Skill, SkillBank, SkillDetail, SkillFile, SkillFileContent, SkillFilesUpload, SkillFolder, SkillReferents, SkillRef, SkillScanResult, SkillImportItem, SkillImportReport, SkillRescanReport, RecentSkillSource, StructuredDiff, RunRefs,
-  ReviewComment,
+  ReviewCommentsListResponse,
   ReviewDecisionResponse,
   SendReviewCommentInput,
   SendReviewCommentsResponse,
@@ -389,9 +389,18 @@ export function fetchRunEvents(runId: string): Promise<unknown[]> {
   return request<unknown[]>("GET", `/runs/${encodeURIComponent(runId)}/events`);
 }
 
-/** #750: the Run's sent review comments, on their own endpoint. */
-export function fetchReviewComments(runId: string): Promise<{ comments: ReviewComment[] }> {
-  return request<{ comments: ReviewComment[] }>("GET", `/runs/${encodeURIComponent(runId)}/review/comments`);
+/**
+ * #750: the Run's sent review comments, on their own endpoint. With a `pair`
+ * (#752, ADR-0067 §5) the daemon re-maps every anchor onto it **on read**: each
+ * comment carries `outdated` and, when the line still exists, `mapped_line` /
+ * `moved`. Nothing is written to the event log.
+ */
+export function fetchReviewComments(
+  runId: string,
+  pair?: { from: string; to: string },
+): Promise<ReviewCommentsListResponse> {
+  const qs = pair ? `?from=${encodeURIComponent(pair.from)}&to=${encodeURIComponent(pair.to)}` : "";
+  return request<ReviewCommentsListResponse>("GET", `/runs/${encodeURIComponent(runId)}/review/comments${qs}`);
 }
 
 /**

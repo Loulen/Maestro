@@ -1,4 +1,5 @@
-import { Plus, GitMerge, Info, Undo2, Redo2, SquareTerminal, Box, StickyNote, FilePlus, FolderGit2, Bot, Play, RotateCcw, Terminal } from "lucide-react";
+import { Plus, GitMerge, Info, Undo2, Redo2, SquareTerminal, Box, StickyNote, FilePlus, FileDiff, Bot, Play, RotateCcw, Terminal } from "lucide-react";
+import type { PendingTone } from "../lib/reviewComments";
 import type { NodeType } from "../types";
 import type { LibraryEntry } from "../api";
 import { Tooltip } from "./ui/tooltip";
@@ -28,13 +29,17 @@ interface Props {
   assistantAvailable?: boolean;
   assistantActive?: boolean;
   onOpenAssistant?: () => void;
-  // #465 slice 2 (F1): on a live run the App auto-snaps the selection to the
-  // running node, so the Run-info / Repositories sidebar (mounted when nothing
-  // is selected) is otherwise unreachable. This toggle opens it explicitly. Only
-  // passed for the run tabs where auto-snap applies (`isNodeActiveRun`).
-  showRunInfo?: boolean;
-  runInfoActive?: boolean;
-  onToggleRunInfo?: () => void;
+  // #752 (CONTEXT.md « Accès rapide Review »): the Review quick access, in the
+  // slot the "Run repositories" toggle used to hold (Repositories is a tab of the
+  // Run panel now). A real link to the Run's Review page — same tab, like the
+  // Diff tab's "Expand and comment" — with a pill = `pendingCount()` (sent, not
+  // resolved). The colour carries the nuance, never the number: outlined blue
+  // pending, solid blue ≥ 1 unread reply, amber ≥ 1 resolution proposed (wins).
+  // Passed for every non-archived Run; absent on templates and archived Runs.
+  reviewHref?: string;
+  reviewPending?: number;
+  reviewTone?: PendingTone;
+  reviewTitle?: string;
   // #315: an archived run's canvas is read-only — hide every editing control
   // (add node/note, library insert, merge/script, undo/redo). Only the
   // Pipeline-info button survives so the archived pipeline stays inspectable.
@@ -52,7 +57,7 @@ interface Props {
   onOpenShell?: () => void;
 }
 
-export default function EditToolbar({ onAddNode, onAddNote, onAddNodeFromYaml, libraryEntries, onLibraryDelete, getDropPosition, infoOpen, onToggleInfo, assistantAvailable = false, assistantActive = false, onOpenAssistant, showRunInfo = false, runInfoActive = false, onToggleRunInfo, readOnly = false, finishedRun = false, onReopen, onRetryAll, onOpenShell }: Props) {
+export default function EditToolbar({ onAddNode, onAddNote, onAddNodeFromYaml, libraryEntries, onLibraryDelete, getDropPosition, infoOpen, onToggleInfo, assistantAvailable = false, assistantActive = false, onOpenAssistant, reviewHref, reviewPending = 0, reviewTone = "pending", reviewTitle = "Review", readOnly = false, finishedRun = false, onReopen, onRetryAll, onOpenShell }: Props) {
   // Read undo/redo straight from the store (ADR-0014 / #226): they have no
   // component-local dependency, unlike the prop-drilled add/merge callbacks, so
   // the point-of-use selector idiom is the right fit. `canUndo`/`canRedo` are
@@ -229,27 +234,39 @@ export default function EditToolbar({ onAddNode, onAddNote, onAddNodeFromYaml, l
         </>
       )}
 
-      {/* #465 slice 2 (F1): reach the Run-info / Repositories sidebar on a live
-          run whose node is running. Shown only for those run tabs — elsewhere
-          the panel is reachable by deselecting, so the button would be a no-op. */}
-      {showRunInfo && onToggleRunInfo && (
+      {/* #752: the Review quick access — navigation, not a toggle (no
+          `aria-pressed`). The pill is the pending count; its tone is the nuance. */}
+      {reviewHref && (
         <>
           {!readOnly && <span className="mx-0.5 h-4 w-px bg-line" />}
 
-          <Tooltip content="Run repositories">
-            <button
-              data-testid="toolbar-run-info"
-              aria-label="Run repositories"
-              aria-pressed={runInfoActive}
-              onClick={onToggleRunInfo}
-              className={`grid h-7 w-7 cursor-pointer place-items-center rounded transition-colors ${
-                runInfoActive
-                  ? "bg-acc text-bg-0"
-                  : "text-fg-3 hover:bg-bg-4 hover:text-fg active:bg-acc active:text-bg-0"
-              }`}
+          <Tooltip content={reviewTitle}>
+            <a
+              href={reviewHref}
+              data-testid="toolbar-review"
+              aria-label={reviewTitle}
+              data-pending={reviewPending > 0 ? reviewPending : undefined}
+              data-tone={reviewPending > 0 ? reviewTone : undefined}
+              className="relative grid h-7 w-7 cursor-pointer place-items-center rounded text-fg-3 transition-colors hover:bg-bg-4 hover:text-fg active:bg-acc active:text-bg-0"
             >
-              <FolderGit2 size={14} />
-            </button>
+              <FileDiff size={14} />
+              {reviewPending > 0 && (
+                <span
+                  data-testid="toolbar-review-pill"
+                  aria-hidden
+                  className={`absolute -right-[5px] -top-1 box-border grid h-[15px] min-w-[15px] place-items-center rounded-[8px] border-2 border-bg-2 px-1 font-sans font-semibold leading-none ${
+                    reviewTone === "proposed"
+                      ? "bg-st-await text-[#1a0f00]"
+                      : reviewTone === "unread"
+                        ? "bg-st-running text-white"
+                        : "bg-st-running-bg text-st-running shadow-[inset_0_0_0_1px_rgba(59,130,246,.35)]"
+                  }`}
+                  style={{ fontSize: "9.5px" }}
+                >
+                  {reviewPending}
+                </span>
+              )}
+            </a>
           </Tooltip>
         </>
       )}
@@ -257,7 +274,7 @@ export default function EditToolbar({ onAddNode, onAddNote, onAddNodeFromYaml, l
       {(onToggleInfo || (assistantAvailable && onOpenAssistant)) && (
         <>
           {/* #315: no leading separator when the info group is the sole control. */}
-          {!readOnly && !showRunInfo && <span className="mx-0.5 h-4 w-px bg-line" />}
+          {!readOnly && !reviewHref && <span className="mx-0.5 h-4 w-px bg-line" />}
 
           {/* #302 / ADR-0048: the "agent" glyph, immediately left of `(i)`, both
               opening the same Pipeline info panel — the Bot jumps straight to the
