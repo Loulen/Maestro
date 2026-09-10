@@ -26,10 +26,26 @@ pub(crate) struct InterpretedDocument {
     pub warnings: Vec<String>,
 }
 
+/// Strip every node-level harness selection so the document imposes no
+/// harness on the importing instance (ADR-0059). Three syntaxes select a
+/// harness at the Node tier and each one shields it from the Run tier
+/// (ADR-0046, ADR-0057): a named profile, an inline `custom` choice and the
+/// legacy `pin_harness`. All three collapse to `Inherit`; the per-harness
+/// `harnesses.<name>` map stays, it only tunes model/effort under whichever
+/// harness the importer's Run ends up picking (#761).
 fn make_portable(mut pipeline: PipelineDef) -> PipelineDef {
     for node in &mut pipeline.nodes {
-        if matches!(node.agent_choice, Some(AgentChoice::Profile { .. })) {
+        if matches!(
+            node.agent_choice,
+            Some(AgentChoice::Profile { .. }) | Some(AgentChoice::Custom { .. })
+        ) {
             node.agent_choice = Some(AgentChoice::Inherit);
+        }
+        if node.pin_harness.is_some() {
+            node.pin_harness = None;
+            if node.agent_choice.is_none() {
+                node.agent_choice = Some(AgentChoice::Inherit);
+            }
         }
     }
     pipeline
@@ -257,6 +273,62 @@ mod tests {
             Some(AgentChoice::Inherit)
         );
         assert_eq!(imported.prompts, prompts);
+    }
+
+    #[test]
+    fn export_drops_pin_harness_and_custom_choice_so_the_run_tier_wins() {
+        let mut pipeline = pipeline();
+        let mut pinned = node("pinned", "Pinned", NodeType::Agent);
+        pinned.pin_harness = Some("copilot".into());
+        let mut custom = node("custom", "Custom", NodeType::Agent);
+        custom.agent_choice = Some(AgentChoice::Custom {
+            harness: "copilot".into(),
+            model: Some("gpt-5".into()),
+            effort: None,
+        });
+        let mut both = node("both", "Both", NodeType::Agent);
+        both.pin_harness = Some("copilot".into());
+        both.agent_choice = Some(AgentChoice::Custom {
+            harness: "copilot".into(),
+            model: None,
+            effort: None,
+        });
+        pipeline.nodes.extend([pinned, custom, both]);
+
+        let document = super::export(&pipeline, &HashMap::new()).unwrap();
+        assert!(
+            !document.contains("copilot"),
+            "portable document still names a harness:\n{document}"
+        );
+        assert!(!document.contains("pin_harness"));
+
+        let imported = super::interpret(&document).unwrap();
+        for id in ["pinned", "custom", "both"] {
+            let node = imported
+                .pipeline
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap();
+            assert_eq!(node.pin_harness, None, "{id}");
+            assert_eq!(node.agent_choice, Some(AgentChoice::Inherit), "{id}");
+        }
+
+        // Importing a document authored before this rule normalises it too.
+        let legacy = document.replace(
+            "    id: pinned\n",
+            "    id: pinned\n    pin_harness: copilot\n",
+        );
+        assert_ne!(legacy, document, "fixture did not inject the legacy pin");
+        let imported = super::interpret(&legacy).unwrap();
+        let pinned = imported
+            .pipeline
+            .nodes
+            .iter()
+            .find(|node| node.id == "pinned")
+            .unwrap();
+        assert_eq!(pinned.pin_harness, None);
+        assert_eq!(pinned.agent_choice, Some(AgentChoice::Inherit));
     }
 
     #[test]
