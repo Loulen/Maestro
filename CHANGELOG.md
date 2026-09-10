@@ -10,6 +10,21 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.78.0
+**Page de Review — conversation avec l'agent** (#751 ; story #746, ADR-0067).
+Un commentaire envoyé devient un **fil** : l'agent répond avec `pdo review list [--state open|resolved|all]`
+et `pdo review reply <rc-id> --text "…" [--resolved]` (auteur déduit de la session : `manager` ou l'id du
+nœud). Les évènements `review_comment_replied` / `resolved` / `reopened` sont désormais émis et projetés
+(`proposal_pending`, `resolved_by`, `reopened_by`, `proposal_declined`). Par défaut, un `--resolved` de
+l'agent n'est qu'une **proposition** : la carte passe en ambre et l'humain tranche avec **Resolve** /
+**Reopen** (Reopen sur une proposition = refus, le commentaire reste ouvert). Nouveau réglage d'instance
+`review_agent_can_resolve` (`PUT /settings`, env `PDO_REVIEW_AGENT_CAN_RESOLVE`, défaut `false`, case
+Settings › Runs « Let the agent resolve review comments directly ») : quand il est actif, l'agent résout
+directement et l'humain peut rouvrir. Endpoints `POST /runs/{id}/review/comments/{rc}/reply|resolve|reopen`
+(idempotents, `changed: false` sans évènement), `GET …/review/comments?state=`. Côté UI : icônes d'état
+(ouvert / proposé / résolu) et d'auteur, cartes résolues repliées sur une ligne, pastille cloche des
+réponses non lues (mémorisées par navigateur), bascule œil pour masquer le résolu, badge bleu sur l'onglet
+Diff du Run tant qu'une réponse n'est pas lue. Le prompt builtin du manager documente le CLI.
 ## 1.77.0
 
 **Page de Review — commentaires inline, brouillons et envoi au manager** (#750 ; story #746, ADR-0067).
