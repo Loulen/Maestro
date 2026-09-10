@@ -1,8 +1,12 @@
-import { useState, useMemo, useRef, useEffect } from "react";
-import { Info, Terminal, X, FileText, Code, Box, Loader, Bot, Copy, Download, ChevronDown, ChevronRight, Play, PowerOff } from "lucide-react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { Info, Terminal, X, FileText, Code, Box, Loader, Bot, Copy, Download, ChevronDown, ChevronRight, Play, PowerOff, FileDiff, FolderGit2 } from "lucide-react";
 import { SectionHead } from "./InspectorPrimitives";
 import TmuxTerminal from "./TmuxTerminal";
-import DiffSection from "./DiffSection";
+import DiffTab from "./DiffTab";
+import RepositoriesSection from "./RepositoriesSection";
+import { deliverySignature } from "../lib/diffTab";
+import { useReviewUnread } from "../hooks/useReviewUnread";
+import type { CollapsedFiles } from "../lib/diffTab";
 import type { LibraryPipelineEntry } from "../api";
 import { fetchPipelineDocument, fetchPipelineSkillsSidecar, fetchRunPipelineDocument, fetchRunPipelineSkillsSidecar, openLibraryAssistant, startRunManager, stopRunManager } from "../api";
 import type { RunState, PipelineDef } from "../types";
@@ -12,7 +16,7 @@ import { formatEstCost } from "../lib/costLabel";
 import { serializePipeline } from "../lib/serializePipeline";
 import { highlightYaml } from "./yamlHighlight";
 
-export type TabId = "info" | "manager" | "yaml" | "assistant";
+export type TabId = "info" | "diff" | "repositories" | "manager" | "yaml" | "assistant";
 
 function StatRow({
   label,
@@ -100,13 +104,48 @@ export default function PipelineInfoPanel({
   const hasAssistant = !run && !!assistantId;
   const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "info");
   const resolvedTab =
-    (activeTab === "manager" && !run) ||
+    ((activeTab === "manager" || activeTab === "diff" || activeTab === "repositories") && !run) ||
     (activeTab === "assistant" && !hasAssistant)
       ? "info"
       : activeTab;
 
+  // #748: the Diff tab's expand/collapse state, keyed by file path, lives here so
+  // it survives `Info ↔ Diff` and a "Diff changed · Reload". Reset per Run.
+  // Keyed by Run id, so a Run switch under a mounted panel starts fresh.
+  const [diffCollapsedByRun, setDiffCollapsedByRun] = useState<Record<string, Set<string>>>({});
+  const runId = run?.run_id ?? null;
+  const diffCollapsed: CollapsedFiles = runId ? (diffCollapsedByRun[runId] ?? null) : null;
+  const onDiffCollapsedChange = useCallback(
+    (next: Set<string>) => {
+      if (!runId) return;
+      setDiffCollapsedByRun((prev) => ({ ...prev, [runId]: next }));
+    },
+    [runId],
+  );
+
+  // The blue dot on the Diff tab: the tip moved (a node delivered) since the
+  // tab was last looked at. Recorded on entering and on leaving the tab.
+  const deliverySig = run ? deliverySignature(run) : "";
+  const [seenDeliverySig, setSeenDeliverySig] = useState(deliverySig);
+  const selectTab = (id: TabId) => {
+    if (id === "diff" || resolvedTab === "diff") setSeenDeliverySig(deliverySig);
+    setActiveTab(id);
+  };
+  const nudgeDiff =
+    run != null && resolvedTab !== "diff" && seenDeliverySig !== deliverySig && deliverySig !== "";
+  // #751: sent review comments with an unread reply — a solid count pill that
+  // replaces the blue dot while > 0 (a number beats a dot; both mean "come look").
+  // Cleared by opening the Review page (per browser, localStorage).
+  const unreadReplies = useReviewUnread(run);
+
   const tabs: { id: TabId; label: string; icon: typeof Info; show: boolean }[] = [
     { id: "info", label: "Info", icon: FileText, show: true },
+    { id: "diff", label: "Diff", icon: FileDiff, show: run != null },
+    // #752 (closing the second half of #566): the Repositories view is a tab of
+    // the Run panel — `Info | Diff | Repositories | Manager | YAML` — reachable
+    // on any selection, archived Runs included (frozen list). No dot: nothing
+    // asynchronous happens to repositories; errors show inline in the tab.
+    { id: "repositories", label: "Repositories", icon: FolderGit2, show: run != null },
     { id: "manager", label: "Manager", icon: Terminal, show: run != null },
     { id: "assistant", label: "Assistant", icon: Bot, show: hasAssistant },
     { id: "yaml", label: "YAML", icon: Code, show: true },
@@ -149,8 +188,8 @@ export default function PipelineInfoPanel({
             <button
               key={t.id}
               data-testid={`info-tab-${t.id}`}
-              onClick={() => setActiveTab(t.id)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors cursor-pointer ${
+              onClick={() => selectTab(t.id)}
+              className={`flex items-center gap-1.5 px-2 py-1.5 transition-colors cursor-pointer ${
                 resolvedTab === t.id
                   ? "border-b-2 border-acc text-fg font-medium"
                   : "text-fg-3 hover:text-fg-2"
@@ -165,6 +204,25 @@ export default function PipelineInfoPanel({
                   data-testid="manager-tab-dot"
                 />
               )}
+              {t.id === "diff" && unreadReplies > 0 ? (
+                <span
+                  className="inline-flex h-[14px] min-w-[14px] items-center justify-center rounded-[7px] bg-st-running px-1 font-semibold text-white"
+                  style={{ fontSize: "9.5px" }}
+                  title={`${unreadReplies} review comment${unreadReplies === 1 ? "" : "s"} with an unread reply — open the Review page`}
+                  data-testid="diff-tab-unread"
+                >
+                  {unreadReplies}
+                </span>
+              ) : (
+                t.id === "diff" &&
+                nudgeDiff && (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-st-running"
+                    aria-hidden
+                    data-testid="diff-tab-dot"
+                  />
+                )
+              )}
             </button>
           ))}
       </div>
@@ -176,7 +234,29 @@ export default function PipelineInfoPanel({
           pipelineName={pipelineName}
           variables={variableEntries}
           hasAssistant={hasAssistant}
+          onOpenDiff={() => selectTab("diff")}
         />
+      )}
+
+      {resolvedTab === "diff" && run && (
+        <DiffTab
+          key={run.run_id}
+          run={run}
+          collapsed={diffCollapsed}
+          onCollapsedChange={onDiffCollapsedChange}
+        />
+      )}
+
+      {resolvedTab === "repositories" && run && (
+        <div data-testid="repositories-tab" className="flex flex-col">
+          {run.target_repo ? (
+            <RepositoriesSection key={run.run_id} run={run} onEdited={onRefreshRun} />
+          ) : (
+            <div className="px-3 py-3 text-fg-4" style={{ fontSize: "11px" }} data-testid="repositories-tab-empty">
+              This Run recorded no target repository — it works in the daemon's own checkout.
+            </div>
+          )}
+        </div>
       )}
 
       {resolvedTab === "manager" && run && managerSession && (
@@ -505,12 +585,15 @@ function InfoTab({
   pipelineName,
   variables,
   hasAssistant,
+  onOpenDiff,
 }: {
   run: RunState | null;
   pipeline: PipelineDef | null;
   pipelineName: string;
   variables: [string, { default: unknown }][];
   hasAssistant: boolean;
+  /** #748: the Changes stat is the link to what it counts — the Diff tab. */
+  onOpenDiff: () => void;
 }) {
   const durationMs = useRunDuration(run?.started_at, run?.completed_at, run?.status);
   const durationLabel = formatDuration(durationMs);
@@ -550,6 +633,50 @@ function InfoTab({
             </span>
           )}
         </div>
+
+        {/* #752: what the standalone Run-info sidebar carried besides Repositories
+            lives here now — the failure / awaiting reason (#503, #598), the frozen
+            harness (#551) and the editing note (#315). Clicking a red dot lands on
+            this tab, so the failure must be the first thing it says. */}
+        {run?.failure_reason && (
+          <div
+            className="mt-2 rounded border border-st-failed/30 bg-st-failed-bg px-2 py-1.5 text-fg-2"
+            style={{ fontSize: "10.5px" }}
+            data-testid="run-failure-reason"
+          >
+            <div className="font-medium text-st-failed">
+              {run.status === "halted" ? "Halted" : run.status === "skipped" ? "Skipped" : "Failed"}
+            </div>
+            <div className="mt-0.5 break-words">{run.failure_reason}</div>
+          </div>
+        )}
+        {run?.awaiting_reason && (
+          <div
+            className="mt-2 rounded border border-st-await/30 bg-st-await-bg px-2 py-1.5 text-fg-2"
+            style={{ fontSize: "10.5px" }}
+            data-testid="run-awaiting-reason"
+          >
+            <div className="font-medium text-st-await">Interrupted · awaiting you</div>
+            <div className="mt-0.5 break-words">{run.awaiting_reason}</div>
+          </div>
+        )}
+        {run?.harness && (
+          <div className="mt-2 flex items-center gap-1.5 text-fg-3" style={{ fontSize: "10.5px" }} data-testid="run-harness">
+            <span className="text-fg-4">Harness</span>
+            <span className="rounded bg-bg-3 px-1.5 py-0.5 font-mono text-fg-2">{run.harness}</span>
+          </div>
+        )}
+        {run && (
+          <div
+            className="mt-2 rounded border border-line-strong bg-bg-3 px-2 py-1.5 text-fg-3"
+            style={{ fontSize: "10.5px" }}
+            data-testid="run-info-note"
+          >
+            {run.status === "archived"
+              ? "Archived run · read-only · outputs preserved"
+              : "Editing run-scoped pipeline · changes sync to template"}
+          </div>
+        )}
 
         {variables.length > 0 && (
           <div className="mt-3 flex flex-col gap-1" data-testid="info-panel-variables">
@@ -610,9 +737,16 @@ function InfoTab({
             <StatRow label="Node sessions started" testid="stat-sessions">
               {(run.sessions_spawned ?? 0).toLocaleString()}
             </StatRow>
-            <StatRow label="Lines changed" testid="stat-loc">
+            <StatRow label="Changes" testid="stat-loc">
               {run.loc ? (
-                <span className="flex items-center gap-1.5">
+                // #748: the LOC stat opens the Diff tab — the count IS what the
+                // tab shows (same endpoint bounds), so the number links to it.
+                <button
+                  onClick={onOpenDiff}
+                  className="flex items-center gap-1.5 rounded px-1 -mx-1 transition-colors hover:bg-bg-4 hover:text-fg-2 cursor-pointer"
+                  data-testid="stat-loc-open-diff"
+                  title="Open the Diff tab"
+                >
                   <span className="text-st-done">
                     +{run.loc.insertions.toLocaleString()}
                   </span>
@@ -620,10 +754,11 @@ function InfoTab({
                     −{run.loc.deletions.toLocaleString()}
                   </span>
                   <span className="text-fg-4">
-                    {run.loc.files_changed.toLocaleString()}{" "}
+                    · {run.loc.files_changed.toLocaleString()}{" "}
                     {run.loc.files_changed === 1 ? "file" : "files"}
                   </span>
-                </span>
+                  <span className="text-fg-4" aria-hidden>↗</span>
+                </button>
               ) : (
                 "—"
               )}
@@ -672,8 +807,6 @@ function InfoTab({
           </div>
         </div>
       )}
-
-      <DiffSection run={run} />
 
       <div className="px-3 py-3" style={{ fontSize: "11.5px" }}>
         <SectionHead title="Description" />

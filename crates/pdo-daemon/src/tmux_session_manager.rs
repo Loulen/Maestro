@@ -1101,6 +1101,45 @@ pub fn send_keys(socket: &str, session_name: &str, text: &str) {
         .output();
 }
 
+/// Paste a **multi-line** message into a tmux session as one bracketed paste,
+/// then submit it with Enter (#750, the review batch to the manager).
+///
+/// `send_keys` types its text as keystrokes, so an embedded newline is a
+/// keystroke too — for a chat harness that is a premature submit, and a
+/// twenty-comment batch would arrive as twenty half-messages. `load-buffer`
+/// from stdin + `paste-buffer -p` hands the whole text over as a paste the
+/// harness keeps as one message. Best-effort — a missing session is not an
+/// error here (the caller verified it exists).
+pub fn paste_text(socket: &str, session_name: &str, text: &str) {
+    use std::io::Write;
+    let buffer = format!("pdo-paste-{}", std::process::id());
+    let child = tmux(socket)
+        .args(["load-buffer", "-b", &buffer, "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+    let _ = tmux(socket)
+        .args([
+            "paste-buffer",
+            "-p",
+            "-d",
+            "-b",
+            &buffer,
+            "-t",
+            session_name,
+        ])
+        .output();
+    let _ = tmux(socket)
+        .args(["send-keys", "-t", session_name, "Enter"])
+        .output();
+}
+
 /// Kill a tmux session. Best-effort — does not fail if the session is absent.
 pub fn kill(socket: &str, session_name: &str) {
     let _ = tmux(socket)

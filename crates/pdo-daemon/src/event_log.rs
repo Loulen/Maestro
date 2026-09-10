@@ -211,6 +211,25 @@ pub enum EventKind {
     /// Projects nothing — same observed-fact discipline as
     /// [`EventKind::ManagerStarted`]. Wire form: `"manager_stopped"`.
     ManagerStopped,
+    /// A review comment left `sent` (#750, ADR-0067 §2): the operator handed a
+    /// remark anchored on one diff line to the Pipeline Manager. The payload is
+    /// the whole [`crate::review_comments::ReviewComment`] (id, anchor, ref pair
+    /// with SHAs, text, hunk excerpt, author, batch). Folded into
+    /// `RunState::review_comments`, **additively on a terminal Run too** — review
+    /// happens post-mortem, so this never re-opens anything. A sent comment is
+    /// immutable: no event edits or deletes it. Wire form: `"review_comment_sent"`.
+    ReviewCommentSent,
+    /// An agent's reply to a sent comment (#751 emits it via `pdo review reply`;
+    /// the projection is ready here). Payload: `id`, `author`, `text`,
+    /// `proposes_resolution`. Wire form: `"review_comment_replied"`.
+    ReviewCommentReplied,
+    /// A comment resolved (by the human, or by the agent under the
+    /// `review_agent_can_resolve` setting — #751). Payload: `id`. Wire form:
+    /// `"review_comment_resolved"`.
+    ReviewCommentResolved,
+    /// A resolved comment reopened by the human (#751). Payload: `id`. Wire form:
+    /// `"review_comment_reopened"`.
+    ReviewCommentReopened,
     CommandIssued,
 }
 
@@ -1141,6 +1160,12 @@ pub struct RunState {
     /// `(node, iter)` (restart/recovery) counts again, so this is always ≥ the
     /// number of distinct iterations shown. The Pipeline Manager emits no
     /// `NodeStarted`, so it is excluded by construction.
+    /// Sent review comments (#750, ADR-0067 §2), in send order, with their
+    /// replies and resolution state. Folded from `review_comment_*` events; drafts
+    /// never reach here (browser-only). Empty — and byte-identically absent — for
+    /// every Run nobody reviewed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) review_comments: Vec<crate::review_comments::ReviewComment>,
     #[serde(default)]
     pub sessions_spawned: u64,
     /// Lines changed for the Run (issue #100). `None` (not `Some(0)`) when the
@@ -1202,6 +1227,7 @@ impl RunState {
             parent_run_id: None,
             parent_node_id: None,
             pipeline_id: None,
+            review_comments: Vec::new(),
             sessions_spawned: 0,
             loc: None,
             cost: None,
@@ -1527,6 +1553,15 @@ pub(crate) fn project(events: &[Event]) -> Option<RunState> {
             // Informational only (manager on demand): the manager's existence is
             // an observed tmux fact, never projected — see the variants' docs.
             EventKind::ManagerStarted | EventKind::ManagerStopped => {}
+
+            // #750: review comments are additive metadata — folded whatever the
+            // Run's status (review is a post-mortem gesture), never a transition.
+            EventKind::ReviewCommentSent
+            | EventKind::ReviewCommentReplied
+            | EventKind::ReviewCommentResolved
+            | EventKind::ReviewCommentReopened => {
+                crate::review_comments::fold(&mut state.review_comments, event)
+            }
 
             EventKind::CommandIssued => apply_command_event(&mut state, event),
         }
@@ -3729,6 +3764,55 @@ mod tests {
     #[test]
     fn projects_empty_events_to_none() {
         assert!(project(&[]).is_none());
+    }
+
+    #[test]
+    fn review_comment_sent_folds_on_a_completed_run_without_reopening_it() {
+        // #750: a review is a post-mortem gesture. The comment lands in
+        // `review_comments`, the status stays Completed, and a Run nobody reviewed
+        // serializes without the key at all.
+        let bare = project(&[
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "p" }),
+            ),
+            make_event(EventKind::RunCompleted, None, None),
+        ])
+        .unwrap();
+        assert!(bare.review_comments.is_empty());
+        assert!(serde_json::to_value(&bare)
+            .unwrap()
+            .get("review_comments")
+            .is_none());
+
+        let comment = serde_json::json!({
+            "id": "rc-001", "path": "src/a.rs", "side": "new", "line": 3,
+            "from_ref": "fork", "to_ref": "tip", "text": "why?", "excerpt": "> 3 | x",
+            "author": "user", "sent_at": "2026-09-09T10:00:00.000Z", "batch_id": "b1"
+        });
+        let events = vec![
+            make_event_with_payload(
+                EventKind::RunStarted,
+                None,
+                serde_json::json!({ "pipeline_name": "p" }),
+            ),
+            make_event(EventKind::RunCompleted, None, None),
+            make_event_with_payload(EventKind::ReviewCommentSent, None, comment),
+            make_event_with_payload(
+                EventKind::ReviewCommentReplied,
+                None,
+                serde_json::json!({ "id": "rc-001", "author": "manager", "text": "fixed" }),
+            ),
+        ];
+        let state = project(&events).unwrap();
+        assert_eq!(state.status, RunStatus::Completed);
+        assert_eq!(state.review_comments.len(), 1);
+        assert_eq!(state.review_comments[0].id, "rc-001");
+        assert_eq!(state.review_comments[0].replies.len(), 1);
+        let wire = serde_json::to_value(&state).unwrap();
+        assert_eq!(wire["review_comments"][0]["side"], "new");
+        assert_eq!(wire["review_comments"][0]["status"], "sent");
     }
 
     #[test]

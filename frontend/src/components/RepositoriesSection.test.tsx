@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import RunInfoSidebar from "./RunInfoSidebar";
+import RepositoriesSection from "./RepositoriesSection";
 import type { RunState, RunStatus, RepoPin } from "../types";
 import { editRunRepos, validateRepo, listBranches } from "../api";
 
@@ -52,105 +52,15 @@ function makeMultiRepoRun(
   } as unknown as RunState;
 }
 
-describe("RunInfoSidebar", () => {
-  it("shows the sync-to-template note for a live run", () => {
-    render(<RunInfoSidebar run={makeRun("running")} />);
-    const note = screen.getByTestId("run-info-note");
-    expect(note.textContent).toContain("changes sync to template");
-    expect(note.textContent).not.toContain("read-only");
-  });
-
-  it("shows a read-only archived note for an archived run (#315)", () => {
-    render(<RunInfoSidebar run={makeRun("archived")} />);
-    const note = screen.getByTestId("run-info-note");
-    expect(note.textContent).toContain("Archived run");
-    expect(note.textContent).toContain("read-only");
-    expect(note.textContent).not.toContain("changes sync to template");
-  });
-
-  it("renders the pipeline name and run id in both states", () => {
-    render(<RunInfoSidebar run={makeRun("archived")} />);
-    expect(screen.getByText("My Pipeline")).toBeInTheDocument();
-    expect(screen.getByText("20260704-000000-abc1234")).toBeInTheDocument();
-  });
-
-  // #503: this is the panel a user reaches by clicking a red dot. It used to talk
-  // about pipeline editing and say nothing at all about the failure.
-  it("states why a failed run failed", () => {
-    render(
-      <RunInfoSidebar
-        run={makeRun("failed", "merge conflict on ship: 20 conflicting file(s)")}
-      />,
-    );
-    const box = screen.getByTestId("run-failure-reason");
-    expect(box.textContent).toContain("Failed");
-    expect(box.textContent).toContain("20 conflicting file(s)");
-  });
-
-  it("names the terminal it is explaining", () => {
-    render(<RunInfoSidebar run={makeRun("halted", "stop condition met")} />);
-    expect(screen.getByTestId("run-failure-reason").textContent).toContain("Halted");
-  });
-
-  it("shows no failure box on a green or live run", () => {
-    render(<RunInfoSidebar run={makeRun("completed")} />);
-    expect(screen.queryByTestId("run-failure-reason")).toBeNull();
-  });
-
-  // #601 / ADR-0049: an incident-parked run (awaiting_user with a reason) states
-  // WHY it is parked, without the operator reading journalctl.
-  it("states why an incident-parked run is awaiting the user", () => {
-    render(
-      <RunInfoSidebar
-        run={
-          {
-            ...makeRun("awaiting_user"),
-            awaiting_reason: "session_died: tmux session … no longer exists",
-            awaiting_reason_code: "session_died",
-          } as unknown as RunState
-        }
-      />,
-    );
-    const box = screen.getByTestId("run-awaiting-reason");
-    expect(box.textContent).toContain("Interrupted");
-    expect(box.textContent).toContain("no longer exists");
-  });
-
-  it("shows no awaiting box for an interactive wait (no reason)", () => {
-    // An interactive awaiting_user (a node asking its user) carries no incident
-    // reason, so the box must not appear — the two awaiting causes stay distinct.
-    render(<RunInfoSidebar run={makeRun("awaiting_user")} />);
-    expect(screen.queryByTestId("run-awaiting-reason")).toBeNull();
-  });
-
-  // #551 (ADR-0046): the frozen Run harness is visible in the panel.
-  it("shows the Run's frozen harness when it named one", () => {
-    render(
-      <RunInfoSidebar run={{ ...makeRun("running"), harness: "opencode" } as unknown as RunState} />,
-    );
-    const chip = screen.getByTestId("run-harness");
-    expect(chip.textContent).toContain("Harness");
-    expect(chip.textContent).toContain("opencode");
-  });
-
-  it("shows no harness chip when the Run inherited the default", () => {
-    // Absent harness = inherited the instance default (and the floor) — the panel does
-    // not spell that out per-Run.
-    render(<RunInfoSidebar run={makeRun("running")} />);
-    expect(screen.queryByTestId("run-harness")).toBeNull();
-  });
-
+// #752: the Repositories section moved from the standalone `RunInfoSidebar`
+// (deleted) into the Run panel's Repositories tab. Same content, same test ids.
+describe("RepositoriesSection (Run panel · Repositories tab)", () => {
   // #465 slice 2 — the Repositories section.
-  it("shows no Repositories section for a mono-repo run (no target_repo)", () => {
-    render(<RunInfoSidebar run={makeRun("running")} />);
-    expect(screen.queryByTestId("run-repositories")).toBeNull();
-  });
-
   it("renders the primary locked and the secondaries with a remove button", () => {
     const run = makeMultiRepoRun("running", [
       { repo: "/repos/lib", alias: "lib", sha: "cafebabe1234", base_branch: "main" },
     ]);
-    render(<RunInfoSidebar run={run} onEdited={() => {}} />);
+    render(<RepositoriesSection run={run} onEdited={() => {}} />);
 
     // Primary is locked: badge present, no remove button on its row.
     const primary = screen.getByTestId("primary-repo-row");
@@ -171,14 +81,14 @@ describe("RunInfoSidebar", () => {
       { repo: "/repos/rw", alias: "rw", sha: "aaaa1111" },
       { repo: "/repos/ro", alias: "ro", sha: "bbbb2222", read_only: true },
     ]);
-    render(<RunInfoSidebar run={run} onEdited={() => {}} />);
+    render(<RepositoriesSection run={run} onEdited={() => {}} />);
     expect(screen.getByTestId("secondary-repo-mode-rw").textContent).toBe("WRITABLE");
     expect(screen.getByTestId("secondary-repo-mode-ro").textContent).toBe("READ-ONLY");
   });
 
   it("adds a read-only draft with read_only:true in the PATCH (ADR-0047)", async () => {
     const run = makeMultiRepoRun("running", []);
-    render(<RunInfoSidebar run={run} onEdited={() => {}} />);
+    render(<RepositoriesSection run={run} onEdited={() => {}} />);
 
     fireEvent.click(screen.getByTestId("add-secondary-repo"));
     const draft = screen.getByTestId("secondary-repo-draft");
@@ -209,7 +119,7 @@ describe("RunInfoSidebar", () => {
     const run = makeMultiRepoRun("running", [
       { repo: "/repos/lib", alias: "lib", sha: "cafebabe1234" },
     ]);
-    render(<RunInfoSidebar run={run} onEdited={onEdited} />);
+    render(<RepositoriesSection run={run} onEdited={onEdited} />);
 
     fireEvent.click(screen.getByTestId("remove-secondary-repo-lib"));
 
@@ -219,7 +129,7 @@ describe("RunInfoSidebar", () => {
 
   it("the + Add repository button reveals a self-validating draft row", () => {
     const run = makeMultiRepoRun("running", []);
-    render(<RunInfoSidebar run={run} onEdited={() => {}} />);
+    render(<RepositoriesSection run={run} onEdited={() => {}} />);
 
     expect(screen.queryByTestId("secondary-repo-draft")).toBeNull();
     fireEvent.click(screen.getByTestId("add-secondary-repo"));
@@ -228,7 +138,7 @@ describe("RunInfoSidebar", () => {
 
   it("carries the spawn-time visibility note on a live run", () => {
     const run = makeMultiRepoRun("running", []);
-    render(<RunInfoSidebar run={run} onEdited={() => {}} />);
+    render(<RepositoriesSection run={run} onEdited={() => {}} />);
     expect(screen.getByTestId("spawn-visibility-note").textContent).toContain(
       "launched after",
     );
@@ -238,7 +148,7 @@ describe("RunInfoSidebar", () => {
     const run = makeMultiRepoRun("completed", [
       { repo: "/repos/lib", alias: "lib", sha: "cafebabe1234" },
     ]);
-    render(<RunInfoSidebar run={run} />);
+    render(<RepositoriesSection run={run} />);
 
     // The section and the secondary still render (read-only)...
     expect(screen.getByTestId("run-repositories")).toBeInTheDocument();

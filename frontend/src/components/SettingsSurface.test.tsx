@@ -131,6 +131,7 @@ function sample(overrides: Partial<InstanceSettings> = {}): InstanceSettings {
     },
     // Manager on demand: off by default (a Run starts managerless), no pin (« Follow the Run »).
     manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+    review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
     manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
     // Price table (#427): the default state of every instance — neither file exists,
     // never synced, nothing inert. The paths are reported all the same.
@@ -895,6 +896,33 @@ describe("SettingsSurface — default Run auto-naming (#338)", () => {
     browseFsMock.mockReset();
     browseFsMock.mockResolvedValue(BROWSE_HOME);
     resetProfileMocks();
+  });
+
+  it("#751: « Let the agent resolve review comments directly » sits after auto-name, off by default, and saves `true` as a stored decision", async () => {
+    fetchSettingsMock.mockResolvedValue(sample());
+    updateSettingsMock.mockResolvedValue(
+      sample({
+        review_agent_can_resolve: { effective: true, source: "stored", stored: true, env: null, default: false },
+      }),
+    );
+    render(<SettingsSurface open onClose={() => {}} />);
+    const box = (await screen.findByTestId("setting-review-agent-can-resolve")) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(screen.getByTestId("setting-source-review-agent-can-resolve")).toHaveTextContent(
+      /built-in default \(off\)/i,
+    );
+    expect(screen.getByTestId("setting-source-review-agent-can-resolve")).toHaveTextContent("PDO_REVIEW_AGENT_CAN_RESOLVE");
+    // Right after auto-name in the DOM.
+    const autoName = screen.getByTestId("setting-default-auto-name");
+    expect(autoName.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(box);
+    fireEvent.click(screen.getByTestId("settings-save"));
+    await waitFor(() => expect(updateSettingsMock).toHaveBeenCalledTimes(1));
+    expect(updateSettingsMock).toHaveBeenCalledWith({ review_agent_can_resolve: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("setting-source-review-agent-can-resolve")).toHaveTextContent(/stored value \(on\)/i),
+    );
   });
 
   it("is checked on a fresh instance (default is ON — pre-#338 behaviour)", async () => {

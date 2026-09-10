@@ -114,6 +114,7 @@ vi.mock("./api", () => {
       default: true,
     },
     manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+    review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
     manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
     update_check: { effective: true, source: "default", stored: null, env: null, default: true },
     price_table: {

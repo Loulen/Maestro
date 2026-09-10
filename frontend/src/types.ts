@@ -317,6 +317,13 @@ export interface InstanceSettings {
    */
   update_check: BoolSettingField;
   /**
+   * #751 (ADR-0067 §4): may an agent's `pdo review reply --resolved` resolve the
+   * review comment directly? **Off by default**: the reply is a *proposal* and the
+   * human clicks Resolve / Reopen. On, the comment resolves on the spot and the
+   * human keeps Reopen. Instance-wide, `stored → env → default` like auto-name.
+   */
+  review_agent_can_resolve: BoolSettingField;
+  /**
    * Manager on demand: does every new Run automatically spawn its Pipeline
    * Manager session? **Off by default** — a Run starts managerless and the user
    * starts one from the Manager tab when they want it. Gates ONLY the automatic
@@ -491,6 +498,9 @@ export interface UpdateSettingsRequest {
   /** Version check switch (#697). Same plain-bool discipline: `false` persists as a
    *  stored `0` that beats a `PDO_UPDATE_CHECK=1`. */
   update_check?: boolean;
+  /** #751: let agents resolve review comments directly. Same plain-bool discipline:
+   *  `false` persists as a stored `0` that beats a `PDO_REVIEW_AGENT_CAN_RESOLVE=1`. */
+  review_agent_can_resolve?: boolean;
   /** Manager on demand: auto-spawn the manager with each Run. Same plain-bool
    *  discipline: `false` persists as a stored `0` that beats a
    *  `PDO_MANAGER_ENABLED=1`. */
@@ -1107,6 +1117,8 @@ export interface RunState {
    * derived flag). Absent on older payloads, read as `false`.
    */
   has_manager?: boolean;
+  /** #750: sent review comments, in send order. Absent when nobody reviewed. */
+  review_comments?: ReviewComment[];
   /**
    * Lines changed for the run (`git diff --numstat` of the run branch, `.pdo/`
    * excluded), or null/absent once the branch is gone (archived/cleaned) — the
@@ -1924,4 +1936,204 @@ export interface SkippedSkill {
   id: string;
   name: string;
   reason: string;
+}
+
+// ---------------------------------------------------------------------------
+// Structured Run diff (#748, ADR-0067) — `GET /runs/<id>/diff/structured`.
+// The daemon parses the patch; the Diff tab renders from data.
+// ---------------------------------------------------------------------------
+
+export type DiffFileStatus = "added" | "deleted" | "modified" | "renamed" | "copied";
+export type DiffLineKind = "context" | "add" | "del";
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  /** Line text without its leading `+`/`-`/space marker. */
+  content: string;
+  /** 1-based line number on the old side; null for an added line. */
+  old_no: number | null;
+  /** 1-based line number on the new side; null for a deleted line. */
+  new_no: number | null;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  /** Function context git prints after the second `@@` (may be empty). */
+  header: string;
+  lines: DiffLine[];
+}
+
+export interface DiffFile {
+  /** Source path; null for a pure addition. */
+  old_path: string | null;
+  /** Destination path; null for a pure deletion. */
+  new_path: string | null;
+  status: DiffFileStatus;
+  binary: boolean;
+  additions: number;
+  deletions: number;
+  /** Empty for a binary file or a pure rename. */
+  hunks: DiffHunk[];
+}
+
+// ---------------------------------------------------------------------------
+// Refs of the Run (#749, ADR-0067 §1) — `GET /runs/<id>/refs`. Stable ids
+// (`fork`, `tip`, `node:<id>:<iter>:before|after`, `live:<id>`) are what the
+// Review page's URL carries; labels are built by the daemon.
+// ---------------------------------------------------------------------------
+
+export type RunRefKind = "fork" | "tip" | "before" | "after" | "live";
+
+export interface RunRef {
+  id: string;
+  kind: RunRefKind;
+  /** e.g. `implement · iter 1 · after`. */
+  label: string;
+  /** The git ref the id resolves to (SHA, branch, fork SHA). */
+  git_ref: string;
+  /** Resolved commit SHA; null when it no longer resolves (archived, merged back). */
+  sha: string | null;
+  node_id?: string;
+  node_name?: string;
+  iter?: number;
+}
+
+export type RunDeliveryStatus = "delivered" | "running";
+
+/** One node delivery (or one running node's live branch) as a one-click pair. */
+export interface RunDelivery {
+  node_id: string;
+  node_name: string;
+  iter: number;
+  status: RunDeliveryStatus;
+  /** Ref id of the pair's source. */
+  before: string;
+  /** Ref id of the pair's destination when delivered. */
+  after?: string;
+  /** Ref id of the live sub-worktree branch when running. */
+  live?: string;
+  delivered_at?: string;
+}
+
+export interface RunRefs {
+  /** Order: fork, deliveries in delivery order, live branches, tip. */
+  refs: RunRef[];
+  deliveries: RunDelivery[];
+  default_from: string;
+  default_to: string;
+}
+
+// ---------------------------------------------------------------------------
+// Review comments (#750, ADR-0067 §2) — `sent` comments are Run events, folded
+// into `RunState.review_comments`; drafts never leave the browser (see
+// `lib/reviewComments.ts`).
+// ---------------------------------------------------------------------------
+
+/** `old` = the source ref's line (left), `new` = the destination ref's (right). */
+export type ReviewSide = "old" | "new";
+export type ReviewCommentStatus = "sent" | "resolved";
+
+/** An agent's reply (#751, `pdo review reply`): `manager` or a node id as author. */
+export interface ReviewReply {
+  author: string;
+  text: string;
+  at: string;
+  /** The reply carried `--resolved`: a proposal, or a direct resolution under the setting. */
+  proposes_resolution?: boolean;
+}
+
+export interface ReviewComment {
+  /** `rc-001`, … — what the manager echoes in `pdo review reply`. */
+  id: string;
+  path: string;
+  side: ReviewSide;
+  line: number;
+  /** Stable Run ref ids of the pair the comment was written against. */
+  from_ref: string;
+  to_ref: string;
+  from_sha?: string;
+  to_sha?: string;
+  text: string;
+  /** Hunk excerpt at send time, the anchored line marked `>`. */
+  excerpt?: string;
+  author: string;
+  sent_at: string;
+  batch_id?: string;
+  status: ReviewCommentStatus;
+  replies?: ReviewReply[];
+  /** #751: a `--resolved` reply awaits the human (setting off) — "Resolution proposed". */
+  proposal_pending?: boolean;
+  /** `user`, `manager` or a node id; set while `resolved`. */
+  resolved_by?: string;
+  resolved_at?: string;
+  /** The last reopen (a resolved comment reopened, or a proposal declined). */
+  reopened_by?: string;
+  reopened_at?: string;
+  /** The last reopen declined a pending proposal (the comment stayed `sent`). */
+  proposal_declined?: boolean;
+}
+
+/**
+ * #752 (ADR-0067 §5): what `GET …/review/comments?from=&to=` adds to a comment
+ * once re-mapped onto the displayed pair. `outdated` = the line was edited or
+ * deleted between the SHA the comment was written against and the displayed
+ * one; otherwise `mapped_line` is where the line sits now (`moved` when the
+ * number differs). Absent when the daemon could not map (no SHA recorded, ref
+ * gone): the comment shows where it was written.
+ */
+export interface ReviewAnchorMapping {
+  outdated: boolean;
+  mapped_line?: number;
+  moved?: boolean;
+}
+
+/** A comment as listed with a pair: the wire shape plus its mapping fields. */
+export type MappedReviewComment = ReviewComment & Partial<ReviewAnchorMapping>;
+
+export interface ReviewCommentsListResponse {
+  comments: MappedReviewComment[];
+  agent_can_resolve?: boolean;
+  /** Present when a pair was given: the SHAs it resolved to. */
+  from_sha?: string | null;
+  to_sha?: string | null;
+}
+
+/** `POST …/review/comments/<id>/resolve|reopen` — the human's verbs (#751). */
+export interface ReviewDecisionResponse {
+  comment: ReviewComment;
+  /** False when the comment was already in the requested state (no event). */
+  changed: boolean;
+}
+
+/** One draft as posted to `POST /runs/<id>/review/comments/send`. */
+export interface SendReviewCommentInput {
+  path: string;
+  side: ReviewSide;
+  line: number;
+  from: string;
+  to: string;
+  text: string;
+}
+
+export interface SendReviewCommentsResponse {
+  sent: ReviewComment[];
+  batch_id: string;
+  /** True when this send started the manager on demand. */
+  manager_started: boolean;
+}
+
+export interface StructuredDiff {
+  from_ref: string;
+  to_ref: string;
+  from_sha: string | null;
+  to_sha: string | null;
+  /** True for the fork → tip default (merge-base range, same bounds as `loc`). */
+  three_dot: boolean;
+  files: DiffFile[];
+  additions: number;
+  deletions: number;
+  files_changed: number;
 }

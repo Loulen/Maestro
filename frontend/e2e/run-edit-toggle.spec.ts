@@ -87,7 +87,7 @@ test("unified edit mode: selecting a run opens editor canvas automatically", asy
 
   // The opened tab is run-scoped: its id is `__run__<run_id>`, so the editor we
   // see is editing the run's pipeline (run-scoped edits "sync to template").
-  // On a live run a node auto-selects, so the RunInfoSidebar footnote is not a
+  // On a live run a node auto-selects, so the Run panel's Info footnote is not a
   // reliable signal here — the run-scoped tab id is.
   await expect(page.getByTestId(`tab-title-__run__${run_id}`)).toBeVisible();
 });

@@ -10,6 +10,76 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.79.0
+**Page de Review — report / outdated des commentaires, accès rapide Review, onglet Repositories** (#752 ; story #746, ADR-0067).
+Quand la paire affichée a bougé depuis l'écriture d'un commentaire (relivraison d'un nœud, merge-back), le daemon
+**mappe l'ancre à la lecture** (`GET /runs/{id}/review/comments?from=&to=` ajoute `outdated` / `mapped_line` / `moved`
+et renvoie `from_sha` / `to_sha`) : ligne inchangée → commentaire **reporté** à sa nouvelle position (chip `↳ from R…`
+quand le numéro diffère) ; ligne éditée ou supprimée → **outdated**, replié en tête du fichier avec son hunk d'origine,
+toujours répondable / résolvable. Rien n'est écrit dans l'event log : l'ancre d'origine reste la vérité, et
+`pdo review list` (fork → tip) expose `outdated` au manager. Bascule `Show outdated` (mémorisée par navigateur).
+Toolbar du canvas : le bouton « Run repositories » disparaît, remplacé par un lien **Review** avec pastille des
+commentaires en attente (bleu contour = envoyés non résolus, bleu plein = réponse non lue, ambre = résolution
+proposée), sur tout Run non archivé. La sidebar `RunInfoSidebar` est supprimée : **Repositories** devient un onglet
+du panneau du Run (`Info | Diff | Repositories | Manager | YAML`), l'en-tête Info porte la raison d'échec / d'attente
+et la note d'édition. Couvre la seconde moitié de #566 (laissé ouvert).
+## 1.78.0
+**Page de Review — conversation avec l'agent** (#751 ; story #746, ADR-0067).
+Un commentaire envoyé devient un **fil** : l'agent répond avec `pdo review list [--state open|resolved|all]`
+et `pdo review reply <rc-id> --text "…" [--resolved]` (auteur déduit de la session : `manager` ou l'id du
+nœud). Les évènements `review_comment_replied` / `resolved` / `reopened` sont désormais émis et projetés
+(`proposal_pending`, `resolved_by`, `reopened_by`, `proposal_declined`). Par défaut, un `--resolved` de
+l'agent n'est qu'une **proposition** : la carte passe en ambre et l'humain tranche avec **Resolve** /
+**Reopen** (Reopen sur une proposition = refus, le commentaire reste ouvert). Nouveau réglage d'instance
+`review_agent_can_resolve` (`PUT /settings`, env `PDO_REVIEW_AGENT_CAN_RESOLVE`, défaut `false`, case
+Settings › Runs « Let the agent resolve review comments directly ») : quand il est actif, l'agent résout
+directement et l'humain peut rouvrir. Endpoints `POST /runs/{id}/review/comments/{rc}/reply|resolve|reopen`
+(idempotents, `changed: false` sans évènement), `GET …/review/comments?state=`. Côté UI : icônes d'état
+(ouvert / proposé / résolu) et d'auteur, cartes résolues repliées sur une ligne, pastille cloche des
+réponses non lues (mémorisées par navigateur), bascule œil pour masquer le résolu, badge bleu sur l'onglet
+Diff du Run tant qu'une réponse n'est pas lue. Le prompt builtin du manager documente le CLI.
+## 1.77.0
+
+**Page de Review — commentaires inline, brouillons et envoi au manager** (#750 ; story #746, ADR-0067).
+Le widget `+` d'une ligne du diff ouvre un éditeur sous la ligne (Write/Preview markdown, ⌘/Ctrl+Entrée,
+Échap, Cancel · Send now · Save draft). Un **brouillon** vit dans le navigateur (`localStorage` par Run,
+texte en cours en `sessionStorage`), éditable et supprimable, marqué d'un point ambre sur la ligne.
+L'envoi — par carte, via la pastille de la barre d'outils ou la barre de pied de page « Send all » —
+écrit un évènement `review_comment_sent` par commentaire (ids `rc-001…`, `batch_id` partagé, paire de
+refs et SHAs), projeté dans `RunState.review_comments` (absent quand vide : payloads historiques
+inchangés), et colle **un seul message** dans le pane du manager (démarré à la demande) via
+`load-buffer` + `paste-buffer`. Un commentaire envoyé devient immuable et affiche `rc-NNN · paire ·
+Awaiting manager reply`. Nouveaux endpoints `GET /runs/{id}/review/comments` et
+`POST /runs/{id}/review/comments/send` ; branche du Run disparue ou Run archivé → `409 run_branch_gone`,
+envoi désactivé avec la raison, rien n'est écrit. Les évènements `review_comment_replied` /
+`resolved` / `reopened` sont définis mais pas encore émis (#751). Le prompt builtin du manager gagne
+une section « Review comments ». Navigation entre commentaires : `c` / `C`.
+
+## 1.76.0
+
+**Page de Review — relecture de diff GitHub-like** (#749 ; story #746, ADR-0067). Depuis l'onglet Diff,
+« Expand and comment » ouvre `/runs/<id>/review`, une page à part entière (nouvel onglet, rechargeable,
+paire de refs dans l'URL). Elle liste les fichiers à gauche avec leurs +/−, rend le diff **side-by-side**
+par défaut (bascule unifiée mémorisée en local) via un composant tiers (`@git-diff-view/react`), et
+permet d'**étendre le contexte** caché entre les hunks depuis le contenu du fichier à une ref. Un
+sélecteur **source → destination** propose les refs du Run exposées par le nouveau `GET /runs/{id}/refs` :
+point de fork, tip, et pour chaque nœud livré ses `before`/`after` libellés par nom et itération ;
+défaut fork → tip, ref inconnue → repli sur le défaut avec avis. Le panneau d'un nœud livré ou en cours
+gagne le raccourci « Review this node's delivery ». Aucune surface « diff de nœud » ; les commentaires
+viendront dans un ticket suivant.
+
+## 1.75.0
+
+**Onglet Diff de niveau Run qui fonctionne** (#748 ; story #746, ADR-0067). Le diff d'un Run est
+désormais calculé dans le **dépôt effectif** du Run (le repo cible du worktree), plus dans
+`state.repo_root` — sur un repo cible distinct du cwd du daemon il rendait « No changes ». Le daemon
+expose `GET /runs/{id}/diff/structured` (fichiers, hunks, compteurs +/−, refs fork → tip) et
+`GET /runs/{id}/file?path=…` (garde-fous : chemin hors dépôt → 400, ref/option → 400, inconnu → 404).
+Côté UI, la section Diff de l'onglet Info devient un **onglet Diff** dédié (`Info | Diff | Manager | YAML`) :
+résumé collant, ledger des fichiers, transcript plat avec repli par fichier persistant entre onglets,
+surlignage intra-ligne. Un Run **archivé** affiche « Diff not preserved for archived runs » (404 côté API).
+Le sélecteur de nœud et la section Diff de l'onglet Info sont retirés ; la stat *Changes* ouvre l'onglet Diff.
+
 ## 1.74.0
 
 **Page mounts — `pdo page mount|unmount|list` et service en lecture seule sous `/pages/<name>/`**

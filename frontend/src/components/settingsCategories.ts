@@ -162,6 +162,7 @@ export type SettingsFieldId =
   | "guard-timeout"
   | "autocomplete-turn-end"
   | "default-auto-name"
+  | "review-agent-can-resolve"
   | "agent-choice"
   | "skills"
   | "default-model"
@@ -178,6 +179,7 @@ export const FIELD_SECTION: Record<SettingsFieldId, SettingsSectionId> = {
   "guard-timeout": "runtime-limits",
   "autocomplete-turn-end": "runs",
   "default-auto-name": "runs",
+  "review-agent-can-resolve": "runs",
   "agent-choice": "harness-models",
   skills: "skills",
   "default-model": "harness-models",

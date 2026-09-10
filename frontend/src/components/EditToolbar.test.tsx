@@ -170,53 +170,49 @@ describe("EditToolbar", () => {
     });
   });
 
-  // #465 slice 2 (F1): the Run-info / Repositories toggle, shown only on the
-  // live run tabs where the App auto-snaps to the running node — the exact set
-  // where the sidebar is otherwise unreachable.
-  describe("run-info toggle (#465 slice 2, F1)", () => {
+  // #752 (CONTEXT.md « Accès rapide Review »): the Review quick access takes the
+  // slot of the old "Run repositories" toggle (Repositories is a tab of the Run
+  // panel now). A link, not a toggle; pill = pending count, tone = nuance.
+  describe("Review quick access (#752)", () => {
     it("is absent on a non-run canvas (default)", () => {
       renderToolbar({ onToggleInfo: vi.fn() });
+      expect(screen.queryByTestId("toolbar-review")).toBeNull();
       expect(screen.queryByTestId("toolbar-run-info")).toBeNull();
     });
 
-    it("stays absent when shown without a handler wired", () => {
-      renderToolbar({ showRunInfo: true });
+    it("is a real link to the Review page, named, without aria-pressed", () => {
+      renderToolbar({ reviewHref: "/runs/r1/review", reviewTitle: "Review" });
+      const link = screen.getByTestId("toolbar-review");
+      expect(link.tagName).toBe("A");
+      expect(link).toHaveAttribute("href", "/runs/r1/review");
+      expect(link).toHaveAccessibleName("Review");
+      expect(link).not.toHaveAttribute("aria-pressed");
+      expect(screen.queryByTestId("toolbar-review-pill")).toBeNull();
+    });
+
+    it("shows the pending count as an outlined pill, and the title spells it out", () => {
+      renderToolbar({ reviewHref: "/runs/r1/review", reviewPending: 2, reviewTone: "pending", reviewTitle: "Review · 2 pending" });
+      const link = screen.getByTestId("toolbar-review");
+      expect(link).toHaveAccessibleName("Review · 2 pending");
+      expect(link).toHaveAttribute("data-tone", "pending");
+      expect(screen.getByTestId("toolbar-review-pill").textContent).toBe("2");
+    });
+
+    it("turns solid blue on an unread reply and amber on a proposed resolution", () => {
+      const { unmount } = renderToolbar({ reviewHref: "/runs/r1/review", reviewPending: 2, reviewTone: "unread" });
+      expect(screen.getByTestId("toolbar-review")).toHaveAttribute("data-tone", "unread");
+      expect(screen.getByTestId("toolbar-review-pill").className).toContain("bg-st-running ");
+      unmount();
+      renderToolbar({ reviewHref: "/runs/r1/review", reviewPending: 2, reviewTone: "proposed" });
+      expect(screen.getByTestId("toolbar-review")).toHaveAttribute("data-tone", "proposed");
+      expect(screen.getByTestId("toolbar-review-pill").className).toContain("bg-st-await");
+    });
+
+    it("adds no button — the core count is unchanged — and the old toggle is gone", () => {
+      renderToolbar({ reviewHref: "/runs/r1/review", onToggleInfo: vi.fn() });
+      const buttons = [...screen.getByTestId("edit-toolbar").querySelectorAll("button")];
+      expect(buttons).toHaveLength(7); // 7 core; Review is a link
       expect(screen.queryByTestId("toolbar-run-info")).toBeNull();
-    });
-
-    it("renders named, unpressed at rest, and toggles on click", () => {
-      const onToggleRunInfo = vi.fn();
-      renderToolbar({ showRunInfo: true, onToggleRunInfo });
-      const btn = screen.getByTestId("toolbar-run-info");
-      expect(btn).toHaveAccessibleName("Run repositories");
-      expect(btn).toHaveAttribute("aria-pressed", "false");
-      fireEvent.click(btn);
-      expect(onToggleRunInfo).toHaveBeenCalledTimes(1);
-    });
-
-    it("reflects the pressed state while the sidebar is open", () => {
-      renderToolbar({
-        showRunInfo: true,
-        onToggleRunInfo: vi.fn(),
-        runInfoActive: true,
-      });
-      expect(screen.getByTestId("toolbar-run-info")).toHaveAttribute(
-        "aria-pressed",
-        "true",
-      );
-    });
-
-    it("adds exactly one more named button beside Pipeline info", () => {
-      renderToolbar({
-        showRunInfo: true,
-        onToggleRunInfo: vi.fn(),
-        onToggleInfo: vi.fn(),
-      });
-      const buttons = [
-        ...screen.getByTestId("edit-toolbar").querySelectorAll("button"),
-      ];
-      expect(buttons).toHaveLength(8); // 7 core + run-info
-      for (const b of buttons) expect(b).toHaveAccessibleName(/\S/);
     });
   });
 

@@ -3,10 +3,10 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { RunState, PipelineDef } from "../types";
 
-// The badge/banner live in the InfoTab header, above DiffSection. Mock the heavy
+// The badge/banner live in the InfoTab header. Mock the heavy
 // children (network-fetching diff, tmux terminal) so the test stays focused on the
 // #410 sandbox surface and never touches the network.
-vi.mock("./DiffSection", () => ({ default: () => null }));
+vi.mock("./DiffTab", () => ({ default: () => null }));
 vi.mock("./TmuxTerminal", () => ({ default: vi.fn(() => null) }));
 
 // #302 / ADR-0048: the Assistant tab drives create-if-absent / reap-on-leave
@@ -529,5 +529,203 @@ describe("PipelineInfoPanel — Assistant tab (#302)", () => {
 
     expect(openLibraryAssistant).toHaveBeenCalledTimes(1);
     expect(closeLibraryAssistant).not.toHaveBeenCalled();
+  });
+});
+
+describe("PipelineInfoPanel — Diff tab (#748)", () => {
+  it("offers a Diff tab for a Run, between Info and Manager", () => {
+    renderPanel(makeRun());
+    const tabs = screen
+      .getAllByTestId(/^info-tab-/)
+      .map((t) => t.getAttribute("data-testid"));
+    expect(tabs).toEqual(["info-tab-info", "info-tab-diff", "info-tab-repositories", "info-tab-manager", "info-tab-yaml"]);
+  });
+
+  it("hides the Diff tab for a template (no Run)", () => {
+    renderPanel(null);
+    expect(screen.queryByTestId("info-tab-diff")).toBeNull();
+  });
+
+  it("no longer renders the collapsible Diff section inside Info", () => {
+    renderPanel(makeRun());
+    expect(screen.queryByTestId("diff-section")).toBeNull();
+    expect(screen.queryByTestId("diff-node-select")).toBeNull();
+  });
+
+  it("the Changes stat opens the Diff tab", () => {
+    renderPanel(makeRun({ loc: { insertions: 38, deletions: 11, files_changed: 4 } }));
+    const link = screen.getByTestId("stat-loc-open-diff");
+    expect(link).toHaveTextContent("+38");
+    expect(link).toHaveTextContent("−11");
+    expect(link).toHaveTextContent("4 files");
+    fireEvent.click(link);
+    expect(screen.getByTestId("info-tab-diff").className).toContain("border-acc");
+    // Info's body is gone: the Diff tab owns the panel now.
+    expect(screen.queryByTestId("run-stats")).toBeNull();
+  });
+
+  it("counts unread review replies on the Diff tab (#751), replacing the dot, and clears once the Review marked them seen", () => {
+    const replied = {
+      id: "rc-001",
+      path: "a.ts",
+      side: "new" as const,
+      line: 1,
+      from_ref: "fork",
+      to_ref: "tip",
+      text: "t",
+      author: "user",
+      sent_at: "2026-07-01T10:00:00.000Z",
+      status: "sent" as const,
+      replies: [{ author: "manager", text: "done", at: "2026-07-01T10:05:00.000Z" }],
+    };
+    const delivered = {
+      "impl-1": {
+        node_id: "impl-1",
+        status: "completed" as const,
+        iter: 1,
+        started_at: "2026-07-01T10:00:00.000Z",
+        completed_at: "2026-07-01T10:01:00.000Z",
+        failure_reason: null,
+        iterations: [],
+        delivery: { before: "aaa", after: "bbb" },
+      },
+    };
+    const { rerender } = renderPanel(makeRun());
+    rerender(
+      <PipelineInfoPanel
+        run={makeRun({
+          nodes: delivered,
+          review_comments: [replied, { ...replied, id: "rc-002", status: "resolved", resolved_by: "xuTJYLUa" }],
+        })}
+        pipeline={null}
+        libraryPipelines={[]}
+        onLibraryChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    // One open comment with an unread reply; the agent-resolved one does not count.
+    // The count replaces the "tip moved" dot.
+    expect(screen.getByTestId("diff-tab-unread")).toHaveTextContent("1");
+    expect(screen.queryByTestId("diff-tab-dot")).toBeNull();
+    // The Review page (another tab) marked it seen → storage event → badge gone, dot back.
+    localStorage.setItem("pdo.review.seen.run-abc1234567", JSON.stringify({ "rc-001": 1, "rc-002": 1 }));
+    fireEvent(window, new StorageEvent("storage", { key: "pdo.review.seen.run-abc1234567" }));
+    expect(screen.queryByTestId("diff-tab-unread")).toBeNull();
+    expect(screen.getByTestId("diff-tab-dot")).toBeInTheDocument();
+  });
+
+  it("dots the Diff tab when a node delivers while another tab is shown, and clears it on open", () => {
+    const { rerender } = renderPanel(makeRun());
+    expect(screen.queryByTestId("diff-tab-dot")).toBeNull();
+    rerender(
+      <PipelineInfoPanel
+        run={makeRun({
+          nodes: {
+            "impl-1": {
+              node_id: "impl-1",
+              status: "completed",
+              iter: 1,
+              started_at: "2026-07-01T10:00:00.000Z",
+              completed_at: "2026-07-01T10:01:00.000Z",
+              failure_reason: null,
+              iterations: [],
+              delivery: { before: "aaa", after: "bbb" },
+            },
+          },
+        })}
+        pipeline={null}
+        libraryPipelines={[]}
+        onLibraryChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("diff-tab-dot")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("info-tab-diff"));
+    expect(screen.queryByTestId("diff-tab-dot")).toBeNull();
+  });
+});
+
+// #752: Repositories is a tab of the Run panel (the second half of #566), and
+// what the deleted `RunInfoSidebar` carried besides it lives in the Info header.
+describe("PipelineInfoPanel — Repositories tab and Info header (#752)", () => {
+  it("offers Info | Diff | Repositories | Manager | YAML for a Run, and no Repositories tab on a template", () => {
+    renderPanel(makeRun());
+    expect(screen.getByTestId("info-tab-repositories")).toHaveTextContent("Repositories");
+    expect(screen.queryByTestId("repositories-tab")).toBeNull();
+    fireEvent.click(screen.getByTestId("info-tab-repositories"));
+    expect(screen.getByTestId("repositories-tab")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-stats")).toBeNull();
+  });
+
+  it("hides the Repositories tab for a template (no Run)", () => {
+    renderPanel(null);
+    expect(screen.queryByTestId("info-tab-repositories")).toBeNull();
+  });
+
+  it("lists the Run's repositories in the tab — primary locked, secondaries with their mode — frozen on a terminal Run", () => {
+    renderPanel(
+      makeRun({
+        status: "completed",
+        target_repo: "/repos/primary",
+        target_repos: [{ repo: "/repos/lib", alias: "lib", sha: "cafebabe1234", base_branch: "main", read_only: true }],
+      }),
+    );
+    fireEvent.click(screen.getByTestId("info-tab-repositories"));
+    expect(screen.getByTestId("run-repositories")).toBeInTheDocument();
+    expect(screen.getByTestId("primary-repo-row")).toHaveTextContent("/repos/primary");
+    expect(screen.getByTestId("secondary-repo-lib")).toHaveTextContent("/repos/lib");
+    expect(screen.getByTestId("secondary-repo-mode-lib")).toHaveTextContent("READ-ONLY");
+    expect(screen.queryByTestId("remove-secondary-repo-lib")).toBeNull();
+    expect(screen.queryByTestId("add-secondary-repo")).toBeNull();
+  });
+
+  it("offers add on a live Run and says so when the Run recorded no repository", () => {
+    const { unmount } = renderPanel(makeRun({ status: "running", target_repo: "/repos/primary", target_repos: [] }));
+    fireEvent.click(screen.getByTestId("info-tab-repositories"));
+    expect(screen.getByTestId("add-secondary-repo")).toBeInTheDocument();
+    expect(screen.getByTestId("spawn-visibility-note")).toBeInTheDocument();
+    unmount();
+    renderPanel(makeRun({ status: "running" }));
+    fireEvent.click(screen.getByTestId("info-tab-repositories"));
+    expect(screen.getByTestId("repositories-tab-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-repositories")).toBeNull();
+  });
+
+  it("Info states why a failed run failed, and names the terminal (#503)", () => {
+    renderPanel(makeRun({ status: "failed", failure_reason: "merge conflict on ship: 20 conflicting file(s)" }));
+    const box = screen.getByTestId("run-failure-reason");
+    expect(box).toHaveTextContent("Failed");
+    expect(box).toHaveTextContent("20 conflicting file(s)");
+    expect(screen.queryByTestId("run-awaiting-reason")).toBeNull();
+  });
+
+  it("Info states why an incident-parked run awaits the user, not an interactive wait (#598)", () => {
+    const { unmount } = renderPanel(
+      makeRun({ status: "awaiting_user", awaiting_reason: "session_died: tmux session … no longer exists", awaiting_reason_code: "session_died" } as Partial<RunState>),
+    );
+    expect(screen.getByTestId("run-awaiting-reason")).toHaveTextContent("Interrupted");
+    expect(screen.getByTestId("run-awaiting-reason")).toHaveTextContent("no longer exists");
+    unmount();
+    renderPanel(makeRun({ status: "awaiting_user" }));
+    expect(screen.queryByTestId("run-awaiting-reason")).toBeNull();
+    expect(screen.queryByTestId("run-failure-reason")).toBeNull();
+  });
+
+  it("Info shows the frozen harness when named (#551) and the editing / archived note (#315)", () => {
+    const { unmount } = renderPanel(makeRun({ status: "running", harness: "opencode" } as Partial<RunState>));
+    expect(screen.getByTestId("run-harness")).toHaveTextContent("opencode");
+    expect(screen.getByTestId("run-info-note")).toHaveTextContent("changes sync to template");
+    unmount();
+    renderPanel(makeRun({ status: "archived" }));
+    expect(screen.queryByTestId("run-harness")).toBeNull();
+    expect(screen.getByTestId("run-info-note")).toHaveTextContent("Archived run");
+    expect(screen.getByTestId("run-info-note")).toHaveTextContent("read-only");
+  });
+
+  it("shows no note, reason or harness on a template", () => {
+    renderPanel(null);
+    expect(screen.queryByTestId("run-info-note")).toBeNull();
+    expect(screen.queryByTestId("run-harness")).toBeNull();
+    expect(screen.queryByTestId("run-failure-reason")).toBeNull();
   });
 });
