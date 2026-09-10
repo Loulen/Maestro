@@ -9,6 +9,7 @@ import type { ReviewComment, RunRefs, RunState, StructuredDiff, DiffFile } from 
 
 vi.mock("../api", () => ({
   fetchRun: vi.fn(),
+  fetchReviewComments: vi.fn(),
   fetchRunRefs: vi.fn(),
   fetchRunStructuredDiff: vi.fn(),
   fetchRunFileAtRef: vi.fn(),
@@ -83,6 +84,7 @@ vi.mock("@git-diff-view/react", async () => {
 
 import {
   fetchRun,
+  fetchReviewComments,
   fetchRunRefs,
   fetchRunStructuredDiff,
   fetchRunFileAtRef,
@@ -92,6 +94,7 @@ import {
 } from "../api";
 
 const mockedRun = vi.mocked(fetchRun);
+const mockedList = vi.mocked(fetchReviewComments);
 const mockedRefs = vi.mocked(fetchRunRefs);
 const mockedDiff = vi.mocked(fetchRunStructuredDiff);
 const mockedFile = vi.mocked(fetchRunFileAtRef);
@@ -190,6 +193,8 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   mockedRun.mockResolvedValue(makeRun());
+  // #752: by default the daemon maps nothing (no `outdated` field) — comments show where written.
+  mockedList.mockResolvedValue({ comments: [] });
   mockedRefs.mockResolvedValue(REFS);
   mockedDiff.mockResolvedValue(TWO);
   mockedFile.mockResolvedValue("a\nB\nC\n");
@@ -749,5 +754,95 @@ describe("ReviewPage — review conversation (#751)", () => {
     await waitFor(() => expect(screen.getByTestId("review-toast")).toHaveAttribute("data-error", "true"));
     expect(screen.getByTestId("review-toast")).toHaveTextContent("Resolve failed — daemon unreachable");
     expect(screen.getByTestId("review-comment")).toHaveAttribute("data-review-state", "proposed");
+  });
+});
+
+// #752 (ADR-0067 §5): reported / outdated comments — the daemon maps on read,
+// the page places, groups and toggles.
+describe("ReviewPage — reported / outdated comments (#752)", () => {
+  it("places a reported comment at its mapped line with a `from` chip only when the number differs", async () => {
+    const same = sentComment({ id: "rc-001", line: 1 });
+    const moved = sentComment({ id: "rc-002", line: 2, text: "moved one" });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [same, moved] }));
+    mockedList.mockResolvedValue({
+      comments: [
+        { ...same, outdated: false, mapped_line: 1 },
+        { ...moved, outdated: false, mapped_line: 3, moved: true },
+      ],
+    });
+    render(<ReviewPage runId={RUN_ID} />);
+    await waitFor(() => expect(screen.getAllByTestId("review-comment")).toHaveLength(2));
+    await waitFor(() => expect(mockedList).toHaveBeenCalledWith(RUN_ID, { from: "fork", to: "tip" }));
+    const slots = await screen.findAllByTestId("mock-extend");
+    await waitFor(() => expect(screen.getAllByTestId("mock-extend").map((s) => s.getAttribute("data-line"))).toEqual(["1", "3"]));
+    void slots;
+    const cards = screen.getAllByTestId("review-comment");
+    expect(within(cards[0]).queryByTestId("review-comment-moved-from")).toBeNull();
+    expect(cards[1]).toHaveAttribute("data-moved-from", "2");
+    expect(within(cards[1]).getByTestId("review-comment-moved-from")).toHaveTextContent("from R2");
+    expect(cards[1]).toHaveAttribute("data-anchor", "main.tsx:R3");
+    // The header notes the re-map for a moment.
+    expect(screen.getByTestId("review-remap-note")).toHaveTextContent("1 comment moved");
+    expect(screen.queryByTestId("review-toggle-outdated")).toBeNull();
+  });
+
+  it("groups an outdated comment at the top of its file, collapsed, with its original hunk; it stays resolvable and hideable", async () => {
+    const stale = sentComment({
+      id: "rc-001",
+      line: 2,
+      to_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      excerpt: "  1 | a\n> 2 | b\n  3 | c",
+      replies: [REPLY_MANAGER],
+    });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [stale] }));
+    mockedList.mockResolvedValue({ comments: [{ ...stale, outdated: true }] });
+    mockedResolve.mockResolvedValue({ comment: { ...stale, status: "resolved", resolved_by: "user", resolved_at: "2026-09-09T02:00:00Z" }, changed: true });
+    render(<ReviewPage runId={RUN_ID} />);
+    const group = await screen.findByTestId("review-outdated-group");
+    expect(group).toHaveTextContent("1 outdated comment");
+    expect(screen.queryAllByTestId("mock-extend")).toHaveLength(0);
+    const card = within(group).getByTestId("review-comment");
+    expect(card).toHaveAttribute("data-outdated", "true");
+    expect(card).toHaveAttribute("data-collapsed", "true");
+    expect(within(card).getByTestId("review-comment-written-on")).toHaveTextContent("R2 on Run tip · bbbbbbb");
+    expect(within(card).getByTestId("review-comment-summary")).toHaveTextContent("Sent remark");
+    expect(await screen.findByTestId("review-remap-note")).toHaveTextContent("1 outdated");
+    // The file header and the sidebar row carry the history glyph; counts stay by state.
+    expect(screen.getByTestId("review-file-outdated")).toHaveTextContent("1");
+    expect(screen.getByTestId("review-file-row-outdated")).toBeInTheDocument();
+    expect(screen.getByTestId("review-comments-pill")).toHaveTextContent("1");
+    // Expand: original hunk first, marked line, then body, reply, footer with Resolve.
+    fireEvent.click(within(card).getByTestId("review-comment-header"));
+    const hunk = within(card).getByTestId("review-comment-original-hunk");
+    expect(hunk).toHaveTextContent("Original hunk");
+    const lines = within(hunk).getAllByTestId("review-original-line");
+    expect(lines.map((l) => l.textContent)).toEqual(["1a", "2b", "3c"]);
+    expect(lines[1]).toHaveAttribute("data-marked", "true");
+    expect(within(card).getByTestId("review-reply")).toBeInTheDocument();
+    fireEvent.click(within(card).getByTestId("review-comment-resolve"));
+    await waitFor(() => expect(mockedResolve).toHaveBeenCalledWith(RUN_ID, "rc-001"));
+    // Show outdated toggle hides the card, keeps the group's count.
+    const toggle = screen.getByTestId("review-toggle-outdated");
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("review-outdated-group")).toHaveAttribute("data-hidden", "true");
+    expect(within(screen.getByTestId("review-outdated-group")).queryByTestId("review-comment")).toBeNull();
+    expect(screen.getByTestId("review-file-outdated")).toHaveTextContent("1");
+    expect(localStorage.getItem("pdo.review.showOutdated")).toBe("false");
+  });
+
+  it("re-maps when the destination changes, and a comment whose file is not in the diff is listed under other pairs", async () => {
+    const c = sentComment({ id: "rc-001", line: 1, path: "elsewhere.ts", from_ref: "node:impl:1:before", to_ref: "node:impl:1:after" });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [c] }));
+    mockedList.mockResolvedValue({ comments: [{ ...c, outdated: false, mapped_line: 1 }] });
+    render(<ReviewPage runId={RUN_ID} />);
+    await waitFor(() => expect(mockedList).toHaveBeenCalledWith(RUN_ID, { from: "fork", to: "tip" }));
+    expect(screen.queryByTestId("review-comment")).toBeNull();
+    const row = await screen.findByTestId("review-comment-row");
+    expect(row).toHaveAttribute("data-other-pair", "true");
+    expect(row).toHaveTextContent("implement · iter 1 · before → implement · iter 1 · after");
+    // Switching the destination asks the daemon again for that pair.
+    fireEvent.click(row);
+    await waitFor(() => expect(mockedList).toHaveBeenCalledWith(RUN_ID, { from: "node:impl:1:before", to: "node:impl:1:after" }));
   });
 });

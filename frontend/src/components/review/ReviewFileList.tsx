@@ -2,7 +2,7 @@ import { PanelLeftClose } from "lucide-react";
 import type { RefObject } from "react";
 import type { DiffFile } from "../../types";
 import { baseName, filePath, groupByDir, miniBar, statusLetter } from "../../lib/runRefs";
-import { Hourglass } from "lucide-react";
+import { History, Hourglass } from "lucide-react";
 import type { ReviewEntry, StateCounts } from "../../lib/reviewComments";
 import { anchorLabel, authorKind, authorLabel, commentState, footerStatus, plural, sortForSidebar } from "../../lib/reviewComments";
 import { AuthorGlyph, Badge, StateIcon } from "./CommentCard";
@@ -37,6 +37,8 @@ interface Props {
   counts?: Map<string, { drafts: number; sent: number }>;
   /** #751: per-path sent-comment state counts (replace the plain "sent" badge when given). */
   stateCounts?: Map<string, StateCounts>;
+  /** #752: per-path outdated count — a history glyph on the row when ≥ 1. */
+  outdatedCounts?: Map<string, number>;
   /** #750: the Comments section — current pair first, other pairs greyed. */
   comments?: { current: ReviewEntry[]; other: { entry: ReviewEntry; pair: string }[] };
   onJumpEntry?: (entry: ReviewEntry) => void;
@@ -60,6 +62,7 @@ export default function ReviewFileList({
   onClose,
   counts,
   stateCounts: states,
+  outdatedCounts,
   comments,
   onJumpEntry,
   onJumpOther,
@@ -149,6 +152,15 @@ export default function ReviewFileList({
                   </span>
                   <span className="flex items-center gap-1 font-mono" style={{ fontSize: "10px" }}>
                     {(counts?.get(p)?.drafts ?? 0) > 0 && <Badge kind="draft">{counts!.get(p)!.drafts}</Badge>}
+                    {(outdatedCounts?.get(p) ?? 0) > 0 && (
+                      <span
+                        className="inline-flex items-center text-st-stale"
+                        title={`${outdatedCounts!.get(p)} outdated — the line changed on this destination`}
+                        data-testid="review-file-row-outdated"
+                      >
+                        <History size={9} />
+                      </span>
+                    )}
                     {states?.get(p) ? (
                       <>
                         {states.get(p)!.proposed > 0 && (

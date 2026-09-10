@@ -2076,6 +2076,31 @@ export interface ReviewComment {
   proposal_declined?: boolean;
 }
 
+/**
+ * #752 (ADR-0067 §5): what `GET …/review/comments?from=&to=` adds to a comment
+ * once re-mapped onto the displayed pair. `outdated` = the line was edited or
+ * deleted between the SHA the comment was written against and the displayed
+ * one; otherwise `mapped_line` is where the line sits now (`moved` when the
+ * number differs). Absent when the daemon could not map (no SHA recorded, ref
+ * gone): the comment shows where it was written.
+ */
+export interface ReviewAnchorMapping {
+  outdated: boolean;
+  mapped_line?: number;
+  moved?: boolean;
+}
+
+/** A comment as listed with a pair: the wire shape plus its mapping fields. */
+export type MappedReviewComment = ReviewComment & Partial<ReviewAnchorMapping>;
+
+export interface ReviewCommentsListResponse {
+  comments: MappedReviewComment[];
+  agent_can_resolve?: boolean;
+  /** Present when a pair was given: the SHAs it resolved to. */
+  from_sha?: string | null;
+  to_sha?: string | null;
+}
+
 /** `POST …/review/comments/<id>/resolve|reopen` — the human's verbs (#751). */
 export interface ReviewDecisionResponse {
   comment: ReviewComment;

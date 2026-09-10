@@ -7,6 +7,7 @@ import {
   Columns2,
   Eye,
   EyeOff,
+  History,
   ListMinus,
   MessageSquare,
   PanelLeftOpen,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import "@git-diff-view/react/styles/diff-view.css";
 import {
+  fetchReviewComments,
   fetchRun,
   fetchRunRefs,
   fetchRunStructuredDiff,
@@ -36,13 +38,19 @@ import {
   authorLabel,
   countsByPath,
   draftsForPair,
+  homeIds,
+  mappingsOf,
   markSeen as markSeenIn,
   mergeEntries,
+  outdatedCountByPath,
   plural,
   readDrafts,
   readSeen,
+  remapSummary,
   removeDrafts,
   sendDisabledReason as sendReasonOf,
+  sentEntriesForPair,
+  SHOW_OUTDATED_KEY,
   stateCounts,
   stateCountsByPath,
   toSendInputs,
@@ -51,7 +59,7 @@ import {
   writeDrafts,
   writeSeen,
 } from "../lib/reviewComments";
-import type { Anchor, ReviewDraft, ReviewEntry, SeenMap } from "../lib/reviewComments";
+import type { Anchor, MappingMap, ReviewDraft, ReviewEntry, SeenMap } from "../lib/reviewComments";
 import {
   DEFAULT_FROM,
   DEFAULT_TO,
@@ -102,6 +110,16 @@ import type { RefPair, ViewMode } from "../lib/runRefs";
  * Opening this page marks every reply seen for this browser (localStorage) —
  * that is what clears the Diff tab's unread badge; the per-card dots clear as
  * each card is looked at.
+ *
+ * Reported / outdated comments (#752, ADR-0067 §5): once the diff of a pair is
+ * loaded, the page asks the daemon to **re-map** every sent comment onto that
+ * pair (`GET …/review/comments?from&to`, one read, nothing written). A comment
+ * whose line is unchanged sits at its new position (a `↳ from R212` chip only
+ * when the number differs); one whose line changed is **outdated**: collapsed in
+ * a group at the top of its file card, original hunk inside, still answerable
+ * and resolvable. A note in the top bar says `1 comment moved · 1 outdated` for a
+ * few seconds after a re-map; a `Show outdated` toggle hides those cards, never
+ * the counts. Drafts are never re-mapped.
  */
 
 const SHOW_RESOLVED_KEY = "pdo.review.showResolved";
@@ -158,6 +176,18 @@ export default function ReviewPage({ runId }: Props) {
     }
   });
   const [deciding, setDeciding] = useState<ReadonlySet<string>>(() => new Set());
+  // --- Reported / outdated (#752) ---------------------------------------------------
+  /** The daemon's mapping of every sent comment onto the displayed pair, tagged with what it was fetched for. */
+  const [mappings, setMappings] = useState<{ key: string; map: MappingMap } | null>(null);
+  const [showOutdated, setShowOutdated] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SHOW_OUTDATED_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [remapNote, setRemapNote] = useState<string | null>(null);
+  const remapTimer = useRef<number | undefined>(undefined);
   const [flashing, setFlashing] = useState<ReadonlySet<string>>(() => new Set());
   const flashTimers = useRef<Map<string, number>>(new Map());
   const openedSeenWritten = useRef(false);
@@ -263,6 +293,41 @@ export default function ReviewPage({ runId }: Props) {
     () => (load.kind !== "none" && load.key === loadKey ? load : { kind: "none" }),
     [load, loadKey],
   );
+
+  // #752: re-map the sent comments onto the displayed pair — once its diff is in
+  // (the mapping reads the same SHAs), and again whenever the set of comments
+  // changes (a send, a replay). Keyed like the diff so a pair change never shows
+  // a stale mapping: a key mismatch reads as "not mapped yet".
+  const commentIdsSig = (run?.review_comments ?? []).map((c) => c.id).join(",");
+  const mappingKey = `${loadKey}|${commentIdsSig}`;
+  const diffReady = current.kind === "ready";
+  const pathOrderRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (!diffReady || !commentIdsSig) return;
+    let stale = false;
+    const pair = { from: pairFrom, to: pairTo };
+    fetchReviewComments(runId, pair)
+      .then((res) => {
+        if (stale) return;
+        const map = mappingsOf(res.comments);
+        setMappings({ key: mappingKey, map });
+        // The header note, once per mapping: `1 comment moved · 1 outdated`, a few seconds.
+        const summary = remapSummary(sentEntriesForPair(res.comments, pair, map, pathOrderRef.current));
+        if (summary) {
+          setRemapNote(summary);
+          window.clearTimeout(remapTimer.current);
+          remapTimer.current = window.setTimeout(() => setRemapNote(null), 5000);
+        }
+      })
+      .catch(() => {
+        // Without a mapping the comments show where they were written.
+      });
+    return () => {
+      stale = true;
+    };
+  }, [runId, pairFrom, pairTo, diffReady, commentIdsSig, mappingKey]);
+  const activeMappings = mappings && mappings.key === mappingKey ? mappings.map : undefined;
+  useEffect(() => () => window.clearTimeout(remapTimer.current), []);
 
   // --- Live: the Run's WebSocket, only to detect "tip moved" / "node delivered".
   const { subscribe } = useDaemonSocket();
@@ -423,10 +488,15 @@ export default function ReviewPage({ runId }: Props) {
   );
 
   const pathOrder = useMemo(() => files.map(filePath), [files]);
+  useEffect(() => {
+    pathOrderRef.current = pathOrder;
+  }, [pathOrder]);
   const entries = useMemo<ReviewEntry[]>(
-    () => mergeEntries(drafts, run?.review_comments, pair, pathOrder),
-    [drafts, run?.review_comments, pair, pathOrder],
+    () => mergeEntries(drafts, run?.review_comments, pair, pathOrder, activeMappings),
+    [drafts, run?.review_comments, pair, pathOrder, activeMappings],
   );
+  const outdatedCounts = useMemo(() => outdatedCountByPath(entries), [entries]);
+  const anyOutdated = outdatedCounts.size > 0;
   const entriesByPath = useMemo(() => {
     const m = new Map<string, ReviewEntry[]>();
     for (const e of entries) {
@@ -456,7 +526,8 @@ export default function ReviewPage({ runId }: Props) {
     () => entries.filter((e) => e.kind === "draft" || e.comment.status !== "resolved"),
     [entries],
   );
-  /** Comments written against another pair: listed greyed, never lost. */
+  /** Comments not at home on this pair (written elsewhere, file absent here): listed greyed, never lost. */
+  const home = useMemo(() => homeIds(entries), [entries]);
   const otherEntries = useMemo(() => {
     const label = (from: string, to: string) => {
       const name = (id: string) => refs?.refs.find((r) => r.id === id)?.label ?? id;
@@ -468,7 +539,7 @@ export default function ReviewPage({ runId }: Props) {
       out.push({ entry: { kind: "draft", anchor: d, draft: d }, pair: label(d.from, d.to), refPair: { from: d.from, to: d.to } });
     }
     for (const c of run?.review_comments ?? []) {
-      if (c.from_ref === pair.from && c.to_ref === pair.to) continue;
+      if (home.has(c.id)) continue;
       out.push({
         entry: { kind: "sent", anchor: { path: c.path, side: c.side, line: c.line }, comment: c },
         pair: label(c.from_ref, c.to_ref),
@@ -476,13 +547,33 @@ export default function ReviewPage({ runId }: Props) {
       });
     }
     return out;
-  }, [drafts, run?.review_comments, pair, refs]);
+  }, [drafts, run?.review_comments, pair, refs, home]);
 
   const sendDisabledReason = sendReasonOf(run, refs);
   const pairLabel = useMemo(() => {
     const name = (id: string) => refs?.refs.find((r) => r.id === id)?.label ?? id;
     return `${name(pair.from)} → ${name(pair.to)}`;
   }, [refs, pair]);
+  /** #752: the label of the ref a comment's anchored side was written against. */
+  const writtenOnLabel = useCallback(
+    (c: ReviewComment) => {
+      const id = c.side === "old" ? c.from_ref : c.to_ref;
+      const label = refs?.refs.find((r) => r.id === id)?.label ?? id;
+      const sha = c.side === "old" ? c.from_sha : c.to_sha;
+      return sha ? `${label} · ${sha.slice(0, 7)}` : label;
+    },
+    [refs],
+  );
+  const toggleShowOutdated = () => {
+    setShowOutdated((v) => {
+      try {
+        localStorage.setItem(SHOW_OUTDATED_KEY, String(!v));
+      } catch {
+        // Remembered for the session only.
+      }
+      return !v;
+    });
+  };
 
   /** Scroll the anchored line of an entry into view, expanding its file first. */
   const jumpTo = useCallback(
@@ -656,6 +747,8 @@ export default function ReviewPage({ runId }: Props) {
       flashing,
       markSeen,
       showResolved,
+      showOutdated,
+      writtenOnLabel,
     }),
     [
       editingKey,
@@ -674,6 +767,8 @@ export default function ReviewPage({ runId }: Props) {
       flashing,
       markSeen,
       showResolved,
+      showOutdated,
+      writtenOnLabel,
     ],
   );
 
@@ -818,9 +913,29 @@ export default function ReviewPage({ runId }: Props) {
             </button>
           )}
         </div>
+        {remapNote && (
+          <span className="text-fg-3" style={{ fontSize: "10.5px" }} data-testid="review-remap-note" role="status">
+            {remapNote}
+          </span>
+        )}
 
         <span className="flex-1" />
 
+        {anyOutdated && (
+          <button
+            type="button"
+            onClick={toggleShowOutdated}
+            aria-pressed={showOutdated}
+            title={showOutdated ? "Hide outdated comments (they stay counted)" : "Show outdated comments"}
+            data-testid="review-toggle-outdated"
+            className={`flex cursor-pointer items-center gap-1 rounded border border-line-strong px-2 py-0.5 ${
+              showOutdated ? "bg-bg-3 text-fg-3 hover:text-fg-2" : "bg-bg-4 text-fg"
+            }`}
+            style={{ fontSize: "10.5px" }}
+          >
+            <History size={11} className="text-st-stale" /> Show outdated
+          </button>
+        )}
         {stats && (
           <span className="flex items-center gap-1.5 text-fg-2" data-testid="review-stats">
             <span>
@@ -1003,6 +1118,7 @@ export default function ReviewPage({ runId }: Props) {
             onClose={toggleList}
             counts={counts}
             stateCounts={states}
+            outdatedCounts={outdatedCounts}
             comments={{ current: entries, other: otherEntries.map(({ entry, pair: p }) => ({ entry, pair: p })) }}
             onJumpEntry={(e) => jumpTo(e.anchor)}
             onJumpOther={(e) => {

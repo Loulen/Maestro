@@ -258,6 +258,9 @@ pub enum Commands {
 #[derive(Subcommand, Debug)]
 pub enum ReviewAction {
     /// List the Run's review comments as JSON, each with its thread of replies.
+    /// Mapped onto the Run's current fork → tip: `outdated: true` means the line
+    /// a comment points at has changed since it was written (its `excerpt` keeps
+    /// the original hunk); `mapped_line` is where the line sits now.
     List {
         /// `open` (default), `resolved` or `all`.
         #[arg(long, default_value = "open")]
@@ -1389,8 +1392,11 @@ pub fn run_review(action: ReviewAction) -> Result<()> {
             if review_comments::StateFilter::parse(&state).is_none() {
                 anyhow::bail!("--state must be `open`, `resolved` or `all`, got {state:?}");
             }
+            // #752: mapped onto the Run's current fork → tip, so each comment
+            // says `outdated: true` when the line it points at has changed since
+            // (and `mapped_line` when it merely shifted).
             let response = with_identity(client.get(format!(
-                "{url}/runs/{run_id}/review/comments?state={}",
+                "{url}/runs/{run_id}/review/comments?state={}&from=fork&to=tip",
                 state.trim()
             )))
             .send()
@@ -13920,6 +13926,13 @@ struct ListReviewCommentsQuery {
     /// wants everything, resolved ones collapse client-side).
     #[serde(default)]
     state: Option<String>,
+    /// #752: the displayed pair to **re-map** every comment onto (stable Run ref
+    /// ids, defaults `fork` / `tip` when only one side is given). Absent both:
+    /// no mapping, the comments come back as written.
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
 }
 
 /// `GET /runs/<id>/review/comments[?state=open|resolved|all]` (#750, #751): the
@@ -13927,7 +13940,8 @@ struct ListReviewCommentsQuery {
 /// list `GET /runs/<id>` carries under `review_comments`, with each comment's
 /// thread (`replies`), exposed on its own for `pdo review list` and the tests.
 /// Also answers `review_agent_can_resolve` so a CLI can say what `--resolved`
-/// will do.
+/// will do. With `?from=&to=` (#752) every comment is re-mapped onto that pair:
+/// `outdated` / `mapped_line` / `moved` are added, computed on read.
 async fn list_review_comments(
     State(state): State<Arc<AppState>>,
     AxumPath(run_id): AxumPath<String>,
@@ -13948,7 +13962,7 @@ async fn list_review_comments(
             }
         },
     };
-    let (_, run_state) = match load_projected(&state, &run_id).await {
+    let (events, run_state) = match load_projected(&state, &run_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
@@ -13958,9 +13972,73 @@ async fn list_review_comments(
         .filter(|c| filter.keeps(c))
         .collect();
     let can_resolve = review_agent_can_resolve(&state).await;
+
+    // #752 (ADR-0067 §5): re-map each anchor onto the requested pair, on read.
+    // A comment whose anchored side is unchanged between the SHA it was written
+    // against and the displayed one is *reported* (`mapped_line`, possibly
+    // shifted); otherwise it is `outdated`. Nothing is written back.
+    let wants_map = q.from.is_some() || q.to.is_some();
+    if !wants_map {
+        return Json(serde_json::json!({
+            "comments": comments,
+            "agent_can_resolve": can_resolve,
+        }))
+        .into_response();
+    }
+    let from = match resolve_ref_param(
+        &run_id,
+        &run_state,
+        &events,
+        q.from.as_deref(),
+        run_refs::FORK_ID,
+    ) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let to = match resolve_ref_param(
+        &run_id,
+        &run_state,
+        &events,
+        q.to.as_deref(),
+        run_refs::TIP_ID,
+    ) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let repo = effective_repo_root(&state, &run_state);
+    let from_sha = structured_diff::rev_parse(&repo, &from);
+    let to_sha = structured_diff::rev_parse(&repo, &to);
+    let diff_path = |orig: &str, target: &str, path: &str| {
+        if !structured_diff::is_safe_path(path)
+            || !structured_diff::is_safe_ref(orig)
+            || !structured_diff::is_safe_ref(target)
+        {
+            return None;
+        }
+        structured_diff::compute_path(&repo, orig, target, path).ok()
+    };
+    let mapped: Vec<serde_json::Value> = comments
+        .iter()
+        .map(|c| {
+            let mut v = serde_json::to_value(c).expect("ReviewComment serializes");
+            if let Some(m) =
+                review_comments::map_comment(c, from_sha.as_deref(), to_sha.as_deref(), &diff_path)
+            {
+                if let (Some(obj), serde_json::Value::Object(extra)) = (
+                    v.as_object_mut(),
+                    serde_json::to_value(m).expect("AnchorMapping serializes"),
+                ) {
+                    obj.extend(extra);
+                }
+            }
+            v
+        })
+        .collect();
     Json(serde_json::json!({
-        "comments": comments,
+        "comments": mapped,
         "agent_can_resolve": can_resolve,
+        "from_sha": from_sha,
+        "to_sha": to_sha,
     }))
     .into_response()
 }

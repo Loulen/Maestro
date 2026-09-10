@@ -16,7 +16,10 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { LoopKind, NodeDef, NodeStatus, NodeType, PortBrief, PortSide, RunState } from "../types";
-import { isNodeActiveRun, isTerminalRun } from "../types";
+import { isTerminalRun } from "../types";
+import { pendingCount, pendingTone, reviewQuickAccessTitle } from "../lib/reviewComments";
+import { reviewUrl } from "../lib/runRefs";
+import { useReviewSeen } from "../hooks/useReviewUnread";
 import type { LibraryEntry, LibraryPipelineEntry } from "../api";
 import { openRunShell, reopenRun, retryAll } from "../api";
 import RunShellModal from "./RunShellModal";
@@ -295,7 +298,6 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
   const openTabs = useEditStore((s) => s.openTabs);
   const activeTabId = useEditStore((s) => s.activeTabId);
   const setSelection = useEditStore((s) => s.setSelection);
-  const selection = useEditStore((s) => s.selection);
   const updateNodeViews = useEditStore((s) => s.updateNodeViews);
   const addEdgeToStore = useEditStore((s) => s.addEdge);
   const deleteNode = useEditStore((s) => s.deleteNode);
@@ -359,13 +361,19 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
   // intact for running/completed runs.
   const readOnly = activeRunState?.status === "archived";
 
-  // #465 slice 2 (F1): expose the Run-info / Repositories sidebar toggle only on
-  // the run tabs where the App auto-snaps to the running node — the exact set
-  // where the panel is otherwise unreachable. `"run"` survives the auto-snap;
-  // toggling back to `"none"` lets it re-select the live node (back to terminal).
-  const showRunInfo =
-    activeRunState != null && isNodeActiveRun(activeRunState.status);
-  const runInfoActive = selection.kind === "run";
+  // #752 (CONTEXT.md « Accès rapide Review »): the toolbar's Review quick access
+  // — a link to the Run's Review page with the pending-comment pill — on every
+  // non-archived Run (an archived Run has no diff to review). The tone follows
+  // the same "seen" marker as the Diff tab's unread pill. Repositories moved to
+  // a tab of the Run panel, so the old sidebar toggle is gone.
+  const reviewSeen = useReviewSeen(activeRunState ?? null);
+  const reviewHref =
+    activeRunState != null && activeRunState.status !== "archived"
+      ? reviewUrl(activeRunState.run_id)
+      : undefined;
+  const reviewPending = pendingCount(activeRunState?.review_comments);
+  const reviewTone = pendingTone(activeRunState?.review_comments, reviewSeen);
+  const reviewTitle = reviewQuickAccessTitle(activeRunState?.review_comments, reviewSeen);
 
   // #598 / ADR-0049: the finished-run action group is contextual to a TERMINAL,
   // non-archived run (`isTerminalRun` INCLUDES `archived`, so exclude it — an
@@ -413,14 +421,6 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
       // The server gate may 409 if the worktree vanished out-of-band.
     }
   }, [activeRunState]);
-  const toggleRunInfo = useCallback(() => {
-    setSelection(
-      selection.kind === "run"
-        ? { kind: "none", id: null }
-        : { kind: "run", id: null },
-    );
-  }, [selection.kind, setSelection]);
-
   const { profiles: agentProfiles } = useAgentProfiles();
   const agentProfileIds = useMemo(
     () => new Set(agentProfiles.map((profile) => profile.id)),
@@ -814,9 +814,10 @@ function EditCanvasInner({ libraryEntries, onLibraryDelete, infoOpen, onToggleIn
         assistantAvailable={tab != null && tab.runId == null}
         assistantActive={assistantActive}
         onOpenAssistant={onOpenAssistant}
-        showRunInfo={showRunInfo}
-        runInfoActive={runInfoActive}
-        onToggleRunInfo={toggleRunInfo}
+        reviewHref={reviewHref}
+        reviewPending={reviewPending}
+        reviewTone={reviewTone}
+        reviewTitle={reviewTitle}
         readOnly={readOnly}
         finishedRun={finishedRun}
         onReopen={handleReopen}

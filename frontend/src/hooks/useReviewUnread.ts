@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { RunState } from "../types";
 import { readSeen, seenKey, unreadCommentCount } from "../lib/reviewComments";
+import type { SeenMap } from "../lib/reviewComments";
 
 /**
  * How many of a Run's sent review comments carry a reply this browser has not
@@ -10,6 +11,16 @@ import { readSeen, seenKey, unreadCommentCount } from "../lib/reviewComments";
  * WebSocket pushes (through `run`) and the other tab's `storage` events.
  */
 export function useReviewUnread(run: RunState | null): number {
+  const seen = useReviewSeen(run);
+  return useMemo(() => (run ? unreadCommentCount(run.review_comments, seen) : 0), [run, seen]);
+}
+
+/**
+ * The per-browser "seen" marker of a Run's review replies (#751 / #752), live:
+ * follows the other tab's `storage` events. The toolbar's Review pill reads its
+ * tone from it (solid blue while a reply is unread).
+ */
+export function useReviewSeen(run: RunState | null): SeenMap {
   const runId = run?.run_id ?? null;
   const subscribe = useCallback((onChange: () => void) => {
     window.addEventListener("storage", onChange);
@@ -28,6 +39,5 @@ export function useReviewUnread(run: RunState | null): number {
     },
     () => null,
   );
-  const seen = useMemo(() => (runId ? readSeen(runId, { getItem: () => raw }) : {}), [runId, raw]);
-  return useMemo(() => (run ? unreadCommentCount(run.review_comments, seen) : 0), [run, seen]);
+  return useMemo(() => (runId ? readSeen(runId, { getItem: () => raw }) : {}), [runId, raw]);
 }

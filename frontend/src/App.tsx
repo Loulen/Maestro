@@ -14,7 +14,6 @@ import SessionCounter from "./components/SessionCounter";
 import ServiceHealthIndicator from "./components/ServiceHealthIndicator";
 import UnifiedLeftPanel from "./components/UnifiedLeftPanel";
 import NodeDetailPanel from "./components/NodeDetailPanel";
-import RunInfoSidebar from "./components/RunInfoSidebar";
 import NewRunModal, { RUN_INTENT } from "./components/NewRunModal";
 import SettingsSurface, { type SettingsPosition, type StatsOpenIntent } from "./components/SettingsSurface";
 import VersionBadge from "./components/VersionBadge";
@@ -917,13 +916,22 @@ export default function App() {
                   <NoteInspector />
                 ) : null}
                 {/* `"none"` reaches this on a terminal/paused run (deselect, or
-                    selecting the run — #503 red-dot panel); `"run"` is the
-                    explicit toggle that keeps it reachable while a live node
-                    runs (#465 slice 2, F1). */}
+                    selecting the run — #503 red-dot panel). #752: the standalone
+                    Run-info sidebar is gone; the Run panel opens on Info, which
+                    now carries the failure / awaiting reason, and Repositories
+                    is one of its tabs (`Info | Diff | Repositories | Manager | YAML`). */}
                 {(selection.kind === "none" || selection.kind === "run") &&
                   isEditingRun &&
                   selectedRun && (
-                    <RunInfoSidebar run={selectedRun} onEdited={refreshRun} />
+                    <PipelineInfoPanel
+                      key={`run-panel-${selectedRun.run_id}`}
+                      run={selectedRun}
+                      pipeline={editTab?.pipeline ?? null}
+                      onClose={handleCloseInfo}
+                      initialTab="info"
+                      onRefreshRun={refreshRun}
+                      onOpenSettings={() => openSettings({ category: "agents", section: "pipeline-manager" })}
+                    />
                   )}
                 {selection.kind === "none" && !isEditingRun && (
                   <PipelineInspector />
