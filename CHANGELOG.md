@@ -10,6 +10,19 @@ ascendante** : la casse se signale ici et par un bump majeur, jamais en gardant 
 morts. Seule contrainte non négociable — les **données historiques restent lisibles** : un Run
 archivé s'ouvre et se chiffre quelle que soit la version qui a écrit son payload.
 
+## 1.79.0
+**Page de Review — report / outdated des commentaires, accès rapide Review, onglet Repositories** (#752 ; story #746, ADR-0067).
+Quand la paire affichée a bougé depuis l'écriture d'un commentaire (relivraison d'un nœud, merge-back), le daemon
+**mappe l'ancre à la lecture** (`GET /runs/{id}/review/comments?from=&to=` ajoute `outdated` / `mapped_line` / `moved`
+et renvoie `from_sha` / `to_sha`) : ligne inchangée → commentaire **reporté** à sa nouvelle position (chip `↳ from R…`
+quand le numéro diffère) ; ligne éditée ou supprimée → **outdated**, replié en tête du fichier avec son hunk d'origine,
+toujours répondable / résolvable. Rien n'est écrit dans l'event log : l'ancre d'origine reste la vérité, et
+`pdo review list` (fork → tip) expose `outdated` au manager. Bascule `Show outdated` (mémorisée par navigateur).
+Toolbar du canvas : le bouton « Run repositories » disparaît, remplacé par un lien **Review** avec pastille des
+commentaires en attente (bleu contour = envoyés non résolus, bleu plein = réponse non lue, ambre = résolution
+proposée), sur tout Run non archivé. La sidebar `RunInfoSidebar` est supprimée : **Repositories** devient un onglet
+du panneau du Run (`Info | Diff | Repositories | Manager | YAML`), l'en-tête Info porte la raison d'échec / d'attente
+et la note d'édition. Couvre la seconde moitié de #566 (laissé ouvert).
 ## 1.78.0
 **Page de Review — conversation avec l'agent** (#751 ; story #746, ADR-0067).
 Un commentaire envoyé devient un **fil** : l'agent répond avec `pdo review list [--state open|resolved|all]`
