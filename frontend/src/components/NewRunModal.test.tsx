@@ -861,6 +861,7 @@ describe("NewRunModal — auto-naming default (#338)", () => {
       default_auto_name: { effective, source: effective ? "default" : "stored", stored: effective ? null : false, env: null, default: true },
       update_check: { effective: true, source: "default", stored: null, env: null, default: true },
       manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+      review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
       manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
       price_table: { manual_path: null, fetched_path: null, source: null, fetched_at: null, fetched_rows: 0, manual_keys: [], reason: null },
       updated_at: "2026-07-01T10:00:00.000Z",
@@ -1617,6 +1618,7 @@ describe("NewRunModal — sandbox selector (#410)", () => {
       // #427: required on InstanceSettings; this modal does not read it.
       update_check: { effective: true, source: "default", stored: null, env: null, default: true },
       manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+      review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
       manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
       price_table: { manual_path: "/home/user/.pdo/prices/models.yaml", fetched_path: "/home/user/.pdo/prices/fetched.json", source: null, fetched_at: null, fetched_rows: 0, manual_keys: [], reason: null },
       updated_at: "2026-07-01T10:00:00.000Z",
@@ -1952,6 +1954,7 @@ describe("NewRunModal — the launch dialog can defer to default_sandbox (#452)"
       // #427: required on InstanceSettings; this modal does not read it.
       update_check: { effective: true, source: "default", stored: null, env: null, default: true },
       manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+      review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
       manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
       price_table: { manual_path: "/home/user/.pdo/prices/models.yaml", fetched_path: "/home/user/.pdo/prices/fetched.json", source: null, fetched_at: null, fetched_rows: 0, manual_keys: [], reason: null },
       updated_at: "2026-07-01T10:00:00.000Z",
@@ -2167,6 +2170,7 @@ describe("NewRunModal — the target repo is required at the boundary (#470)", (
       // #427: required on InstanceSettings; this modal does not read it.
       update_check: { effective: true, source: "default", stored: null, env: null, default: true },
       manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+      review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
       manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
       price_table: { manual_path: "/home/user/.pdo/prices/models.yaml", fetched_path: "/home/user/.pdo/prices/fetched.json", source: null, fetched_at: null, fetched_rows: 0, manual_keys: [], reason: null },
       updated_at: "2026-07-01T10:00:00.000Z",
@@ -2523,6 +2527,7 @@ describe("NewRunModal — harness selector (#551)", () => {
       default_auto_name: { effective: true, source: "default", stored: null, env: null, default: true },
       update_check: { effective: true, source: "default", stored: null, env: null, default: true },
       manager_enabled: { effective: false, source: "default", stored: null, env: null, default: false },
+      review_agent_can_resolve: { effective: false, source: "default", stored: null, env: null, default: false },
       manager_profile: { effective: null, source: "default", stored: null, env: null, default: null },
       price_table: { manual_path: null, fetched_path: null, source: null, fetched_at: null, fetched_rows: 0, manual_keys: [], reason: null },
       updated_at: "2026-07-01T10:00:00.000Z",

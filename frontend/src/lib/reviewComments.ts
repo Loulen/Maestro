@@ -226,9 +226,172 @@ export function relativeTime(iso: string, now = new Date()): string {
   return new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Pending for the Diff tab badge (CONTEXT.md « Accès rapide Review »): sent, not resolved. */
+/** Pending for the Review quick access (CONTEXT.md « Accès rapide Review »): sent, not resolved. */
 export function pendingCount(comments: ReviewComment[] | undefined): number {
   return (comments ?? []).filter((c) => c.status !== "resolved").length;
+}
+
+// ---------------------------------------------------------------------------
+// #751 — the conversation: states, authors, footer status, unread replies.
+// ---------------------------------------------------------------------------
+
+/** The three states a sent comment reads as: open (blue), proposed (amber), resolved (green). */
+export type CommentState = "open" | "proposed" | "resolved";
+
+export function commentState(c: ReviewComment): CommentState {
+  if (c.status === "resolved") return "resolved";
+  return c.proposal_pending ? "proposed" : "open";
+}
+
+/** Sidebar / `c`-cycle order: what needs a decision first, resolved last. */
+export function stateRank(state: CommentState): number {
+  return state === "proposed" ? 0 : state === "open" ? 1 : 2;
+}
+
+export interface StateCounts {
+  open: number;
+  proposed: number;
+  resolved: number;
+}
+
+export function stateCounts(comments: Iterable<ReviewComment>): StateCounts {
+  const n: StateCounts = { open: 0, proposed: 0, resolved: 0 };
+  for (const c of comments) n[commentState(c)] += 1;
+  return n;
+}
+
+/** Per-file state counts for the sidebar rows and the file headers. */
+export function stateCountsByPath(entries: ReviewEntry[]): Map<string, StateCounts> {
+  const m = new Map<string, StateCounts>();
+  for (const e of entries) {
+    if (e.kind !== "sent") continue;
+    const c = m.get(e.anchor.path) ?? { open: 0, proposed: 0, resolved: 0 };
+    c[commentState(e.comment)] += 1;
+    m.set(e.anchor.path, c);
+  }
+  return m;
+}
+
+/**
+ * The sidebar's Comments order: drafts first (the reader's own pending work),
+ * then proposed → open → resolved, each group in diff order.
+ */
+export function sortForSidebar(entries: ReviewEntry[]): ReviewEntry[] {
+  const rank = (e: ReviewEntry) => (e.kind === "draft" ? -1 : stateRank(commentState(e.comment)));
+  return entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => rank(a.e) - rank(b.e) || a.i - b.i)
+    .map(({ e }) => e);
+}
+
+/** Who an author string is: the human (`user`), the manager, or a node of the Run. */
+export type AuthorKind = "user" | "manager" | "node";
+
+export function authorKind(author: string): AuthorKind {
+  if (author === "user" || author === "you") return "user";
+  if (author === "manager" || author === "agent") return "manager";
+  return "node";
+}
+
+/** `you` / `manager` / the node id — the tooltip text next to an author icon. */
+export function authorLabel(author: string): string {
+  const k = authorKind(author);
+  return k === "user" ? "you" : k === "manager" ? "manager" : author;
+}
+
+/** First line, truncated with an ellipsis — the collapsed resolved card's summary. */
+export function firstWords(text: string, max = 44): string {
+  const line = text.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  return line.length > max ? `${line.slice(0, max).trimEnd()}…` : line;
+}
+
+/** What the sent card's footer says, right of the id and the pair. */
+export type FooterStatus =
+  | { kind: "awaiting" }
+  | { kind: "replied"; author: string; at: string }
+  | { kind: "proposed"; author: string; at: string }
+  | { kind: "resolved"; by: string; at: string }
+  | { kind: "reopened"; by: string; at: string }
+  | { kind: "declined"; by: string; at: string };
+
+export function footerStatus(c: ReviewComment): FooterStatus {
+  const replies = c.replies ?? [];
+  const last = replies[replies.length - 1];
+  if (c.status === "resolved") return { kind: "resolved", by: c.resolved_by ?? "user", at: c.resolved_at ?? last?.at ?? c.sent_at };
+  if (c.proposal_pending) {
+    const proposing = [...replies].reverse().find((r) => r.proposes_resolution) ?? last;
+    return { kind: "proposed", author: proposing?.author ?? "agent", at: proposing?.at ?? c.sent_at };
+  }
+  if (c.reopened_at && (!last || c.reopened_at >= last.at)) {
+    return { kind: c.proposal_declined ? "declined" : "reopened", by: c.reopened_by ?? "user", at: c.reopened_at };
+  }
+  if (last) return { kind: "replied", author: last.author, at: last.at };
+  return { kind: "awaiting" };
+}
+
+// --- Unread replies: a per-browser "seen" marker, never a Run event -----------
+
+export const SEEN_KEY_PREFIX = "pdo.review.seen.";
+
+/** Comment id → number of replies this browser has seen. */
+export type SeenMap = Record<string, number>;
+
+export function seenKey(runId: string): string {
+  return `${SEEN_KEY_PREFIX}${runId}`;
+}
+
+export function readSeen(runId: string, storage: Pick<Storage, "getItem"> = localStorage): SeenMap {
+  try {
+    const raw = storage.getItem(seenKey(runId));
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: SeenMap = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function writeSeen(runId: string, seen: SeenMap, storage: Pick<Storage, "setItem" | "removeItem"> = localStorage): void {
+  try {
+    if (Object.keys(seen).length === 0) storage.removeItem(seenKey(runId));
+    else storage.setItem(seenKey(runId), JSON.stringify(seen));
+  } catch {
+    // Private mode / quota: unread stays in memory for the session.
+  }
+}
+
+/** How many replies of `c` this browser has not seen. */
+export function unreadReplies(c: ReviewComment, seen: SeenMap): number {
+  return Math.max(0, (c.replies?.length ?? 0) - (seen[c.id] ?? 0));
+}
+
+/**
+ * The Diff tab badge (CONTEXT.md « Réponse de review »): **sent** comments with at
+ * least one unread reply. A comment the agent resolved directly is not counted
+ * — nothing waits on the human there — but its replies still read as new on the
+ * card until seen.
+ */
+export function unreadCommentCount(comments: ReviewComment[] | undefined, seen: SeenMap): number {
+  return (comments ?? []).filter((c) => c.status === "sent" && unreadReplies(c, seen) > 0).length;
+}
+
+/** Everything seen — what opening the Review page writes. */
+export function allSeen(comments: ReviewComment[] | undefined, prev: SeenMap = {}): SeenMap {
+  const next: SeenMap = { ...prev };
+  for (const c of comments ?? []) next[c.id] = Math.max(next[c.id] ?? 0, c.replies?.length ?? 0);
+  return next;
+}
+
+/** One card seen (scrolled into view / hovered / acted on). */
+export function markSeen(seen: SeenMap, c: ReviewComment): SeenMap {
+  const n = c.replies?.length ?? 0;
+  if ((seen[c.id] ?? 0) >= n) return seen;
+  return { ...seen, [c.id]: n };
 }
 
 /** `2 drafts` / `1 draft` — pluralised counter. */

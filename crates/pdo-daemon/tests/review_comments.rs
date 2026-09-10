@@ -317,3 +317,253 @@ async fn sent_comments_are_events_projected_pushed_and_start_the_manager() {
         "the refused one was not recorded"
     );
 }
+
+/// Run the real `pdo review …` binary against `daemon`, wrapped with the env of a
+/// node / manager session (`PDO_RUN_ID`, `PDO_NODE_ID`) — the identity the daemon
+/// deduces the author from. On a blocking task so the runtime keeps serving.
+async fn run_pdo_review(
+    daemon_url: &str,
+    args: &[&str],
+    session: Option<(&str, &str)>,
+) -> (Option<i32>, String, String) {
+    let bin = env!("CARGO_BIN_EXE_pdo");
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("review").args(args);
+    cmd.env("PDO_DAEMON_URL", daemon_url);
+    cmd.env_remove("PDO_RUN_ID");
+    cmd.env_remove("PDO_NODE_ID");
+    if let Some((run_id, node_id)) = session {
+        cmd.env("PDO_RUN_ID", run_id);
+        cmd.env("PDO_NODE_ID", node_id);
+    }
+    let output =
+        tokio::task::spawn_blocking(move || cmd.output().expect("failed to spawn pdo review"))
+            .await
+            .expect("blocking task panicked");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !stderr.contains("panicked"),
+        "pdo review must not panic. stderr=\n{stderr}\nstdout=\n{stdout}"
+    );
+    (output.status.code(), stdout, stderr)
+}
+
+/// #751 — the Feature Path's shell half, against a real daemon and the real CLI:
+/// `pdo review list` shows the sent comment with its id and state; `pdo review
+/// reply <id> --text … --resolved` from the manager session lands as a reply by
+/// `manager` **proposing** a resolution (setting off); the human's Resolve and
+/// Reopen endpoints flip the state; with `review_agent_can_resolve` on, the same
+/// reply resolves directly. Every step is a Run event pushed over the WebSocket.
+#[tokio::test]
+async fn cli_review_list_and_reply_drive_the_conversation_end_to_end() {
+    let daemon = TestDaemon::spawn(seed).await.unwrap();
+    let repo = daemon.repo_root().to_path_buf();
+    let run_id = create_run(daemon.url(), daemon.target_repo())
+        .await
+        .expect("run created");
+    let wt_dir = repo.join(".pdo/runs").join(&run_id).join("worktree");
+    for _ in 0..100 {
+        if wt_dir.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    std::fs::write(
+        wt_dir.join("lib.rs"),
+        "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n",
+    )
+    .unwrap();
+    git(&wt_dir, &["add", "lib.rs"]);
+    git(&wt_dir, &["commit", "-q", "-m", "run work"]);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/runs/{run_id}/review/comments/send",
+            daemon.url()
+        ))
+        .json(&serde_json::json!({
+            "comments": [
+                { "path": "lib.rs", "side": "new", "line": 4, "text": "Name this `fn delta`." },
+                { "path": "lib.rs", "side": "new", "line": 2, "text": "Second remark." }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut ws = daemon.connect_ws().await.unwrap();
+
+    // 1. `pdo review list` from the manager session: both open, with their ids.
+    let manager = Some((run_id.as_str(), "__manager__"));
+    let (code, stdout, stderr) = run_pdo_review(&daemon.url(), &["list"], manager).await;
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let listed: serde_json::Value = serde_json::from_str(&stdout).expect("JSON on stdout");
+    let ids: Vec<&str> = listed["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["rc-001", "rc-002"]);
+    assert_eq!(listed["comments"][0]["status"], "sent");
+    assert_eq!(listed["agent_can_resolve"], false);
+
+    // Out of a session and without --run: a readable refusal, exit 1.
+    let (code, _, stderr) = run_pdo_review(&daemon.url(), &["list"], None).await;
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("--run"), "{stderr}");
+
+    // 2. `--resolved` from the manager: a proposal, author `manager`.
+    let (code, stdout, stderr) = run_pdo_review(
+        &daemon.url(),
+        &[
+            "reply",
+            "rc-001",
+            "--text",
+            "Renamed to `fn delta` in the Run branch.",
+            "--resolved",
+        ],
+        manager,
+    )
+    .await;
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stdout.contains("resolution proposed"), "{stdout}");
+    assert!(stdout.contains("author manager"), "{stdout}");
+    let run: serde_json::Value = client
+        .get(format!("{}/runs/{run_id}", daemon.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let c1 = &run["review_comments"][0];
+    assert_eq!(c1["status"], "sent");
+    assert_eq!(c1["proposal_pending"], true);
+    assert_eq!(c1["replies"][0]["author"], "manager");
+    assert_eq!(c1["replies"][0]["proposes_resolution"], true);
+
+    // The reply travelled over the WebSocket.
+    let mut seen = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !seen {
+        let next = tokio::time::timeout(std::time::Duration::from_millis(500), ws.next()).await;
+        let Ok(Some(Ok(msg))) = next else { continue };
+        if let Some(text) = ws_text(&msg) {
+            if text.contains("review_comment_replied") && text.contains(&run_id) {
+                seen = true;
+            }
+        }
+    }
+    assert!(
+        seen,
+        "the WebSocket carried the review_comment_replied event"
+    );
+
+    // 3. Resolve → resolved & out of `list` (open); Reopen → back to sent.
+    let resp = client
+        .post(format!(
+            "{}/runs/{run_id}/review/comments/rc-001/resolve",
+            daemon.url()
+        ))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, stdout, _) = run_pdo_review(&daemon.url(), &["list"], manager).await;
+    let open: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(open["comments"].as_array().unwrap().len(), 1, "{stdout}");
+    assert_eq!(open["comments"][0]["id"], "rc-002");
+    let (_, stdout, _) =
+        run_pdo_review(&daemon.url(), &["list", "--state", "resolved"], manager).await;
+    let resolved: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(resolved["comments"][0]["id"], "rc-001");
+    assert_eq!(resolved["comments"][0]["resolved_by"], "user");
+    let resp = client
+        .post(format!(
+            "{}/runs/{run_id}/review/comments/rc-001/reopen",
+            daemon.url()
+        ))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["comment"]["status"], "sent");
+    assert_eq!(body["comment"]["reopened_by"], "user");
+
+    // 4. Setting on: a node session's `--resolved` resolves directly, by the node.
+    let resp = client
+        .put(format!("{}/settings", daemon.url()))
+        .json(&serde_json::json!({ "review_agent_can_resolve": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (code, stdout, stderr) = run_pdo_review(
+        &daemon.url(),
+        &[
+            "reply",
+            "rc-002",
+            "--body",
+            "Done.",
+            "--resolved",
+            "--run",
+            &run_id,
+        ],
+        Some((run_id.as_str(), "solo")),
+    )
+    .await;
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("resolved (the instance lets agents resolve"),
+        "{stdout}"
+    );
+    let (_, stdout, _) = run_pdo_review(&daemon.url(), &["list", "--state", "all"], manager).await;
+    let all: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let c2 = all["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "rc-002")
+        .unwrap();
+    assert_eq!(c2["status"], "resolved");
+    assert_eq!(c2["resolved_by"], "solo");
+    assert_eq!(c2["replies"][0]["author"], "solo");
+    assert_eq!(all["agent_can_resolve"], true);
+
+    // Unknown id: the daemon's sentence reaches stderr, exit 1.
+    let (code, _, stderr) =
+        run_pdo_review(&daemon.url(), &["reply", "rc-999", "--text", "x"], manager).await;
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("rc-999"), "{stderr}");
+
+    // The whole conversation is in the log, in order.
+    let events: Vec<serde_json::Value> = client
+        .get(format!("{}/runs/{run_id}/events", daemon.url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .filter(|k| k.starts_with("review_comment_re"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "review_comment_replied",
+            "review_comment_resolved",
+            "review_comment_reopened",
+            "review_comment_replied",
+            "review_comment_resolved",
+        ]
+    );
+}

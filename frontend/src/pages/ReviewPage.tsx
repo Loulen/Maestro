@@ -3,7 +3,10 @@ import {
   ArrowLeftRight,
   ArrowLeft,
   Archive,
+  Bell,
   Columns2,
+  Eye,
+  EyeOff,
   ListMinus,
   MessageSquare,
   PanelLeftOpen,
@@ -11,28 +14,44 @@ import {
   SquareArrowOutUpRight,
 } from "lucide-react";
 import "@git-diff-view/react/styles/diff-view.css";
-import { fetchRun, fetchRunRefs, fetchRunStructuredDiff, sendReviewComments } from "../api";
+import {
+  fetchRun,
+  fetchRunRefs,
+  fetchRunStructuredDiff,
+  reopenReviewComment,
+  resolveReviewComment,
+  sendReviewComments,
+} from "../api";
 import { useDaemonSocket } from "../hooks/useDaemonSocket";
-import type { RunRefs, RunState, StructuredDiff } from "../types";
+import type { ReviewComment, RunRefs, RunState, StructuredDiff } from "../types";
 import RefPicker from "../components/review/RefPicker";
 import ReviewFileList from "../components/review/ReviewFileList";
 import ReviewFileCard from "../components/review/ReviewFileCard";
 import type { ReviewCommentsApi } from "../components/review/ReviewFileCard";
 import ReviewSendBar from "../components/review/ReviewSendBar";
+import { StateIcon } from "../components/review/CommentCard";
 import {
   addDraft,
+  allSeen,
+  authorLabel,
   countsByPath,
   draftsForPair,
+  markSeen as markSeenIn,
   mergeEntries,
   plural,
   readDrafts,
+  readSeen,
   removeDrafts,
   sendDisabledReason as sendReasonOf,
+  stateCounts,
+  stateCountsByPath,
   toSendInputs,
+  unreadReplies,
   updateDraft,
   writeDrafts,
+  writeSeen,
 } from "../lib/reviewComments";
-import type { Anchor, ReviewDraft, ReviewEntry } from "../lib/reviewComments";
+import type { Anchor, ReviewDraft, ReviewEntry, SeenMap } from "../lib/reviewComments";
 import {
   DEFAULT_FROM,
   DEFAULT_TO,
@@ -71,7 +90,23 @@ import type { RefPair, ViewMode } from "../lib/runRefs";
  * back as immutable Run events (`review_comments` in the projected state,
  * refreshed over the WebSocket). A Run whose branch is gone shows why sending
  * is disabled instead of a dead button.
+ *
+ * The conversation (#751, ADR-0067 §4): an agent's `pdo review reply` lands as
+ * a `review_comment_replied` event, pushed live — the reply appears inline
+ * under its comment, the card flashes, the reply carries a blue dot until the
+ * card is seen; when it is off-screen a blue bell pill in the header jumps to
+ * it. A `--resolved` reply is a **resolution proposed** (amber) the human
+ * settles with Resolve / Reopen; a resolved comment collapses (green) and keeps
+ * Reopen. The header counts open / proposed / resolved (icon + count, only when
+ * non-zero) and an eye toggle hides resolved cards; `c` / `C` skip them.
+ * Opening this page marks every reply seen for this browser (localStorage) —
+ * that is what clears the Diff tab's unread badge; the per-card dots clear as
+ * each card is looked at.
  */
+
+const SHOW_RESOLVED_KEY = "pdo.review.showResolved";
+/** How long a card keeps its outline flash after a live reply. */
+const FLASH_MS = 2400;
 
 interface Props {
   runId: string;
@@ -112,6 +147,20 @@ export default function ReviewPage({ runId }: Props) {
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
   const [commentCursor, setCommentCursor] = useState(-1);
   const toastTimer = useRef<number | undefined>(undefined);
+  // --- The conversation (#751) ----------------------------------------------------
+  /** What this browser had seen BEFORE this page opened — the unread dots read against it. */
+  const [seen, setSeen] = useState<SeenMap>(() => readSeen(runId));
+  const [showResolved, setShowResolved] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SHOW_RESOLVED_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [deciding, setDeciding] = useState<ReadonlySet<string>>(() => new Set());
+  const [flashing, setFlashing] = useState<ReadonlySet<string>>(() => new Set());
+  const flashTimers = useRef<Map<string, number>>(new Map());
+  const openedSeenWritten = useRef(false);
 
   const mainRef = useRef<HTMLDivElement | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
@@ -156,6 +205,20 @@ export default function ReviewPage({ runId }: Props) {
   useEffect(() => {
     if (run) document.title = `Review · ${run.pipeline_name} · ${runId}`;
   }, [run, runId]);
+
+  // Opening the Review clears the Diff tab's unread badge (spec): every reply of
+  // the Run counts as seen for this browser from now on. The `seen` snapshot the
+  // dots read against stays what it was at open, so the page still points at
+  // what is new.
+  useEffect(() => {
+    if (!run || openedSeenWritten.current) return;
+    openedSeenWritten.current = true;
+    writeSeen(runId, allSeen(run.review_comments, readSeen(runId)));
+  }, [run, runId]);
+  useEffect(() => {
+    const timers = flashTimers.current;
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, []);
 
   // Validate the URL pair once the refs are known; a bad ref falls back with a notice.
   const reconciledFor = useRef<RunRefs | null>(null);
@@ -209,10 +272,33 @@ export default function ReviewPage({ runId }: Props) {
       const ev = msg.event;
       fetchRun(runId)
         .then((r) => {
+          const before = runRef.current;
           runRef.current = r;
           setRun(r);
           const sig = deliverySignature(r.nodes);
           if (sigAtLoad.current !== null && sig !== sigAtLoad.current) setTipMoved(true);
+          // #751: a reply landed live — flash its card for a moment. The dot
+          // follows from `seen` (the snapshot does not know this reply).
+          if (before) {
+            const prevReplies = new Map((before.review_comments ?? []).map((c) => [c.id, c.replies?.length ?? 0]));
+            const grown = (r.review_comments ?? []).filter((c) => (c.replies?.length ?? 0) > (prevReplies.get(c.id) ?? 0));
+            if (grown.length > 0) {
+              setFlashing((f) => new Set([...f, ...grown.map((c) => c.id)]));
+              for (const c of grown) {
+                window.clearTimeout(flashTimers.current.get(c.id));
+                flashTimers.current.set(
+                  c.id,
+                  window.setTimeout(() => {
+                    setFlashing((f) => {
+                      const next = new Set(f);
+                      next.delete(c.id);
+                      return next;
+                    });
+                  }, FLASH_MS),
+                );
+              }
+            }
+          }
         })
         .catch(() => {});
       if (ev.kind === "node_delivered" && ev.node_id && pairRef.current.to === `live:${ev.node_id}`) {
@@ -351,8 +437,25 @@ export default function ReviewPage({ runId }: Props) {
     return m;
   }, [entries]);
   const counts = useMemo(() => countsByPath(entries), [entries]);
+  const states = useMemo(() => stateCountsByPath(entries), [entries]);
   const pairDrafts = useMemo(() => draftsForPair(drafts, pair), [drafts, pair]);
   const sentCount = entries.length - pairDrafts.length;
+  const sentEntries = useMemo(() => entries.flatMap((e) => (e.kind === "sent" ? [e.comment] : [])), [entries]);
+  const pairStates = useMemo(() => stateCounts(sentEntries), [sentEntries]);
+  /**
+   * Open comments of this pair with replies this browser has not seen, in diff
+   * order — what the bell jumps to. A comment the agent resolved directly is
+   * left out (nothing waits on the human), like the Diff tab badge.
+   */
+  const unreadComments = useMemo(
+    () => sentEntries.filter((c) => c.status === "sent" && unreadReplies(c, seen) > 0),
+    [sentEntries, seen],
+  );
+  /** What `c` / `C` cycle through: drafts and open / proposed comments — resolved are skipped. */
+  const cycleEntries = useMemo(
+    () => entries.filter((e) => e.kind === "draft" || e.comment.status !== "resolved"),
+    [entries],
+  );
   /** Comments written against another pair: listed greyed, never lost. */
   const otherEntries = useMemo(() => {
     const label = (from: string, to: string) => {
@@ -407,12 +510,74 @@ export default function ReviewPage({ runId }: Props) {
   );
   const jumpComment = useCallback(
     (dir: 1 | -1) => {
-      if (entries.length === 0) return;
-      const next = (commentCursor + dir + entries.length) % entries.length;
+      if (cycleEntries.length === 0) return;
+      const next = (commentCursor + dir + cycleEntries.length) % cycleEntries.length;
       setCommentCursor(next);
-      jumpTo(entries[next].anchor);
+      jumpTo(cycleEntries[next].anchor);
     },
-    [entries, commentCursor, jumpTo],
+    [cycleEntries, commentCursor, jumpTo],
+  );
+
+  // --- The conversation (#751) ----------------------------------------------------
+  const markSeen = useCallback(
+    (c: ReviewComment) => {
+      setSeen((prev) => markSeenIn(prev, c));
+      // Storage too: another tab's Diff badge must not keep counting this one.
+      writeSeen(runId, markSeenIn(readSeen(runId), c));
+    },
+    [runId],
+  );
+  /** The bell: jump to the first comment with an unread reply and mark it seen. */
+  const jumpUnread = useCallback(() => {
+    const target = unreadComments[0];
+    if (!target) return;
+    jumpTo({ path: target.path, side: target.side, line: target.line });
+    markSeen(target);
+  }, [unreadComments, jumpTo, markSeen]);
+  const toggleShowResolved = () => {
+    setShowResolved((v) => {
+      try {
+        localStorage.setItem(SHOW_RESOLVED_KEY, String(!v));
+      } catch {
+        // Remembered for the session only.
+      }
+      return !v;
+    });
+  };
+  const decide = useCallback(
+    async (c: ReviewComment, verb: "resolve" | "reopen") => {
+      if (deciding.has(c.id)) return;
+      setDeciding((d) => new Set([...d, c.id]));
+      try {
+        const res = await (verb === "resolve" ? resolveReviewComment(runId, c.id) : reopenReviewComment(runId, c.id));
+        markSeen(res.comment);
+        try {
+          const r = await fetchRun(runId);
+          runRef.current = r;
+          setRun(r);
+        } catch {
+          // The WebSocket refresh lands anyway.
+        }
+        if (!res.changed) {
+          showToast(`${c.id} was already ${verb === "resolve" ? "resolved" : "open"}.`);
+        } else if (verb === "resolve") {
+          showToast(`${c.id} resolved — collapsed; Reopen stays in its footer.`);
+        } else if (c.status === "resolved") {
+          showToast(`${c.id} reopened — back to open, the agent sees it in pdo review list.`);
+        } else {
+          showToast(`${c.id}: proposal declined — the comment stays open for ${authorLabel(res.comment.replies?.at(-1)?.author ?? "agent")}.`);
+        }
+      } catch (e: unknown) {
+        showToast(`${verb === "resolve" ? "Resolve" : "Reopen"} failed — ${e instanceof Error ? e.message : String(e)}`, true);
+      } finally {
+        setDeciding((d) => {
+          const next = new Set(d);
+          next.delete(c.id);
+          return next;
+        });
+      }
+    },
+    [deciding, runId, markSeen, showToast],
   );
 
   /** Send `keys` out of `source` (defaults to the current drafts; `sendNew` passes the list it just grew). */
@@ -482,9 +647,34 @@ export default function ReviewPage({ runId }: Props) {
         showToast("Draft deleted.");
       },
       sendDraft: (key) => void send([key]),
-      sentLineClicked: () => showToast("This line already has a sent comment. Replies arrive with the next ticket.", true),
+      sentLineClicked: () =>
+        showToast("This line already has a sent comment. The agent's replies show up under it; add a new comment on another line.", true),
+      resolve: (c) => void decide(c, "resolve"),
+      reopen: (c) => void decide(c, "reopen"),
+      deciding,
+      unreadOf: (c) => unreadReplies(c, seen),
+      flashing,
+      markSeen,
+      showResolved,
     }),
-    [editingKey, sendingKeys, startingManager, pairLabel, sendDisabledReason, drafts, pair, persistDrafts, showToast, send],
+    [
+      editingKey,
+      sendingKeys,
+      startingManager,
+      pairLabel,
+      sendDisabledReason,
+      drafts,
+      pair,
+      persistDrafts,
+      showToast,
+      send,
+      decide,
+      deciding,
+      seen,
+      flashing,
+      markSeen,
+      showResolved,
+    ],
   );
 
   // --- Keyboard ---------------------------------------------------------------
@@ -710,17 +900,83 @@ export default function ReviewPage({ runId }: Props) {
             )}
           </>
         ) : (
-          <button
-            type="button"
-            onClick={() => jumpComment(1)}
-            disabled={entries.length === 0}
-            title="Jump to the next comment  ( c / C )"
-            data-testid="review-comments-pill"
-            className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
-            style={{ fontSize: "10.5px" }}
-          >
-            <MessageSquare size={11} /> {sentCount > 0 ? `${sentCount} sent` : "0 comments"}
-          </button>
+          <>
+            {unreadComments.length > 0 && (
+              // The one filled pill: unread replies, click to jump to the first.
+              <button
+                type="button"
+                onClick={jumpUnread}
+                title={`${plural(unreadComments.length, "comment")} with an unread reply — jump to the first`}
+                data-testid="review-unread-pill"
+                className="flex cursor-pointer items-center gap-1 rounded border border-st-running bg-st-running px-2 py-0.5 font-semibold text-white hover:opacity-90"
+                style={{ fontSize: "10.5px" }}
+              >
+                <Bell size={11} /> {unreadComments.length}
+              </button>
+            )}
+            {sentCount === 0 ? (
+              <button
+                type="button"
+                onClick={() => jumpComment(1)}
+                disabled={cycleEntries.length === 0}
+                title="Jump to the next comment  ( c / C )"
+                data-testid="review-comments-pill"
+                className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 hover:text-fg-2 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ fontSize: "10.5px" }}
+              >
+                <MessageSquare size={11} /> 0 comments
+              </button>
+            ) : (
+              <span className="flex items-center gap-1" data-testid="review-state-pills">
+                {pairStates.open > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => jumpComment(1)}
+                    title={`${plural(pairStates.open, "open comment")} — jump to the next  ( c / C )`}
+                    data-testid="review-comments-pill"
+                    className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 hover:text-fg-2"
+                    style={{ fontSize: "10.5px" }}
+                  >
+                    <StateIcon state="open" size={11} /> {pairStates.open}
+                  </button>
+                )}
+                {pairStates.proposed > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => jumpComment(1)}
+                    title={`${pairStates.proposed} resolution${pairStates.proposed === 1 ? "" : "s"} proposed — your call`}
+                    data-testid="review-proposed-pill"
+                    className="flex cursor-pointer items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3 hover:text-fg-2"
+                    style={{ fontSize: "10.5px" }}
+                  >
+                    <StateIcon state="proposed" size={11} /> {pairStates.proposed}
+                  </button>
+                )}
+                {pairStates.resolved > 0 && (
+                  <span
+                    title={`${pairStates.resolved} resolved (skipped by c / C)`}
+                    data-testid="review-resolved-pill"
+                    className="flex items-center gap-1 rounded border border-line-strong bg-bg-3 px-2 py-0.5 text-fg-3"
+                    style={{ fontSize: "10.5px" }}
+                  >
+                    <StateIcon state="resolved" size={11} /> {pairStates.resolved}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={toggleShowResolved}
+                  aria-pressed={!showResolved}
+                  title={showResolved ? "Hide resolved comments" : "Show resolved comments"}
+                  data-testid="review-toggle-resolved"
+                  className={`grid h-5 w-[22px] cursor-pointer place-items-center rounded border border-line-strong ${
+                    showResolved ? "bg-bg-3 text-fg-3 hover:text-fg-2" : "bg-bg-4 text-fg"
+                  }`}
+                >
+                  {showResolved ? <Eye size={11} /> : <EyeOff size={11} />}
+                </button>
+              </span>
+            )}
+          </>
         )}
         <a
           href={reviewUrl(runId, pair)}
@@ -746,6 +1002,7 @@ export default function ReviewPage({ runId }: Props) {
             onSelect={goFile}
             onClose={toggleList}
             counts={counts}
+            stateCounts={states}
             comments={{ current: entries, other: otherEntries.map(({ entry, pair: p }) => ({ entry, pair: p })) }}
             onJumpEntry={(e) => jumpTo(e.anchor)}
             onJumpOther={(e) => {

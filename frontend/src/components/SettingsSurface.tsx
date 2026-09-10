@@ -114,6 +114,8 @@ interface DraftValues {
   defaultAutoName: boolean;
   managerEnabled: boolean;
   managerProfile: string;
+  /** #751: may an agent's `--resolved` reply resolve a review comment directly? */
+  reviewAgentCanResolve: boolean;
 }
 
 function seedFrom(settings: InstanceSettings): DraftValues {
@@ -132,6 +134,7 @@ function seedFrom(settings: InstanceSettings): DraftValues {
     managerEnabled: settings.manager_enabled.effective,
     // "" = « Follow the Run » (the clear sentinel on the wire too).
     managerProfile: settings.manager_profile.stored ?? "",
+    reviewAgentCanResolve: settings.review_agent_can_resolve.effective,
   };
 }
 
@@ -174,6 +177,9 @@ function computeDirty(values: DraftValues, settings: InstanceSettings): Set<Sett
   }
   if (values.defaultAutoName !== settings.default_auto_name.effective) {
     dirty.add("default-auto-name");
+  }
+  if (values.reviewAgentCanResolve !== settings.review_agent_can_resolve.effective) {
+    dirty.add("review-agent-can-resolve");
   }
   if (values.model !== settings.default_model.effective) dirty.add("default-model");
   if (values.defaultHarness !== (settings.default_harness.effective ?? "")) {
@@ -382,6 +388,10 @@ export default function SettingsSurface({
     }
     if (values.defaultAutoName !== settings.default_auto_name.effective) {
       patch.default_auto_name = values.defaultAutoName;
+    }
+    // #751: same plain-bool discipline — `false` persists as a stored `0`.
+    if (values.reviewAgentCanResolve !== settings.review_agent_can_resolve.effective) {
+      patch.review_agent_can_resolve = values.reviewAgentCanResolve;
     }
     // Manager on demand: the flag is a plain bool (`false` persists as a stored
     // `0`); the pin is a profile NAME with `""` as the clear sentinel (« Follow
@@ -679,6 +689,27 @@ export default function SettingsSurface({
                           </>
                         }
                         source={defaultAutoNameSourceNote(settings.default_auto_name)}
+                      />
+                      {/* #751 (ADR-0067 §4): right after auto-name — both are about how much
+                          the agent may do on its own. Off by default: the human resolves. */}
+                      <CheckboxRow
+                        id="review-agent-can-resolve"
+                        checked={values.reviewAgentCanResolve}
+                        onChange={(v) => setField("reviewAgentCanResolve", v)}
+                        dirty={rollup.fields.has("review-agent-can-resolve")}
+                        label="Let the agent resolve review comments directly"
+                        help={
+                          <>
+                            By default a reply sent with{" "}
+                            <span className="font-mono">pdo review reply --resolved</span> is only a{" "}
+                            <strong>proposal</strong>: the comment shows "Resolution proposed" and you
+                            click Resolve or Reopen. Turn this on and such a reply resolves the comment
+                            on the spot, for every Run of this instance. You can always reopen a
+                            resolved comment, whoever closed it. Off is the safer default: it keeps a
+                            comment from being a ticket the agent validates for itself.
+                          </>
+                        }
+                        source={reviewAgentCanResolveSourceNote(settings.review_agent_can_resolve)}
                       />
                       {/* Turn-end auto-completion (#469). Labelled on what is MEASURED — an
                           end of turn constated in the agent's transcript — and deliberately
@@ -2127,6 +2158,24 @@ function defaultAutoNameSourceNote(field: BoolSettingField): string {
     return `Source: env ${envDisplay ?? "PDO_DEFAULT_AUTO_NAME"}.`;
   }
   return `Source: built-in default (${onOff(field.default)}).`;
+}
+
+/** Which tier `review_agent_can_resolve` comes from (#751). A real built-in default
+ *  (`off`), and both directions of a save are a stored decision — same shape as
+ *  {@link defaultAutoNameSourceNote}. */
+function reviewAgentCanResolveSourceNote(field: BoolSettingField): string {
+  const onOff = (v: boolean) => (v ? "on" : "off");
+  const envDisplay = field.env != null ? `PDO_REVIEW_AGENT_CAN_RESOLVE=${onOff(field.env)}` : null;
+  if (field.source === "stored") {
+    const base = `Source: stored value (${onOff(field.effective)}).`;
+    return envDisplay
+      ? `${base} Env ${envDisplay} is set but overridden.`
+      : `${base} Overrides env and default.`;
+  }
+  if (field.source === "env") {
+    return `Source: env ${envDisplay ?? "PDO_REVIEW_AGENT_CAN_RESOLVE"}.`;
+  }
+  return `Source: built-in default (${onOff(field.default)}). Set PDO_REVIEW_AGENT_CAN_RESOLVE=true in the daemon's environment to change it; a stored value wins over both.`;
 }
 
 /** Which tier the manager auto-start flag comes from (manager on demand). A real

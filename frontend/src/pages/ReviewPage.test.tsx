@@ -13,10 +13,24 @@ vi.mock("../api", () => ({
   fetchRunStructuredDiff: vi.fn(),
   fetchRunFileAtRef: vi.fn(),
   sendReviewComments: vi.fn(),
+  resolveReviewComment: vi.fn(),
+  reopenReviewComment: vi.fn(),
 }));
 
+// The socket mock hands the test the subscriber, so a `review_comment_replied`
+// push can be simulated (#751).
+const socketSubscribers: ((msg: unknown) => void)[] = [];
 vi.mock("../hooks/useDaemonSocket", () => ({
-  useDaemonSocket: () => ({ status: "connected", subscribe: () => () => {} }),
+  useDaemonSocket: () => ({
+    status: "connected",
+    subscribe: (fn: (msg: unknown) => void) => {
+      socketSubscribers.push(fn);
+      return () => {
+        const i = socketSubscribers.indexOf(fn);
+        if (i >= 0) socketSubscribers.splice(i, 1);
+      };
+    },
+  }),
 }));
 
 // The body mock exposes the two seams #750 plugs into: a `+` per side/line that
@@ -67,13 +81,23 @@ vi.mock("@git-diff-view/react", async () => {
   return { DiffModeEnum: { Split: "split", Unified: "unified" }, SplitSide, DiffView };
 });
 
-import { fetchRun, fetchRunRefs, fetchRunStructuredDiff, fetchRunFileAtRef, sendReviewComments } from "../api";
+import {
+  fetchRun,
+  fetchRunRefs,
+  fetchRunStructuredDiff,
+  fetchRunFileAtRef,
+  sendReviewComments,
+  resolveReviewComment,
+  reopenReviewComment,
+} from "../api";
 
 const mockedRun = vi.mocked(fetchRun);
 const mockedRefs = vi.mocked(fetchRunRefs);
 const mockedDiff = vi.mocked(fetchRunStructuredDiff);
 const mockedFile = vi.mocked(fetchRunFileAtRef);
 const mockedSend = vi.mocked(sendReviewComments);
+const mockedResolve = vi.mocked(resolveReviewComment);
+const mockedReopen = vi.mocked(reopenReviewComment);
 
 const RUN_ID = "20260909-125942-c7e2c65";
 
@@ -162,6 +186,7 @@ function goto(search = "") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  socketSubscribers.length = 0;
   localStorage.clear();
   sessionStorage.clear();
   mockedRun.mockResolvedValue(makeRun());
@@ -479,7 +504,10 @@ describe("ReviewPage — review comments (#750)", () => {
     expect(screen.getByTestId("review-toast")).toHaveTextContent("2 comments sent as one message — manager started");
     expect(localStorage.getItem(`pdo.review.drafts.${RUN_ID}`)).toBeNull();
     expect(screen.queryByTestId("review-send-bar")).toBeNull();
-    expect(screen.getByTestId("review-comments-pill")).toHaveTextContent("2 sent");
+    // #751: the header counts by state — two open, nothing proposed / resolved.
+    expect(screen.getByTestId("review-comments-pill")).toHaveTextContent("2");
+    expect(screen.queryByTestId("review-proposed-pill")).toBeNull();
+    expect(screen.queryByTestId("review-resolved-pill")).toBeNull();
     // Sent card: id, pair, lock, no edit/delete.
     const first = screen.getAllByTestId("review-comment").find((c) => c.dataset.commentId === "rc-001")!;
     expect(within(first).getByTestId("review-comment-id")).toHaveTextContent("rc-001");
@@ -534,7 +562,7 @@ describe("ReviewPage — review comments (#750)", () => {
     expect(rows).toHaveLength(2);
     expect(rows[1]).toHaveAttribute("data-other-pair", "true");
     expect(rows[1]).toHaveTextContent("at implement · iter 1 · before → implement · iter 1 · after");
-    expect(screen.getByTestId("review-comments-pill")).toHaveTextContent("1 sent");
+    expect(screen.getByTestId("review-comments-pill")).toHaveTextContent("1");
   });
 
   it("disables every send gesture with the reason when the Run branch is gone", async () => {
@@ -554,5 +582,172 @@ describe("ReviewPage — review comments (#750)", () => {
     expect(screen.getByTestId("review-send-pill")).toBeDisabled();
     expect(screen.getByTestId("review-send-bar-note")).toHaveTextContent("no longer exists");
     expect(mockedSend).not.toHaveBeenCalled();
+  });
+});
+
+// --- #751: the conversation ---------------------------------------------------
+
+const REPLY_MANAGER = { author: "manager", text: "Done: renamed it (commit `7f2b0d1`).", at: "2026-09-09T00:40:00Z" };
+const REPLY_NODE_PROPOSES = { author: "xuTJYLUa", text: "Handled, test added.", at: "2026-09-09T00:41:00Z", proposes_resolution: true };
+
+function pushEvent(kind: string) {
+  for (const fn of [...socketSubscribers]) fn({ type: "event", event: { run_id: RUN_ID, kind, ts: "2026-09-09T00:45:00Z" } });
+}
+
+describe("ReviewPage — review conversation (#751)", () => {
+  it("shows a reply inline with its author, an unread dot and the bell; opening marks everything seen for the Diff badge", async () => {
+    const c = sentComment({ replies: [REPLY_MANAGER] });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [c] }));
+    render(<ReviewPage runId={RUN_ID} />);
+    const card = await screen.findByTestId("review-comment");
+    expect(card).toHaveAttribute("data-review-state", "open");
+    expect(card).toHaveAttribute("data-unread", "1");
+    const reply = within(card).getByTestId("review-reply");
+    expect(reply).toHaveAttribute("data-author", "manager");
+    expect(reply).toHaveAttribute("data-unread", "true");
+    expect(within(reply).getByTestId("review-reply-body").querySelector("code")).toHaveTextContent("7f2b0d1");
+    expect(within(card).getByTestId("review-comment-status")).toHaveAttribute("data-kind", "replied");
+    // A plain reply: the human can still resolve; no Reopen.
+    expect(within(card).getByTestId("review-comment-resolve")).toBeInTheDocument();
+    expect(within(card).queryByTestId("review-comment-reopen")).toBeNull();
+    // Opening the Review wrote "seen" for this browser — the Diff tab badge reads 0 now.
+    await waitFor(() => expect(JSON.parse(localStorage.getItem(`pdo.review.seen.${RUN_ID}`)!)).toEqual({ "rc-001": 1 }));
+    // The bell counts the unread card; clicking it marks the card seen.
+    expect(screen.getByTestId("review-unread-pill")).toHaveTextContent("1");
+    fireEvent.click(screen.getByTestId("review-unread-pill"));
+    await waitFor(() => expect(screen.queryByTestId("review-unread-pill")).toBeNull());
+    expect(screen.getByTestId("review-comment")).not.toHaveAttribute("data-unread");
+    expect(within(screen.getByTestId("review-comment")).queryByTestId("review-reply-unread")).toBeNull();
+  });
+
+  it("a reply landing over the WebSocket appears live, flashes the card and re-arms the bell", async () => {
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [sentComment()] }));
+    render(<ReviewPage runId={RUN_ID} />);
+    const card = await screen.findByTestId("review-comment");
+    expect(within(card).getByTestId("review-comment-status")).toHaveAttribute("data-kind", "awaiting");
+    expect(screen.queryByTestId("review-unread-pill")).toBeNull();
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [sentComment({ replies: [REPLY_MANAGER] })] }));
+    pushEvent("review_comment_replied");
+    await waitFor(() => expect(screen.getByTestId("review-reply")).toBeInTheDocument());
+    expect(screen.getByTestId("review-comment").className).toContain("pdo-review-flash");
+    expect(screen.getByTestId("review-reply")).toHaveAttribute("data-unread", "true");
+    expect(screen.getByTestId("review-unread-pill")).toHaveTextContent("1");
+    // Hovering the card is enough to mark it seen.
+    fireEvent.mouseEnter(screen.getByTestId("review-comment"));
+    await waitFor(() => expect(screen.queryByTestId("review-unread-pill")).toBeNull());
+  });
+
+  it("a proposal shows Resolve / Reopen; Resolve collapses the card to one line with Reopen; the header click expands it", async () => {
+    const proposed = sentComment({ replies: [REPLY_NODE_PROPOSES], proposal_pending: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [proposed] }));
+    render(<ReviewPage runId={RUN_ID} />);
+    const card = await screen.findByTestId("review-comment");
+    expect(card).toHaveAttribute("data-review-state", "proposed");
+    expect(within(card).getByTestId("review-state-proposed")).toBeInTheDocument();
+    expect(within(card).getByTestId("review-reply")).toHaveAttribute("data-author", "xuTJYLUa");
+    expect(within(card).getByTestId("review-reply")).toHaveTextContent("xuTJYLUa");
+    expect(within(card).getByTestId("review-reply-proposes")).toBeInTheDocument();
+    expect(within(card).getByTestId("review-comment-status")).toHaveAttribute("data-kind", "proposed");
+    expect(within(card).getByTestId("review-comment-reopen")).toHaveAttribute("title", expect.stringContaining("Decline the proposal"));
+    // Header + sidebar: 1 proposed, "needs you".
+    expect(screen.getByTestId("review-proposed-pill")).toHaveTextContent("1");
+    expect(screen.queryByTestId("review-comments-pill")).toBeNull();
+    expect(screen.getByTestId("review-needs-you")).toHaveTextContent("1");
+    expect(screen.getAllByTestId("review-file")[0]).toHaveAttribute("data-proposed", "1");
+
+    const resolved = sentComment({ ...proposed, status: "resolved", proposal_pending: false, resolved_by: "user", resolved_at: "2026-09-09T00:50:00Z" });
+    mockedResolve.mockResolvedValue({ comment: resolved, changed: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [resolved] }));
+    fireEvent.click(within(card).getByTestId("review-comment-resolve"));
+    await waitFor(() => expect(mockedResolve).toHaveBeenCalledWith(RUN_ID, "rc-001"));
+    await waitFor(() => expect(screen.getByTestId("review-comment")).toHaveAttribute("data-review-state", "resolved"));
+    const done = screen.getByTestId("review-comment");
+    expect(done).toHaveAttribute("data-collapsed", "true");
+    expect(within(done).getByTestId("review-comment-summary")).toHaveTextContent("“Sent remark”");
+    expect(within(done).getByTestId("review-comment-summary")).toHaveTextContent("1");
+    expect(within(done).getByTestId("review-comment-resolved-by")).toHaveAttribute("title", "Resolved by you");
+    expect(within(done).queryByTestId("review-comment-body")).toBeNull();
+    expect(screen.getByTestId("review-toast")).toHaveTextContent("rc-001 resolved");
+    expect(screen.getByTestId("review-resolved-pill")).toHaveTextContent("1");
+    expect(screen.queryByTestId("review-proposed-pill")).toBeNull();
+    // Expand: body, thread and the Reopen footer come back.
+    fireEvent.click(within(done).getByTestId("review-comment-header"));
+    expect(done).not.toHaveAttribute("data-collapsed");
+    expect(within(done).getByTestId("review-comment-body")).toBeInTheDocument();
+    expect(within(done).getByTestId("review-comment-status")).toHaveAttribute("data-kind", "resolved");
+    expect(within(done).getByTestId("review-comment-reopen")).toBeInTheDocument();
+    expect(within(done).queryByTestId("review-comment-resolve")).toBeNull();
+
+    // Reopen → back to sent, footer "Reopened by you".
+    const reopened = sentComment({ ...proposed, proposal_pending: false, reopened_by: "user", reopened_at: "2026-09-09T00:55:00Z" });
+    mockedReopen.mockResolvedValue({ comment: reopened, changed: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [reopened] }));
+    fireEvent.click(within(done).getByTestId("review-comment-reopen"));
+    await waitFor(() => expect(mockedReopen).toHaveBeenCalledWith(RUN_ID, "rc-001"));
+    await waitFor(() => expect(screen.getByTestId("review-comment")).toHaveAttribute("data-review-state", "open"));
+    expect(within(screen.getByTestId("review-comment")).getByTestId("review-comment-status")).toHaveAttribute("data-kind", "reopened");
+    expect(screen.getByTestId("review-toast")).toHaveTextContent("reopened");
+  });
+
+  it("Reopen on a proposal declines it: the comment stays open for the agent", async () => {
+    const proposed = sentComment({ replies: [REPLY_NODE_PROPOSES], proposal_pending: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [proposed] }));
+    render(<ReviewPage runId={RUN_ID} />);
+    const card = await screen.findByTestId("review-comment");
+    const declined = sentComment({ ...proposed, proposal_pending: false, proposal_declined: true, reopened_by: "user", reopened_at: "2026-09-09T00:55:00Z" });
+    mockedReopen.mockResolvedValue({ comment: declined, changed: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [declined] }));
+    fireEvent.click(within(card).getByTestId("review-comment-reopen"));
+    await waitFor(() => expect(screen.getByTestId("review-comment")).toHaveAttribute("data-review-state", "open"));
+    const status = within(screen.getByTestId("review-comment")).getByTestId("review-comment-status");
+    expect(status).toHaveAttribute("data-kind", "declined");
+    expect(status.querySelector("[title]")).toHaveAttribute("title", expect.stringContaining("Proposal declined by you"));
+    expect(screen.getByTestId("review-toast")).toHaveTextContent("proposal declined");
+    expect(screen.getByTestId("review-comments-pill")).toHaveTextContent("1");
+  });
+
+  it("agent-resolved comments read « Resolved by <node> », the eye toggle hides resolved cards, and the sidebar sorts proposed → open → resolved", async () => {
+    const byAgent = sentComment({
+      id: "rc-001",
+      line: 1,
+      status: "resolved",
+      resolved_by: "xuTJYLUa",
+      resolved_at: "2026-09-09T00:50:00Z",
+      replies: [REPLY_NODE_PROPOSES],
+    });
+    const open = sentComment({ id: "rc-002", line: 2, text: "open one" });
+    const proposed = sentComment({ id: "rc-003", line: 3, side: "old", text: "proposed one", replies: [REPLY_NODE_PROPOSES], proposal_pending: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [byAgent, open, proposed] }));
+    render(<ReviewPage runId={RUN_ID} />);
+    await waitFor(() => expect(screen.getAllByTestId("review-comment")).toHaveLength(3));
+    const agentCard = screen.getAllByTestId("review-comment").find((c) => c.dataset.commentId === "rc-001")!;
+    expect(agentCard).toHaveAttribute("data-collapsed", "true");
+    expect(within(agentCard).getByTestId("review-comment-resolved-by")).toHaveAttribute("title", "Resolved by xuTJYLUa");
+    // Not counted as unread-needing-action: the bell counts the proposed one only.
+    expect(screen.getByTestId("review-unread-pill")).toHaveTextContent("1");
+    // Sidebar order and dimming.
+    const rows = screen.getAllByTestId("review-comment-row");
+    expect(rows.map((r) => r.dataset.reviewState)).toEqual(["proposed", "open", "resolved"]);
+    expect(rows[2].className).toContain("opacity-55");
+    expect(screen.getByTestId("review-comments-count")).toHaveTextContent("0 drafts · 3 sent");
+    // Eye toggle: the resolved card leaves the diff, the pill stays.
+    fireEvent.click(screen.getByTestId("review-toggle-resolved"));
+    await waitFor(() => expect(screen.getAllByTestId("review-comment")).toHaveLength(2));
+    expect(screen.getByTestId("review-resolved-pill")).toHaveTextContent("1");
+    expect(localStorage.getItem("pdo.review.showResolved")).toBe("false");
+    fireEvent.click(screen.getByTestId("review-toggle-resolved"));
+    await waitFor(() => expect(screen.getAllByTestId("review-comment")).toHaveLength(3));
+  });
+
+  it("reports a failed decision and keeps the card as it was", async () => {
+    const proposed = sentComment({ replies: [REPLY_NODE_PROPOSES], proposal_pending: true });
+    mockedRun.mockResolvedValue(makeRun({ review_comments: [proposed] }));
+    render(<ReviewPage runId={RUN_ID} />);
+    const card = await screen.findByTestId("review-comment");
+    mockedResolve.mockRejectedValue(new Error("daemon unreachable"));
+    fireEvent.click(within(card).getByTestId("review-comment-resolve"));
+    await waitFor(() => expect(screen.getByTestId("review-toast")).toHaveAttribute("data-error", "true"));
+    expect(screen.getByTestId("review-toast")).toHaveTextContent("Resolve failed — daemon unreachable");
+    expect(screen.getByTestId("review-comment")).toHaveAttribute("data-review-state", "proposed");
   });
 });

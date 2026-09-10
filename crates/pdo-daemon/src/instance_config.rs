@@ -116,6 +116,13 @@ pub(crate) struct InstanceConfig {
     /// then the built-in default (`true`). A stored `0` is a decision that beats
     /// the env — same `0`-not-`NULL` discipline as [`Self::autocomplete_turn_end`].
     pub update_check: Option<i64>,
+    /// Stored `review_agent_can_resolve` flag as `0`/`1`, or `None` when unset
+    /// (#751, ADR-0067 §4): may an agent's `pdo review reply --resolved` resolve
+    /// the comment directly? `None` falls through to the env seam
+    /// ([`crate::review_comments::REVIEW_AGENT_CAN_RESOLVE_ENV`]) then the
+    /// built-in default (`false`: the reply is a proposal the human decides on).
+    /// Same `0`-not-`NULL` discipline as [`Self::default_auto_name`].
+    pub review_agent_can_resolve: Option<i64>,
     /// The Instance tier of the agentic-profile union (#563, ADR-0057) — the
     /// **coarsest** tier `agent_choice::resolve` consults, just above the
     /// reserved Default profile floor. `None` (unset) preserves the pre-#563
@@ -215,6 +222,10 @@ pub(crate) struct UpdateInstanceConfig {
     /// Set the `update_check` flag (#697): `Some(true)` stores `1`, `Some(false)`
     /// stores `0`, `None` leaves it untouched.
     pub update_check: Option<bool>,
+    /// Set the `review_agent_can_resolve` flag (#751): `Some(true)` stores `1`,
+    /// `Some(false)` stores `0`, `None` leaves it untouched. Same set-only,
+    /// `0`-not-`NULL` discipline as [`Self::default_auto_name`].
+    pub review_agent_can_resolve: Option<bool>,
     /// Set the Instance tier of the agentic-profile union (#563): `Some(None)`
     /// clears it back to unset (legacy `default_harness`/`default_harness_model`
     /// decide again); `Some(Some(choice))` sets it; `None` leaves it untouched.
@@ -253,6 +264,7 @@ impl UpdateInstanceConfig {
             && self.default_harness_model.is_none()
             && self.auto_fail.is_none()
             && self.update_check.is_none()
+            && self.review_agent_can_resolve.is_none()
             && self.agent_choice.is_none()
             && self.skills.is_none()
             && self.manager_enabled.is_none()
@@ -284,6 +296,7 @@ pub(crate) async fn init(db: &SqlitePool) -> Result<(), sqlx::Error> {
             libassist_idle_ttl_secs INTEGER,
             agent_choice       TEXT,
             update_check       INTEGER,
+            review_agent_can_resolve INTEGER,
             manager_enabled    INTEGER,
             manager_profile    TEXT,
             updated_at         TEXT NOT NULL
@@ -463,6 +476,20 @@ pub(crate) async fn init(db: &SqlitePool) -> Result<(), sqlx::Error> {
             .await?;
     }
 
+    // Additive migration, pre-#751: NULLABLE so an existing instance keeps the
+    // built-in default (the human resolves, the agent proposes).
+    let has_review_agent_can_resolve = sqlx::query(
+        "SELECT 1 FROM pragma_table_info('instance_config') WHERE name = 'review_agent_can_resolve'",
+    )
+    .fetch_optional(db)
+    .await?
+    .is_some();
+    if !has_review_agent_can_resolve {
+        sqlx::query("ALTER TABLE instance_config ADD COLUMN review_agent_can_resolve INTEGER")
+            .execute(db)
+            .await?;
+    }
+
     // Additive migration (manager on demand): NULLABLE keeps every existing
     // install on the pre-change behaviour is FALSE here on purpose — the change
     // itself — but the column must stay NULLABLE so a stored `0` remains a
@@ -517,6 +544,8 @@ fn row_to_config(row: &sqlx::sqlite::SqliteRow) -> InstanceConfig {
         auto_fail: row.get("auto_fail"),
         // #697: `try_get` so a row read before the column migration still maps.
         update_check: row.try_get("update_check").unwrap_or(None),
+        // #751: same posture — a row read before the column migration still maps.
+        review_agent_can_resolve: row.try_get("review_agent_can_resolve").unwrap_or(None),
         // #563: NULL / unparseable ⇒ `None` — the tier is simply transparent,
         // never an error (mirrors `default_harness_model`'s degrade-to-empty).
         agent_choice: row
@@ -593,6 +622,9 @@ pub(crate) async fn update(
     if edit.update_check.is_some() {
         sets.push("update_check = ?");
     }
+    if edit.review_agent_can_resolve.is_some() {
+        sets.push("review_agent_can_resolve = ?");
+    }
     if edit.agent_choice.is_some() {
         sets.push("agent_choice = ?");
     }
@@ -665,6 +697,11 @@ pub(crate) async fn update(
     if let Some(v) = edit.update_check {
         // 0/1, never NULL: turning the check off must persist a stored `0` that
         // beats a `PDO_UPDATE_CHECK=1` (#697).
+        query = query.bind(if v { 1_i64 } else { 0_i64 });
+    }
+    if let Some(v) = edit.review_agent_can_resolve {
+        // 0/1, never NULL: unticking must persist a stored `0` that beats a
+        // `PDO_REVIEW_AGENT_CAN_RESOLVE=1`, not fall through to it (#751).
         query = query.bind(if v { 1_i64 } else { 0_i64 });
     }
     if let Some(v) = edit.agent_choice {

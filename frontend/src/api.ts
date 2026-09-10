@@ -1,5 +1,6 @@
 import type { PipelineListEntry, PipelineDetail, PipelineDef, RunListEntry, RunState, PortDef, PortSide, PortType, FrontmatterFieldDecl, FrontmatterViolation, Trigger, TriggerFire, DaemonStatus, InstanceSettings, UpdateSettingsRequest, StatsOverview, StatsCost, StatsPerformance, SandboxProfile, SandboxProfileImage, SandboxProfileReferents, SyncCostPricesReport, UpdateStatus, UpdateChangelog, UpdateApplyResponse, Project, BranchRef, AgentChoice, AgentProfile, AgentProfileReferents, ProvisioningPlan, ProvisioningRules, Skill, SkillBank, SkillDetail, SkillFile, SkillFileContent, SkillFilesUpload, SkillFolder, SkillReferents, SkillRef, SkillScanResult, SkillImportItem, SkillImportReport, SkillRescanReport, RecentSkillSource, StructuredDiff, RunRefs,
   ReviewComment,
+  ReviewDecisionResponse,
   SendReviewCommentInput,
   SendReviewCommentsResponse,
 } from "./types";
@@ -406,6 +407,24 @@ export function sendReviewComments(
     body: { comments },
     label: "Send review comments",
   });
+}
+
+/** #751: the human resolves a comment (accepts a proposal, or closes it outright). */
+export function resolveReviewComment(runId: string, commentId: string): Promise<ReviewDecisionResponse> {
+  return request<ReviewDecisionResponse>(
+    "POST",
+    `/runs/${encodeURIComponent(runId)}/review/comments/${encodeURIComponent(commentId)}/resolve`,
+    { body: {}, label: "Resolve review comment" },
+  );
+}
+
+/** #751: back to `sent` — reopen a resolved comment, or decline a pending proposal. */
+export function reopenReviewComment(runId: string, commentId: string): Promise<ReviewDecisionResponse> {
+  return request<ReviewDecisionResponse>(
+    "POST",
+    `/runs/${encodeURIComponent(runId)}/review/comments/${encodeURIComponent(commentId)}/reopen`,
+    { body: {}, label: "Reopen review comment" },
+  );
 }
 
 /** Refusal slugs this client knows how to phrase (#490, ADR-0035 §3). */

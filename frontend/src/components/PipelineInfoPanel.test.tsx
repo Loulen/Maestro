@@ -564,6 +564,56 @@ describe("PipelineInfoPanel — Diff tab (#748)", () => {
     expect(screen.queryByTestId("run-stats")).toBeNull();
   });
 
+  it("counts unread review replies on the Diff tab (#751), replacing the dot, and clears once the Review marked them seen", () => {
+    const replied = {
+      id: "rc-001",
+      path: "a.ts",
+      side: "new" as const,
+      line: 1,
+      from_ref: "fork",
+      to_ref: "tip",
+      text: "t",
+      author: "user",
+      sent_at: "2026-07-01T10:00:00.000Z",
+      status: "sent" as const,
+      replies: [{ author: "manager", text: "done", at: "2026-07-01T10:05:00.000Z" }],
+    };
+    const delivered = {
+      "impl-1": {
+        node_id: "impl-1",
+        status: "completed" as const,
+        iter: 1,
+        started_at: "2026-07-01T10:00:00.000Z",
+        completed_at: "2026-07-01T10:01:00.000Z",
+        failure_reason: null,
+        iterations: [],
+        delivery: { before: "aaa", after: "bbb" },
+      },
+    };
+    const { rerender } = renderPanel(makeRun());
+    rerender(
+      <PipelineInfoPanel
+        run={makeRun({
+          nodes: delivered,
+          review_comments: [replied, { ...replied, id: "rc-002", status: "resolved", resolved_by: "xuTJYLUa" }],
+        })}
+        pipeline={null}
+        libraryPipelines={[]}
+        onLibraryChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    // One open comment with an unread reply; the agent-resolved one does not count.
+    // The count replaces the "tip moved" dot.
+    expect(screen.getByTestId("diff-tab-unread")).toHaveTextContent("1");
+    expect(screen.queryByTestId("diff-tab-dot")).toBeNull();
+    // The Review page (another tab) marked it seen → storage event → badge gone, dot back.
+    localStorage.setItem("pdo.review.seen.run-abc1234567", JSON.stringify({ "rc-001": 1, "rc-002": 1 }));
+    fireEvent(window, new StorageEvent("storage", { key: "pdo.review.seen.run-abc1234567" }));
+    expect(screen.queryByTestId("diff-tab-unread")).toBeNull();
+    expect(screen.getByTestId("diff-tab-dot")).toBeInTheDocument();
+  });
+
   it("dots the Diff tab when a node delivers while another tab is shown, and clears it on open", () => {
     const { rerender } = renderPanel(makeRun());
     expect(screen.queryByTestId("diff-tab-dot")).toBeNull();

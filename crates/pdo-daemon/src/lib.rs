@@ -245,6 +245,43 @@ pub enum Commands {
         #[command(subcommand)]
         action: PageAction,
     },
+    /// Read and answer the review comments a human left on this Run's diff
+    /// (#751, ADR-0067 §4). Run from a node or manager session: the Run id comes
+    /// from `PDO_RUN_ID` (`--run` overrides it) and the author from the session
+    /// (`manager`, or the node id).
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReviewAction {
+    /// List the Run's review comments as JSON, each with its thread of replies.
+    List {
+        /// `open` (default), `resolved` or `all`.
+        #[arg(long, default_value = "open")]
+        state: String,
+        /// The Run to read; defaults to the session's `PDO_RUN_ID`.
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Reply to one comment (`rc-001`, …). `--resolved` proposes a resolution —
+    /// or resolves directly when the instance setting `review_agent_can_resolve`
+    /// is on. The human can always reopen.
+    Reply {
+        /// The comment id, as shown by `pdo review list` and in the message you received.
+        id: String,
+        /// Your answer (markdown). `--body` is accepted as an alias.
+        #[arg(long, visible_alias = "body")]
+        text: String,
+        /// You consider the comment addressed.
+        #[arg(long)]
+        resolved: bool,
+        /// The Run the comment belongs to; defaults to the session's `PDO_RUN_ID`.
+        #[arg(long)]
+        run: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1315,6 +1352,79 @@ pub fn run_run_create(action: RunAction) -> Result<()> {
             println!("Run {run_id} created — child of run {parent_run} (node {parent_node}).")
         }
         None => println!("Run {run_id} created (root run)."),
+    }
+    Ok(())
+}
+
+/// One-shot `pdo review list` / `pdo review reply` (#751): the thin CLI client of
+/// the review endpoints. Blocking `reqwest`, no tokio runtime (see `main.rs`);
+/// plain `Result` → `0`/`1` exit mapping. Identity travels in the session headers
+/// — the daemon deduces the author (`manager` for the manager session, else the
+/// node id); `--run` only changes which Run is addressed, never who speaks.
+pub fn run_review(action: ReviewAction) -> Result<()> {
+    let url = cli_daemon_url();
+    let client = reqwest::blocking::Client::new();
+    let session = session_env_claim();
+    let with_identity = |request: reqwest::blocking::RequestBuilder| {
+        let mut request = request.header("X-PDO-Actor", "cli");
+        if let Some((run_id, node_id)) = &session {
+            request = request
+                .header(SESSION_RUN_HEADER, run_id)
+                .header(SESSION_NODE_HEADER, node_id);
+        }
+        request
+    };
+    let run_of = |flag: Option<String>| -> Result<String> {
+        match flag {
+            Some(r) if !r.trim().is_empty() => Ok(r.trim().to_string()),
+            _ => cli_run_id().context(
+                "no Run: pass `--run <run-id>` or run this from a PDO node/manager session",
+            ),
+        }
+    };
+
+    match action {
+        ReviewAction::List { state, run } => {
+            let run_id = run_of(run)?;
+            if review_comments::StateFilter::parse(&state).is_none() {
+                anyhow::bail!("--state must be `open`, `resolved` or `all`, got {state:?}");
+            }
+            let response = with_identity(client.get(format!(
+                "{url}/runs/{run_id}/review/comments?state={}",
+                state.trim()
+            )))
+            .send()
+            .context("failed to reach daemon")?;
+            let body: serde_json::Value = page_cli_response(response, "list review comments")?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        ReviewAction::Reply {
+            id,
+            text,
+            resolved,
+            run,
+        } => {
+            let run_id = run_of(run)?;
+            if text.trim().is_empty() {
+                anyhow::bail!("--text must not be empty");
+            }
+            let response = with_identity(client.post(format!(
+                "{url}/runs/{run_id}/review/comments/{}/reply",
+                id.trim()
+            )))
+            .json(&serde_json::json!({ "text": text, "resolved": resolved }))
+            .send()
+            .context("failed to reach daemon")?;
+            let body: serde_json::Value = page_cli_response(response, "reply to review comment")?;
+            let author = body["author"].as_str().unwrap_or("agent");
+            let outcome = body["outcome"].as_str().unwrap_or("replied");
+            let what = match outcome {
+                "resolved" => "resolved (the instance lets agents resolve; the human can reopen)",
+                "proposed" => "resolution proposed — the human decides with Resolve / Reopen",
+                _ => "reply recorded",
+            };
+            println!("{id}: {what} · author {author} · run {run_id}");
+        }
     }
     Ok(())
 }
@@ -4474,6 +4584,18 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/runs/{run_id}/file", get(run_file_at_ref))
         .route("/runs/{run_id}/refs", get(run_refs))
         .route("/runs/{run_id}/review/comments", get(list_review_comments))
+        .route(
+            "/runs/{run_id}/review/comments/{comment_id}/reply",
+            post(reply_review_comment),
+        )
+        .route(
+            "/runs/{run_id}/review/comments/{comment_id}/resolve",
+            post(resolve_review_comment),
+        )
+        .route(
+            "/runs/{run_id}/review/comments/{comment_id}/reopen",
+            post(reopen_review_comment),
+        )
         .route(
             "/runs/{run_id}/review/comments/send",
             post(send_review_comments),
@@ -10167,6 +10289,19 @@ async fn build_settings_view(state: &AppState) -> Result<serde_json::Value, sqlx
     };
 
     // #697: the version-check switch, same `0`/`1` stored discipline.
+    // #751: `review_agent_can_resolve`, against the reply endpoint's resolver.
+    let racr_stored = cfg.review_agent_can_resolve.map(|v| v != 0);
+    let racr_env = review_comments::env_review_agent_can_resolve();
+    let racr_effective =
+        review_comments::review_agent_can_resolve_with(cfg.review_agent_can_resolve);
+    let racr_source = if racr_stored.is_some() {
+        "stored"
+    } else if racr_env.is_some() {
+        "env"
+    } else {
+        "default"
+    };
+
     let uc_stored = cfg.update_check.map(|v| v != 0);
     let uc_env = update_check::env_update_check();
     let uc_effective = update_check::update_check_with(cfg.update_check);
@@ -10401,6 +10536,15 @@ async fn build_settings_view(state: &AppState) -> Result<serde_json::Value, sqlx
             uc_stored,
             uc_env,
             update_check::UPDATE_CHECK_DEFAULT,
+        ),
+        // #751: may an agent's `pdo review reply --resolved` resolve the comment
+        // directly? Default OFF: the human resolves, the agent proposes (ADR-0067 §4).
+        "review_agent_can_resolve": settings_field_bool(
+            racr_effective,
+            racr_source,
+            racr_stored,
+            racr_env,
+            review_comments::REVIEW_AGENT_CAN_RESOLVE_DEFAULT,
         ),
         // Manager on demand: off by default — a Run starts managerless and the
         // Manager tab's Start button (or the Settings toggle for future Runs)
@@ -13770,18 +13914,340 @@ async fn run_refs(
     Json(run_refs::collect(&run_id, &run_state, &events, &sha_of)).into_response()
 }
 
-/// `GET /runs/<id>/review/comments` (#750): the Run's **sent** review comments as
-/// projected from the event log — the same list `GET /runs/<id>` carries under
-/// `review_comments`, exposed on its own for the CLI (#751) and the tests.
+#[derive(Deserialize)]
+struct ListReviewCommentsQuery {
+    /// `open` (default for the CLI) | `resolved` | `all` (default here: the UI
+    /// wants everything, resolved ones collapse client-side).
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// `GET /runs/<id>/review/comments[?state=open|resolved|all]` (#750, #751): the
+/// Run's **sent** review comments as projected from the event log — the same
+/// list `GET /runs/<id>` carries under `review_comments`, with each comment's
+/// thread (`replies`), exposed on its own for `pdo review list` and the tests.
+/// Also answers `review_agent_can_resolve` so a CLI can say what `--resolved`
+/// will do.
 async fn list_review_comments(
     State(state): State<Arc<AppState>>,
     AxumPath(run_id): AxumPath<String>,
+    Query(q): Query<ListReviewCommentsQuery>,
+) -> Response {
+    let filter = match q.state.as_deref() {
+        None => review_comments::StateFilter::All,
+        Some(raw) => match review_comments::StateFilter::parse(raw) {
+            Some(f) => f,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("state must be `open`, `resolved` or `all`, got {raw:?}")
+                    })),
+                )
+                    .into_response();
+            }
+        },
+    };
+    let (_, run_state) = match load_projected(&state, &run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    let comments: Vec<&review_comments::ReviewComment> = run_state
+        .review_comments
+        .iter()
+        .filter(|c| filter.keeps(c))
+        .collect();
+    let can_resolve = review_agent_can_resolve(&state).await;
+    Json(serde_json::json!({
+        "comments": comments,
+        "agent_can_resolve": can_resolve,
+    }))
+    .into_response()
+}
+
+/// The instance's `review_agent_can_resolve`, read FRESH at the edge (never
+/// cached at boot) through `stored → env → default(false)` — the same chokepoint
+/// discipline as `default_auto_name`.
+async fn review_agent_can_resolve(state: &AppState) -> bool {
+    let stored = instance_config::get(&state.db)
+        .await
+        .ok()
+        .and_then(|c| c.review_agent_can_resolve);
+    review_comments::review_agent_can_resolve_with(stored)
+}
+
+#[derive(Deserialize)]
+struct ReplyReviewCommentRequest {
+    text: String,
+    /// The agent considers the comment addressed: a **proposal** unless the
+    /// instance setting lets agents resolve directly.
+    #[serde(default)]
+    resolved: bool,
+    /// Fallback author when the call carries no session headers (the CLI
+    /// always sends them from a node or manager session).
+    #[serde(default)]
+    author: Option<String>,
+}
+
+/// Find a sent comment by id, or answer the 404 the three verbs share.
+fn find_review_comment<'a>(
+    run_state: &'a event_log::RunState,
+    comment_id: &str,
+) -> Result<&'a review_comments::ReviewComment, Box<Response>> {
+    run_state
+        .review_comments
+        .iter()
+        .find(|c| c.id == comment_id)
+        .ok_or_else(|| {
+            Box::new(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("unknown review comment {comment_id:?} on this Run (ids read rc-001, rc-002, …; `pdo review list` shows them)")
+                    })),
+                )
+                    .into_response(),
+            )
+        })
+}
+
+/// Append one review event (`replied` / `resolved` / `reopened`) and hand back the
+/// freshly projected comment. Every append broadcasts, so the Review page sees
+/// the reply inline without polling.
+async fn append_review_event(
+    state: &AppState,
+    run_id: &str,
+    kind: event_log::EventKind,
+    payload: serde_json::Value,
+) -> Result<(), Box<Response>> {
+    let event = event_log::Event {
+        id: None,
+        run_id: run_id.to_string(),
+        ts: event_log::now_iso(),
+        kind,
+        node_id: None,
+        iter: None,
+        payload: Some(payload),
+    };
+    append_event(state, &event).await.map_err(|e| {
+        error!("run {run_id}: failed to append {:?}: {e}", event.kind);
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("failed to record the event: {e}") })),
+            )
+                .into_response(),
+        )
+    })
+}
+
+/// The projected comment after the appends, for the response body.
+async fn projected_review_comment(
+    state: &AppState,
+    run_id: &str,
+    comment_id: &str,
+) -> Result<review_comments::ReviewComment, Box<Response>> {
+    let (_, run_state) = load_projected(state, run_id).await?;
+    find_review_comment(&run_state, comment_id).cloned()
+}
+
+/// `POST /runs/<id>/review/comments/<rc-id>/reply` (#751, ADR-0067 §4; CONTEXT.md
+/// « Réponse de review »): an agent — the manager or any node of the Run — answers
+/// a sent comment. The author is **deduced from the session** that calls (the
+/// `X-PDO-Session-*` headers `pdo review reply` forwards: the manager session
+/// reads `manager`, a node session its node id). `resolved: true` is a
+/// **proposal** by default (`review_comment_replied` with
+/// `proposes_resolution`); under `review_agent_can_resolve` it also appends
+/// `review_comment_resolved` by the same author — the human keeps Reopen either
+/// way. Replies are welcome on a resolved comment too (the thread stays open to
+/// clarification); `resolved` is then just a reply.
+async fn reply_review_comment(
+    State(state): State<Arc<AppState>>,
+    AxumPath((run_id, comment_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    Json(req): Json<ReplyReviewCommentRequest>,
 ) -> Response {
     let (_, run_state) = match load_projected(&state, &run_id).await {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
-    Json(serde_json::json!({ "comments": run_state.review_comments })).into_response()
+    let text = req.text.trim_end().to_string();
+    if text.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "empty reply text" })),
+        )
+            .into_response();
+    }
+    let comment = match find_review_comment(&run_state, &comment_id) {
+        Ok(c) => c.clone(),
+        Err(resp) => return *resp,
+    };
+    let session_node = session_claim_from_headers(&headers).map(|c| c.node_id);
+    let author = review_comments::reply_author(session_node.as_deref(), req.author.as_deref());
+
+    let can_resolve = req.resolved && review_agent_can_resolve(&state).await;
+    let outcome =
+        if !req.resolved || comment.status == review_comments::ReviewCommentStatus::Resolved {
+            review_comments::ReplyOutcome::Replied
+        } else if can_resolve {
+            review_comments::ReplyOutcome::Resolved
+        } else {
+            review_comments::ReplyOutcome::Proposed
+        };
+
+    if let Err(resp) = append_review_event(
+        &state,
+        &run_id,
+        event_log::EventKind::ReviewCommentReplied,
+        serde_json::json!({
+            "id": comment_id,
+            "author": author,
+            "text": text,
+            "proposes_resolution": req.resolved && comment.status != review_comments::ReviewCommentStatus::Resolved,
+        }),
+    )
+    .await
+    {
+        return *resp;
+    }
+    if outcome == review_comments::ReplyOutcome::Resolved {
+        if let Err(resp) = append_review_event(
+            &state,
+            &run_id,
+            event_log::EventKind::ReviewCommentResolved,
+            serde_json::json!({ "id": comment_id, "by": author }),
+        )
+        .await
+        {
+            return *resp;
+        }
+    }
+    info!(
+        "run {run_id}: {author} replied to review comment {comment_id} ({})",
+        match outcome {
+            review_comments::ReplyOutcome::Replied => "reply",
+            review_comments::ReplyOutcome::Proposed => "resolution proposed",
+            review_comments::ReplyOutcome::Resolved => "resolved directly, setting on",
+        }
+    );
+    match projected_review_comment(&state, &run_id, &comment_id).await {
+        Ok(c) => Json(serde_json::json!({
+            "comment": c,
+            "author": author,
+            "outcome": outcome,
+        }))
+        .into_response(),
+        Err(resp) => *resp,
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ReviewDecisionRequest {
+    /// Who decides — `user` (the Review page, default) or an agent id for a
+    /// scripted resolution.
+    #[serde(default)]
+    by: Option<String>,
+}
+
+/// `POST /runs/<id>/review/comments/<rc-id>/resolve` (#751): the human resolves
+/// (accepts a proposal, or closes a comment outright). Already resolved ⇒ `200`
+/// with `changed: false` and no event — two browsers clicking is not an error.
+async fn resolve_review_comment(
+    State(state): State<Arc<AppState>>,
+    AxumPath((run_id, comment_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    body: Option<Json<ReviewDecisionRequest>>,
+) -> Response {
+    review_decision(
+        &state,
+        &run_id,
+        &comment_id,
+        &headers,
+        body.map(|Json(b)| b).unwrap_or_default(),
+        review_comments::ReviewCommentStatus::Resolved,
+    )
+    .await
+}
+
+/// `POST /runs/<id>/review/comments/<rc-id>/reopen` (#751): back to `sent`. On a
+/// resolved comment it reopens it (whoever resolved it — the human keeps the
+/// last word, ADR-0067 §4); on a `sent` comment carrying a pending proposal it
+/// **declines** the proposal and keeps the comment open for the agent — the
+/// same event, `review_comment_reopened`. A `sent` comment with nothing pending
+/// ⇒ `200`, `changed: false`.
+async fn reopen_review_comment(
+    State(state): State<Arc<AppState>>,
+    AxumPath((run_id, comment_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    body: Option<Json<ReviewDecisionRequest>>,
+) -> Response {
+    review_decision(
+        &state,
+        &run_id,
+        &comment_id,
+        &headers,
+        body.map(|Json(b)| b).unwrap_or_default(),
+        review_comments::ReviewCommentStatus::Sent,
+    )
+    .await
+}
+
+async fn review_decision(
+    state: &AppState,
+    run_id: &str,
+    comment_id: &str,
+    headers: &HeaderMap,
+    req: ReviewDecisionRequest,
+    target: review_comments::ReviewCommentStatus,
+) -> Response {
+    let (_, run_state) = match load_projected(state, run_id).await {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    let comment = match find_review_comment(&run_state, comment_id) {
+        Ok(c) => c.clone(),
+        Err(resp) => return *resp,
+    };
+    // A session (agent) decides as itself; the Review page decides as `user`.
+    let by = match session_claim_from_headers(headers).map(|c| c.node_id) {
+        Some(node) => review_comments::reply_author(Some(&node), None),
+        None => req
+            .by
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "user".to_string()),
+    };
+    let (kind, changes) = match target {
+        review_comments::ReviewCommentStatus::Resolved => (
+            event_log::EventKind::ReviewCommentResolved,
+            comment.status != review_comments::ReviewCommentStatus::Resolved,
+        ),
+        review_comments::ReviewCommentStatus::Sent => (
+            event_log::EventKind::ReviewCommentReopened,
+            comment.status == review_comments::ReviewCommentStatus::Resolved
+                || comment.proposal_pending,
+        ),
+    };
+    if !changes {
+        return Json(serde_json::json!({ "comment": comment, "changed": false })).into_response();
+    }
+    let kind_str = format!("{kind:?}");
+    if let Err(resp) = append_review_event(
+        state,
+        run_id,
+        kind,
+        serde_json::json!({ "id": comment_id, "by": by }),
+    )
+    .await
+    {
+        return *resp;
+    }
+    info!("run {run_id}: review comment {comment_id} {kind_str} by {by}");
+    match projected_review_comment(state, run_id, comment_id).await {
+        Ok(c) => Json(serde_json::json!({ "comment": c, "changed": true })).into_response(),
+        Err(resp) => *resp,
+    }
 }
 
 /// One draft the browser hands over for sending (#750). `from`/`to` are stable
@@ -13938,6 +14404,12 @@ async fn send_review_comments(
             batch_id: Some(batch_id.clone()),
             status: review_comments::ReviewCommentStatus::Sent,
             replies: Vec::new(),
+            proposal_pending: false,
+            resolved_by: None,
+            resolved_at: None,
+            reopened_by: None,
+            reopened_at: None,
+            proposal_declined: false,
         });
     }
 
@@ -24911,6 +25383,318 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["comments"], serde_json::json!([]));
+    }
+
+    /// Append one `review_comment_sent` straight into the log — the send endpoint
+    /// needs git + tmux, which these handler tests do not.
+    async fn seed_sent_comment(state: &Arc<AppState>, run_id: &str, id: &str) {
+        let c = review_comments::ReviewComment {
+            id: id.into(),
+            path: "lib.rs".into(),
+            side: review_comments::ReviewSide::New,
+            line: 4,
+            from_ref: "fork".into(),
+            to_ref: "tip".into(),
+            from_sha: None,
+            to_sha: None,
+            text: "Name this `fn delta`.".into(),
+            excerpt: String::new(),
+            author: "user".into(),
+            sent_at: event_log::now_iso(),
+            batch_id: Some("b1".into()),
+            status: review_comments::ReviewCommentStatus::Sent,
+            replies: vec![],
+            proposal_pending: false,
+            resolved_by: None,
+            resolved_at: None,
+            reopened_by: None,
+            reopened_at: None,
+            proposal_declined: false,
+        };
+        append_event(
+            state,
+            &event_log::Event {
+                id: None,
+                run_id: run_id.into(),
+                ts: event_log::now_iso(),
+                kind: event_log::EventKind::ReviewCommentSent,
+                node_id: None,
+                iter: None,
+                payload: Some(serde_json::to_value(&c).unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn review_post(
+        app: &axum::Router,
+        uri: &str,
+        body: serde_json::Value,
+        session: Option<(&str, &str)>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some((run, node)) = session {
+            req = req
+                .header(SESSION_RUN_HEADER, run)
+                .header(SESSION_NODE_HEADER, node);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    async fn review_get(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn review_reply_from_the_manager_session_is_a_proposal_the_human_resolves_or_reopens() {
+        // #751, ADR-0067 §4 — setting off (default): `resolved: true` PROPOSES.
+        // Author from the session headers (`__manager__` ⇒ `manager`); every
+        // step is an event; resolve / reopen are the human's verbs; a reopen on a
+        // proposal declines it and keeps the comment open.
+        let state = test_state().await;
+        let run_id = "review-reply-proposal";
+        seed_completed_run(&state, run_id).await;
+        seed_sent_comment(&state, run_id, "rc-001").await;
+        let app = build_router(state.clone());
+        let base = format!("/runs/{run_id}/review/comments");
+
+        // Plain reply from a node session: author = node id, still open.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reply"),
+            serde_json::json!({ "text": "Looking into it." }),
+            Some((run_id, "xuTJYLUa")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"], "replied");
+        assert_eq!(body["author"], "xuTJYLUa");
+        assert_eq!(body["comment"]["replies"][0]["author"], "xuTJYLUa");
+        assert!(body["comment"].get("proposal_pending").is_none());
+
+        // `--resolved` from the manager session: a proposal.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reply"),
+            serde_json::json!({ "text": "Renamed in 7f2b0d1.", "resolved": true }),
+            Some((run_id, review_comments::MANAGER_NODE_ID)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"], "proposed");
+        assert_eq!(body["author"], "manager");
+        assert_eq!(body["comment"]["status"], "sent");
+        assert_eq!(body["comment"]["proposal_pending"], true);
+        assert_eq!(body["comment"]["replies"][1]["proposes_resolution"], true);
+
+        // The list filters by state and says what `--resolved` does.
+        let (status, list) = review_get(&app, &format!("{base}?state=open")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(list["agent_can_resolve"], false);
+        let (_, none) = review_get(&app, &format!("{base}?state=resolved")).await;
+        assert_eq!(none["comments"], serde_json::json!([]));
+        let (status, _) = review_get(&app, &format!("{base}?state=nope")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Reopen on the proposal = declined, still open, recorded.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reopen"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["changed"], true);
+        assert_eq!(body["comment"]["status"], "sent");
+        assert!(body["comment"].get("proposal_pending").is_none());
+        assert_eq!(body["comment"]["proposal_declined"], true);
+        assert_eq!(body["comment"]["reopened_by"], "user");
+        // Nothing pending any more: a second reopen changes nothing, no event.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reopen"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["changed"], false);
+
+        // Resolve by the human, then reopen: back to sent, resolver cleared.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/resolve"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["comment"]["status"], "resolved");
+        assert_eq!(body["comment"]["resolved_by"], "user");
+        let (_, again) = review_post(
+            &app,
+            &format!("{base}/rc-001/resolve"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(again["changed"], false, "already resolved is not an error");
+        let (_, list) = review_get(&app, &format!("{base}?state=resolved")).await;
+        assert_eq!(list["comments"].as_array().unwrap().len(), 1);
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reopen"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["comment"]["status"], "sent");
+        assert!(body["comment"].get("resolved_by").is_none());
+        assert!(body["comment"].get("proposal_declined").is_none());
+
+        // Refusals: unknown id, empty text.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-999/reply"),
+            serde_json::json!({ "text": "x" }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("rc-999"));
+        let (status, _) = review_post(
+            &app,
+            &format!("{base}/rc-001/reply"),
+            serde_json::json!({ "text": "   " }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Everything above is in the log, immutable and timestamped.
+        let events = load_events(&state.db, run_id).await.unwrap();
+        let kinds: Vec<String> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    event_log::EventKind::ReviewCommentReplied
+                        | event_log::EventKind::ReviewCommentResolved
+                        | event_log::EventKind::ReviewCommentReopened
+                )
+            })
+            .map(|e| format!("{:?}", e.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "ReviewCommentReplied",
+                "ReviewCommentReplied",
+                "ReviewCommentReopened",
+                "ReviewCommentResolved",
+                "ReviewCommentReopened"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_reply_resolves_directly_when_the_instance_setting_is_on() {
+        // #751 AC: setting on ⇒ `--resolved` resolves on the spot, by the agent; the
+        // human keeps Reopen. Without session headers the declared author is taken.
+        let state = test_state().await;
+        instance_config::update(
+            &state.db,
+            instance_config::UpdateInstanceConfig {
+                review_agent_can_resolve: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let run_id = "review-reply-direct";
+        seed_completed_run(&state, run_id).await;
+        seed_sent_comment(&state, run_id, "rc-001").await;
+        let app = build_router(state.clone());
+        let base = format!("/runs/{run_id}/review/comments");
+
+        let (_, list) = review_get(&app, &base).await;
+        assert_eq!(list["agent_can_resolve"], true);
+
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reply"),
+            serde_json::json!({ "text": "Fixed.", "resolved": true, "author": "fixer" }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"], "resolved");
+        assert_eq!(body["author"], "fixer");
+        assert_eq!(body["comment"]["status"], "resolved");
+        assert_eq!(body["comment"]["resolved_by"], "fixer");
+        assert!(body["comment"].get("proposal_pending").is_none());
+
+        // A reply on a resolved comment is just a reply, `resolved` or not.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reply"),
+            serde_json::json!({ "text": "Also added a test.", "resolved": true }),
+            Some((run_id, review_comments::MANAGER_NODE_ID)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"], "replied");
+        assert_eq!(body["comment"]["replies"].as_array().unwrap().len(), 2);
+        assert!(body["comment"]["replies"][1]
+            .get("proposes_resolution")
+            .is_none());
+
+        // The human keeps the last word.
+        let (status, body) = review_post(
+            &app,
+            &format!("{base}/rc-001/reopen"),
+            serde_json::json!({}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["comment"]["status"], "sent");
+        assert_eq!(body["comment"]["reopened_by"], "user");
     }
 
     #[tokio::test]
@@ -39787,6 +40571,48 @@ edges:
                 .unwrap()
                 .default_auto_name,
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn put_settings_round_trips_the_review_agent_can_resolve_flag_both_ways() {
+        // #751: default OFF (the human resolves); both directions of a save are a
+        // stored decision — unticking persists a `0` that beats
+        // `PDO_REVIEW_AGENT_CAN_RESOLVE=1`.
+        let state = test_state().await;
+        let fresh = get_settings_json(&state).await;
+        assert_eq!(fresh["review_agent_can_resolve"]["default"], false);
+        assert!(fresh["review_agent_can_resolve"]["stored"].is_null());
+        if fresh["review_agent_can_resolve"]["env"].is_null() {
+            assert_eq!(fresh["review_agent_can_resolve"]["effective"], false);
+            assert_eq!(fresh["review_agent_can_resolve"]["source"], "default");
+        }
+
+        let (status, view) =
+            put_settings_resp(&state, r#"{"review_agent_can_resolve": true}"#).await;
+        assert_eq!(status, StatusCode::OK, "got {view}");
+        assert_eq!(view["review_agent_can_resolve"]["effective"], true);
+        assert_eq!(view["review_agent_can_resolve"]["source"], "stored");
+        assert_eq!(
+            instance_config::get(&state.db)
+                .await
+                .unwrap()
+                .review_agent_can_resolve,
+            Some(1)
+        );
+
+        let (status, view) =
+            put_settings_resp(&state, r#"{"review_agent_can_resolve": false}"#).await;
+        assert_eq!(status, StatusCode::OK, "got {view}");
+        assert_eq!(view["review_agent_can_resolve"]["effective"], false);
+        assert_eq!(view["review_agent_can_resolve"]["source"], "stored");
+        assert_eq!(
+            instance_config::get(&state.db)
+                .await
+                .unwrap()
+                .review_agent_can_resolve,
+            Some(0),
+            "off must persist a stored 0, never NULL"
         );
     }
 
